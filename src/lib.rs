@@ -5,11 +5,65 @@ rust_i18n::i18n!("locales", fallback = "en");
 // rust-i18n expands locale data in a proc macro, which Cargo does not always
 // discover as an input when only a YAML file changes. Keep explicit source
 // dependencies so the watcher rebuilds the translation registry itself.
+//
+// Adding a locale means editing this list as well; `locale_sources_cover_every_
+// locale_file` below fails the build's tests when the two drift apart.
 const _LOCALE_SOURCES: [&str; 3] = [
     include_str!("../locales/app.yml"),
     include_str!("../locales/zh-CN.yml"),
     include_str!("../locales/ja.yml"),
 ];
+
+#[cfg(test)]
+mod locale_source_tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// `_LOCALE_SOURCES` is a hand-maintained list whose only job is to make
+    /// Cargo watch each YAML file, so a locale added to `locales/` but not to
+    /// that list parses fine, is embedded by the proc macro, and is *still*
+    /// invisible to the watcher — a stale translation registry with no error.
+    ///
+    /// Reading `src/lib.rs` back is the only way to check the list itself:
+    /// `available_locales!()` is populated from the directory by the macro and
+    /// would agree with a broken list. The file is compile-time metadata, so
+    /// parsing it for `include_str!` paths keeps the check honest.
+    #[test]
+    fn locale_sources_list_every_locale_file() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let declared = std::fs::read_to_string(manifest.join("src/lib.rs"))
+            .expect("read src/lib.rs")
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("include_str!(\"../locales/"))
+            .filter_map(|rest| rest.strip_suffix("\"),"))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+
+        let on_disk = std::fs::read_dir(manifest.join("locales"))
+            .expect("read the locales directory")
+            .map(|entry| entry.expect("read a locales entry").file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".yml"))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            declared, on_disk,
+            "locales/*.yml and _LOCALE_SOURCES in src/lib.rs must list the same files; \
+             add the missing include_str! line so the watcher rebuilds that locale"
+        );
+        assert_eq!(declared.len(), super::_LOCALE_SOURCES.len());
+    }
+
+    /// A renamed or deleted locale directory would otherwise only show up as a
+    /// confusing compile error in an unrelated build.
+    #[test]
+    fn embedded_locale_sources_are_readable() {
+        assert_eq!(super::_LOCALE_SOURCES.len(), 3);
+        for source in super::_LOCALE_SOURCES {
+            assert!(!source.trim().is_empty(), "embedded locale source is empty");
+        }
+    }
+}
 
 macro_rules! tr {
     ($key:expr) => {

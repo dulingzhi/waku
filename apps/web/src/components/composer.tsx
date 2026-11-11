@@ -914,7 +914,7 @@ export function Composer({
             icon="folder"
             items={[
               ...projectChoices
-                .filter((item) => item.name !== 'No project')
+                .filter((item) => !isProjectlessProject(item))
                 .map((item) => ({
                   id: item.id,
                   label: item.name,

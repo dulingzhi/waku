@@ -74,8 +74,9 @@ export function Sidebar({
     new Date(nowSeconds * 1_000),
     t('sidebar.unknown_project'),
     t('project.no_project_name'),
+    t,
   )
-  const rows = sidebarRows(groups, collapsed)
+  const rows = sidebarRows(groups, collapsed, t)
 
   useEffect(() => setLiveWidth(width), [width])
   useEffect(() => {

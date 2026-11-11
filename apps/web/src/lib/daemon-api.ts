@@ -30,6 +30,7 @@ import type {
   WorkspaceOperation,
   WorkspaceResult,
 } from '@waku/client'
+import { isProjectlessProject } from './project-presentation'
 
 export type TaskState = Extract<ResponsePayload, { type: 'taskState' }>
 export type DaemonDirectory = Extract<WorkspaceResult, { type: 'directory' }>
@@ -621,7 +622,7 @@ export function selectableProjects(projects: Project[], selected?: Project): Pro
   let hasProjectless = false
   return choices.filter((project, index) => {
     if (choices.findIndex((candidate) => candidate.id === project.id) !== index) return false
-    if (project.name !== 'No project') return true
+    if (!isProjectlessProject(project)) return true
     if (hasProjectless) return false
     hasProjectless = true
     return true

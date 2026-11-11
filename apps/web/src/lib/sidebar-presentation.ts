@@ -21,6 +21,17 @@ export type SidebarListRow =
   | { kind: 'session'; key: string; item: SessionItem }
   | { kind: 'spacer'; key: string }
 
+const GROUP_LABEL_KEYS: Record<DateGroup, string> = {
+  today: 'sidebar.today',
+  yesterday: 'sidebar.yesterday',
+  week: 'sidebar.this_week',
+  month: 'sidebar.this_month',
+  year: 'sidebar.this_year',
+  more: 'sidebar.more',
+}
+
+// English fallbacks keep these builders usable without a translator, which the
+// pure-function tests rely on.
 const GROUP_LABELS: Record<DateGroup, string> = {
   today: 'Today',
   yesterday: 'Yesterday',
@@ -30,18 +41,23 @@ const GROUP_LABELS: Record<DateGroup, string> = {
   more: 'More',
 }
 
+function groupLabel(id: DateGroup, t?: Translator): string {
+  return t ? t(GROUP_LABEL_KEYS[id]) : GROUP_LABELS[id]
+}
+
 const GROUP_ORDER: DateGroup[] = ['today', 'yesterday', 'week', 'month', 'year', 'more']
 
 export function sidebarRows(
   groups: SessionGroup[],
   collapsed: ReadonlySet<DateGroup>,
+  t?: Translator,
 ): SidebarListRow[] {
   const rows: SidebarListRow[] = [{ kind: 'search', key: 'search' }]
   const visibleGroups = groups.length
     ? groups
     // Desktop keeps the first header so Add Project never disappears merely
     // because there is no task history yet.
-    : [{ id: 'today' as const, label: GROUP_LABELS.today, sessions: [] }]
+    : [{ id: 'today' as const, label: groupLabel('today', t), sessions: [] }]
   visibleGroups.forEach((group, index) => {
     const isCollapsed = collapsed.has(group.id)
     rows.push({
@@ -69,6 +85,7 @@ export function groupSessions(
   now = new Date(),
   unknownProject = 'Unknown project',
   projectlessName = 'No project',
+  t?: Translator,
 ): SessionGroup[] {
   const projectNames = new Map(projects.map((project) => [
     project.id,
@@ -90,7 +107,7 @@ export function groupSessions(
   }
   return GROUP_ORDER
     .filter((id) => grouped.has(id))
-    .map((id) => ({ id, label: GROUP_LABELS[id], sessions: grouped.get(id)! }))
+    .map((id) => ({ id, label: groupLabel(id, t), sessions: grouped.get(id)! }))
 }
 
 export function sessionHasStarted(session: AgentSession): boolean {

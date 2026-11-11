@@ -1626,7 +1626,7 @@ function NewTaskCanvas({
                 caret={false}
                 items={[
                   ...selectableProjects(projects, project)
-                    .filter((item) => item.name !== 'No project')
+                    .filter((item) => !isProjectlessProject(item))
                     .map((item) => ({
                       id: item.id,
                       label: item.name,

@@ -61,6 +61,21 @@ describe('desktop sidebar presentation', () => {
     expect(sessionTimeLabel(resumed, 1_000)).toBeNull()
   })
 
+  test('localizes group headers and leaves them English without a translator', () => {
+    const now = new Date(2026, 7, 12, 12)
+    const sessions = [session({ last_reply_at: atLocalNoon(2026, 7, 12) })]
+    expect(groupSessions([], sessions, now).map((group) => group.label)).toEqual(['Today'])
+    expect(
+      groupSessions([], sessions, now, 'Unknown project', 'No project', fakeTranslator)
+        .map((group) => group.label),
+    ).toEqual(['今日'])
+    // The empty-history header is generated, not read from a group, so it has
+    // to be localized on the same path.
+    expect(sidebarRows([], new Set(), fakeTranslator)[1]).toMatchObject({
+      group: { label: '今日' },
+    })
+  })
+
   test('presents the projectless sentinel with the localized desktop name', () => {
     const project: Project = {
       id: 'project',
@@ -81,6 +96,10 @@ describe('desktop sidebar presentation', () => {
 
 function atLocalNoon(year: number, month: number, day: number): number {
   return Math.floor(new Date(year, month, day, 12).getTime() / 1_000)
+}
+
+function fakeTranslator(key: string): string {
+  return { 'sidebar.today': '今日' }[key] ?? key
 }
 
 function session(patch: Partial<AgentSession>): AgentSession {
