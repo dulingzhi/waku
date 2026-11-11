@@ -20,6 +20,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AppSymbol } from './app-symbol';
 import { Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n, translateNow } from '@/lib/i18n-context';
 import {
   browseDaemonDirectory,
   createProject,
@@ -29,6 +30,7 @@ import {
   type TaskState,
 } from '@/lib/daemon-api';
 import { useDaemon } from '@/lib/daemon-context';
+import { PROJECTLESS_NAME } from '@/lib/project-presentation';
 
 export function RemoteProjectPicker({
   visible,
@@ -40,6 +42,7 @@ export function RemoteProjectPicker({
   onSelect: (project: Project) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const daemon = useDaemon();
   const queryClient = useQueryClient();
   const profileId = daemon.activeProfile?.id ?? 'disconnected';
@@ -50,7 +53,7 @@ export function RemoteProjectPicker({
   const directory = useQuery({
     queryKey: daemonKeys.directory(profileId, path),
     queryFn: () => {
-      if (!daemon.client) throw new Error('Waku daemon is disconnected');
+      if (!daemon.client) throw new Error(translateNow('errors.daemon_disconnected'));
       return browseDaemonDirectory(daemon.client, path);
     },
     enabled: visible && daemon.phase === 'connected' && Boolean(daemon.client),
@@ -78,7 +81,7 @@ export function RemoteProjectPicker({
   }
 
   async function saveProject(project: Project) {
-    if (!daemon.client) throw new Error('Waku daemon is disconnected');
+    if (!daemon.client) throw new Error(translateNow('errors.daemon_disconnected'));
     const saved = await persistProject(daemon.client, project);
     queryClient.setQueryData<TaskState>(daemonKeys.taskState(profileId), saved.taskState);
     onSelect(saved.project);
@@ -107,7 +110,7 @@ export function RemoteProjectPicker({
     setError(null);
     try {
       const cwd = await createProjectlessWorkspace(daemon.client);
-      await saveProject({ ...createProject(cwd, Crypto.randomUUID()), name: 'No project' });
+      await saveProject({ ...createProject(cwd, Crypto.randomUUID()), name: PROJECTLESS_NAME });
     } catch (cause) {
       setError(errorMessage(cause));
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -137,7 +140,7 @@ export function RemoteProjectPicker({
             </Pressable>
             <Text style={[styles.title, { color: theme.text }]}>Choose Project</Text>
             <Pressable
-              accessibilityLabel="Add current folder"
+              accessibilityLabel={t('project_picker.add_current')}
               accessibilityRole="button"
               disabled={!directory.data?.path || Boolean(submitting)}
               hitSlop={8}
@@ -157,12 +160,12 @@ export function RemoteProjectPicker({
                 tintColor={theme.textTertiary}
               />
               <TextInput
-                accessibilityLabel="Path on daemon host"
+                accessibilityLabel={t('project_picker.path_label')}
                 autoCapitalize="none"
                 autoCorrect={false}
                 onChangeText={setPathDraft}
                 onSubmitEditing={() => visit(pathDraft.trim() || null)}
-                placeholder="Path on daemon host"
+                placeholder={t('project_picker.path_label')}
                 placeholderTextColor={theme.textTertiary}
                 returnKeyType="go"
                 selectTextOnFocus
@@ -171,7 +174,7 @@ export function RemoteProjectPicker({
                 value={pathDraft}
               />
               <Pressable
-                accessibilityLabel="Open entered path"
+                accessibilityLabel={t('project_picker.open_path')}
                 accessibilityRole="button"
                 disabled={!pathDraft.trim() || Boolean(submitting)}
                 hitSlop={8}
@@ -198,7 +201,7 @@ export function RemoteProjectPicker({
               <LocationButton
                 disabled={!directory.data?.filesystem_root}
                 icon={{ ios: 'internaldrive', android: 'hard_drive', web: 'hard_drive' }}
-                label="File system"
+                label={t('project_picker.file_system')}
                 onPress={() => visit(directory.data?.filesystem_root ?? null)}
               />
             </View>
@@ -227,7 +230,7 @@ export function RemoteProjectPicker({
 
           <View style={[styles.footer, { borderTopColor: theme.separator }]}>
             <Pressable
-              accessibilityHint="Creates a private workspace on the daemon host"
+              accessibilityHint={t('project_picker.private_workspace')}
               accessibilityRole="button"
               disabled={Boolean(submitting)}
               onPress={() => void addEmptyWorkspace()}
@@ -236,7 +239,7 @@ export function RemoteProjectPicker({
               <Text style={[styles.emptyWorkspaceText, { color: theme.textSecondary }]}>New empty workspace</Text>
             </Pressable>
             <Text numberOfLines={1} style={[styles.footerPath, { color: theme.textTertiary }]}>
-              {directory.data?.path ?? 'Loading folder…'}
+              {directory.data?.path ?? t('project_picker.loading')}
             </Text>
           </View>
         </SafeAreaView>
@@ -257,6 +260,7 @@ function LocationButton({
   onPress: () => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   return (
     <Pressable
       accessibilityRole="button"
@@ -274,9 +278,10 @@ function LocationButton({
 
 function FolderRow({ entry, onOpen }: { entry: WorkingTreeEntry; onOpen: () => void }) {
   const theme = useTheme();
+  const { t } = useI18n();
   return (
     <Pressable
-      accessibilityHint="Opens this folder"
+      accessibilityHint={t('project_picker.open_folder')}
       accessibilityRole="button"
       onPress={onOpen}
       style={({ pressed }) => [
@@ -302,6 +307,7 @@ function FolderRow({ entry, onOpen }: { entry: WorkingTreeEntry; onOpen: () => v
 
 function DirectoryEmpty({ loading }: { loading: boolean }) {
   const theme = useTheme();
+  const { t } = useI18n();
   return (
     <View style={styles.empty}>
       {loading ? <ActivityIndicator color={theme.textTertiary} /> : (
@@ -314,7 +320,7 @@ function DirectoryEmpty({ loading }: { loading: boolean }) {
         </View>
       )}
       <Text style={[styles.emptyTitle, { color: theme.textSecondary }]}>
-        {loading ? 'Loading folder…' : 'No folders here'}
+        {loading ? t('project_picker.loading') : t('project_picker.empty')}
       </Text>
     </View>
   );

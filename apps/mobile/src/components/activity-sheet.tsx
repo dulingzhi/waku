@@ -40,6 +40,7 @@ import { liquidGlass } from './glass-surface';
 import { MonoFont, NativeTint, Radius, Spacing } from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import { findActivityBlock, type ActivityGroupTarget } from '@/lib/session-presentation';
 import { applyAlpha } from '@/md/color';
 import { RowVeil, splitRunAtSpans } from '@/md/veil';
@@ -89,6 +90,7 @@ export function ActivitySheetHost({
   children: ReactNode;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const reducedMotion = useReducedMotion();
   const sheet = useRef<BottomSheetMethods>(null);
   const [target, setTarget] = useState<ActivityGroupTarget | null>(null);
@@ -162,7 +164,7 @@ export function ActivitySheetHost({
                   {selected ? (
                     <>
                       <Pressable
-                        accessibilityHint="Shows the whole group"
+                        accessibilityHint={t('transcript.show_group')}
                         accessibilityRole="button"
                         onPress={() => slideTo(0)}
                         style={({ pressed }) => [styles.backRow, { opacity: pressed ? 0.55 : 1 }]}>
@@ -212,13 +214,14 @@ function GroupList({
  * action label, subject, edit totals, trailing state. */
 function GroupRow({ activity, onPress }: { activity: ActivityItem; onPress: () => void }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const hasDetail = activityHasDetail(activity);
   const preview = activity.reasoning ? '' : activityPreview(activity);
   const detail = activityRowDetail(activity) || preview;
   const stats = activityFileChangeStats(activity);
   return (
     <Pressable
-      accessibilityHint={hasDetail ? 'Opens the details' : undefined}
+      accessibilityHint={hasDetail ? t('transcript.open_details') : undefined}
       accessibilityRole={hasDetail ? 'button' : 'text'}
       disabled={!hasDetail}
       onPress={onPress}
@@ -256,6 +259,7 @@ function GroupRow({ activity, onPress }: { activity: ActivityItem; onPress: () =
  * a dot while live. */
 function RowState({ activity, hasDetail }: { activity: ActivityItem; hasDetail: boolean }) {
   const theme = useTheme();
+  const { t } = useI18n();
   if (hasDetail) {
     return (
       <AppSymbol
@@ -276,7 +280,7 @@ function RowState({ activity, hasDetail }: { activity: ActivityItem; hasDetail: 
     );
   }
   if (activity.complete) return null;
-  return <View accessibilityLabel="Running" style={[styles.runningDot, { backgroundColor: NativeTint }]} />;
+  return <View accessibilityLabel={t('connection.running')} style={[styles.runningDot, { backgroundColor: NativeTint }]} />;
 }
 
 /** Page two: everything the desktop shows in an expanded card. */

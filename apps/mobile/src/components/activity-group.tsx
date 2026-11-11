@@ -7,6 +7,7 @@ import { Pressable, StyleSheet, Text } from 'react-native';
 import { useActivitySheet } from './activity-sheet';
 import { AppSymbol } from './app-symbol';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 
 /**
  * The transcript's view of a tool group is the desktop's collapsed summary
@@ -26,12 +27,13 @@ export const ActivityGroup = memo(function ActivityGroup({
   live: boolean;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const openSheet = useActivitySheet();
   const activities = activitiesForBlock(block);
   if (!activities.length) return null;
   return (
     <Pressable
-      accessibilityHint="Opens the activity list"
+      accessibilityHint={t('transcript.open_activity')}
       accessibilityRole="button"
       hitSlop={{ top: 6, bottom: 6 }}
       onPress={() => openSheet({
@@ -41,7 +43,7 @@ export const ActivityGroup = memo(function ActivityGroup({
       })}
       style={({ pressed }) => [styles.header, { opacity: pressed ? 0.6 : 1 }]}>
       <Text numberOfLines={1} style={[styles.title, { color: theme.textSecondary }]}>
-        {activityHeaderTitle(activities, live)}
+        {activityHeaderTitle(activities, live, t)}
       </Text>
       <AppSymbol
         name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}

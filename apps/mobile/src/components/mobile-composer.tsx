@@ -38,6 +38,7 @@ import { useProviderModels, useTaskState } from '@/hooks/use-daemon-data';
 import { useComposerPicker } from '@/hooks/use-composer-picker';
 import { useSyncedComposerDraft } from '@/hooks/use-synced-composer-draft';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import {
   importLocalAttachment,
   localFileName,
@@ -185,6 +186,7 @@ export function MobileComposer({
   onSubmitted?: () => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const daemon = useDaemon();
   const runtime = useRuntime();
@@ -277,7 +279,7 @@ export function MobileComposer({
     const operation = attachmentImportTail.current.catch(() => {}).then(async () => {
       const client = daemon.client;
       if (!client || daemon.phase !== 'connected') {
-        throw new Error('Waku daemon is disconnected');
+        throw new Error(t('errors.daemon_disconnected'));
       }
       for (const file of files) {
         const imported = await importLocalAttachment(client, file);
@@ -322,13 +324,13 @@ export function MobileComposer({
       if (source === 'camera') {
         const permission = await ImagePicker.requestCameraPermissionsAsync();
         if (!permission.granted) {
-          throw new Error('Camera access is required to take a photo');
+          throw new Error(t('composer_ui.camera_permission_denied'));
         }
         const result = await ImagePicker.launchCameraAsync({
           mediaTypes: ['images'],
           quality: 1,
         });
-        if (!result.canceled) await addLocalFiles(imagePickerFiles(result.assets, 'Photo'));
+        if (!result.canceled) await addLocalFiles(imagePickerFiles(result.assets, t('composer_ui.photo')));
         return;
       }
 
@@ -338,7 +340,7 @@ export function MobileComposer({
         quality: 1,
         selectionLimit: 0,
       });
-      if (!result.canceled) await addLocalFiles(imagePickerFiles(result.assets, 'Photo'));
+      if (!result.canceled) await addLocalFiles(imagePickerFiles(result.assets, t('composer_ui.photo')));
     } catch (cause) {
       setLocalError(cause instanceof Error ? cause.message : String(cause));
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -407,10 +409,10 @@ export function MobileComposer({
         ? 'Connecting…'
         : 'Reconnect to message this agent'
     : canSteer
-      ? 'Message the working agent…'
+      ? t('composer_ui.message_working')
       : busy
-        ? 'Queue a follow-up…'
-        : 'Message agent';
+        ? t('composer_ui.queue_follow_up')
+        : t('composer_ui.message_agent');
 
   return (
     <View style={[styles.shell, { paddingBottom: Math.max(insets.bottom, 10) }]}>
@@ -528,13 +530,13 @@ export function MobileComposer({
             {activeModel && modelHasConfigurableTraits(activeModel) && (
               <ComposerIconButton
                 icon={{ ios: 'speedometer', android: 'speed', web: 'speed' }}
-                label="Model options"
+                label={t('composer_ui.model_options')}
                 onPress={() => setTraitsSheetOpen(true)}
               />
             )}
             {busy && (
               <Pressable
-                accessibilityLabel="Stop agent"
+                accessibilityLabel={t('composer_ui.stop_agent')}
                 accessibilityRole="button"
                 hitSlop={4}
                 onPress={() => void stop()}
@@ -557,7 +559,7 @@ export function MobileComposer({
                 || importingAttachments
                 || disconnected
               }
-              label={canSteer ? 'Send to working agent' : busy ? 'Queue message' : 'Send message'}
+              label={canSteer ? t('composer_ui.send_to_working') : busy ? t('composer_ui.queue_message') : t('composer_ui.send_message')}
               onPress={() => void submit()}
               queueing={busy && !canSteer}
               steering={canSteer}

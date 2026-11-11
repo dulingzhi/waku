@@ -21,6 +21,7 @@ import {
 } from "@/components/screen-header";
 import { TaskDrawerHost, useTaskDrawer } from "@/components/task-drawer";
 import { DaemonProvider, useDaemon } from "@/lib/daemon-context";
+import { I18nProvider, useI18n } from "@/lib/i18n-context";
 import { RuntimeProvider } from "@/lib/runtime-context";
 
 /** Deep links and state restores keep the new-task home as the stack anchor. */
@@ -76,16 +77,18 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={styles.root}>
       <QueryClientProvider client={queryClient}>
-        <DaemonProvider>
-          <RuntimeProvider>
-            <ThemeProvider value={navigationTheme}>
-              <TaskDrawerHost>
-                <AppNavigator />
-              </TaskDrawerHost>
-              <StatusBar style="auto" />
-            </ThemeProvider>
-          </RuntimeProvider>
-        </DaemonProvider>
+        <I18nProvider>
+          <DaemonProvider>
+            <RuntimeProvider>
+              <ThemeProvider value={navigationTheme}>
+                <TaskDrawerHost>
+                  <AppNavigator />
+                </TaskDrawerHost>
+                <StatusBar style="auto" />
+              </ThemeProvider>
+            </RuntimeProvider>
+          </DaemonProvider>
+        </I18nProvider>
       </QueryClientProvider>
     </GestureHandlerRootView>
   );
@@ -94,14 +97,15 @@ export default function RootLayout() {
 function AppNavigator() {
   const { phase, profiles } = useDaemon();
   const { openTaskDrawer } = useTaskDrawer();
+  const { t } = useI18n();
   const colorScheme = useColorScheme();
   const theme = Colors[colorScheme === "dark" ? "dark" : "light"];
   const daemonRoutesAvailable = phase === "booting" || profiles.length > 0;
   const drawerAction = useMemo<HeaderActionSpec>(() => ({
     icon: { ios: "sidebar.left", android: "menu", web: "menu" },
-    label: "Task history",
+    label: t("task_history.title"),
     onPress: openTaskDrawer,
-  }), [openTaskDrawer]);
+  }), [openTaskDrawer, t]);
   const drawerHeader = useMemo<NativeStackNavigationOptions>(() => ({
     ...floatingHeader,
     gestureEnabled: false,
@@ -130,7 +134,7 @@ function AppNavigator() {
       <Stack.Screen
         name="index"
         options={daemonRoutesAvailable
-          ? { ...drawerHeader, title: "New Task" }
+          ? { ...drawerHeader, title: t("menu.new_task") }
           : { headerShown: false, title: "Waku" }}
       />
       {/* Removing the final saved daemon also removes every daemon-backed
@@ -138,11 +142,11 @@ function AppNavigator() {
       <Stack.Protected guard={daemonRoutesAvailable}>
         <Stack.Screen
           name="daemons"
-          options={{ headerLargeTitle: true, title: "Daemons" }}
+          options={{ headerLargeTitle: true, title: t("daemon.title") }}
         />
         <Stack.Screen
           name="new-task"
-          options={{ ...drawerHeader, title: "New Task" }}
+          options={{ ...drawerHeader, title: t("menu.new_task") }}
         />
         <Stack.Screen
           name="session/[id]"
@@ -150,7 +154,7 @@ function AppNavigator() {
             ...drawerHeader,
             animation: "none",
             headerTitleAlign: "left",
-            title: "Task",
+            title: t("task.title"),
           }}
         />
       </Stack.Protected>
@@ -158,7 +162,7 @@ function AppNavigator() {
         name="daemon-editor"
         options={{
           presentation: "pageSheet",
-          title: "Add Daemon",
+          title: t("daemon.add_title"),
         }}
       />
     </Stack>

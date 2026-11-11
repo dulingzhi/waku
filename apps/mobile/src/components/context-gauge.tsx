@@ -2,14 +2,16 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import { Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 
 /** Compact context-window meter for the composer chip row. */
 export function ContextGauge({ percent }: { percent: number }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const color = percent >= 95 ? theme.danger : percent >= 80 ? theme.warning : theme.textTertiary;
   return (
     <View
-      accessibilityLabel={`Context ${percent} percent full`}
+      accessibilityLabel={t('context.percent_full', { percent })}
       style={styles.container}>
       <View style={[styles.track, { backgroundColor: theme.overlayStrong }]}>
         <View

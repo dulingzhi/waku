@@ -13,14 +13,17 @@ import {
 import { AppSymbol } from '@/components/app-symbol';
 import { ConnectionBanner } from '@/components/connection-banner';
 import { DaemonList } from '@/components/daemon-list';
+import { LanguagePickerRow } from '@/components/language-picker';
 import { NativeTint } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
 import type { DaemonProfile } from '@/lib/daemon-profile';
+import { useI18n } from '@/lib/i18n-context';
 
 export default function DaemonsScreen() {
   const theme = useTheme();
   const daemon = useDaemon();
+  const { t } = useI18n();
   const [selectingId, setSelectingId] = useState<string | null>(null);
 
   async function select(profile: DaemonProfile) {
@@ -46,7 +49,7 @@ export default function DaemonsScreen() {
         options={{
           headerRight: () => (
             <Pressable
-              accessibilityLabel="Add daemon"
+              accessibilityLabel={t('daemon.add_button')}
               accessibilityRole="button"
               hitSlop={10}
               onPress={() => router.push('/daemon-editor')}>
@@ -59,9 +62,9 @@ export default function DaemonsScreen() {
           ),
           unstable_headerRightItems: () => [{
             type: 'button',
-            accessibilityLabel: 'Add daemon',
+            accessibilityLabel: t('daemon.add_button'),
             icon: { type: 'sfSymbol', name: 'plus' },
-            label: 'Add daemon',
+            label: t('daemon.add_button'),
             onPress: () => router.push('/daemon-editor'),
           }],
         }}
@@ -73,7 +76,9 @@ export default function DaemonsScreen() {
         <ConnectionBanner />
         {daemon.profiles.length ? (
           <>
-            <Text style={[styles.sectionTitle, { color: theme.textTertiary }]}>Daemons</Text>
+            <Text style={[styles.sectionTitle, { color: theme.textTertiary }]}>
+              {t('daemon.list_title')}
+            </Text>
             <DaemonList
               selectingId={selectingId}
               onEdit={(profile) => {
@@ -88,19 +93,24 @@ export default function DaemonsScreen() {
                 tintColor={theme.textTertiary}
               />
               <Text style={[styles.footerText, { color: theme.textTertiary }]}>
-                Only the selected daemon stays connected. Credentials are protected by the device
-                keychain and never pass through a Waku service.
+                {t('daemon.list_footer')}
               </Text>
             </View>
           </>
         ) : (
           <View style={styles.empty}>
-            <Text style={[styles.emptyTitle, { color: theme.text }]}>No saved daemons</Text>
+            <Text style={[styles.emptyTitle, { color: theme.text }]}>
+              {t('daemon.none_saved')}
+            </Text>
             <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>
-              Add the address and token shown in Waku Desktop’s Daemon settings.
+              {t('daemon.none_saved_body')}
             </Text>
           </View>
         )}
+        <Text style={[styles.sectionTitle, { color: theme.textTertiary }]}>
+          {t('settings.general')}
+        </Text>
+        <LanguagePickerRow />
       </ScrollView>
     </View>
   );

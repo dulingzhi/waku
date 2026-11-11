@@ -2,6 +2,10 @@ import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 
 import { useTheme } from '@/hooks/use-theme';
 import type { ConnectionPhase } from '@/lib/daemon-context';
+import { useI18n } from '@/lib/i18n-context';
+
+/** Translation is optional so non-component callers keep the English default. */
+export type Translator = (key: string, params?: Record<string, string | number>) => string;
 
 export function ConnectionStatus({
   phase,
@@ -11,7 +15,8 @@ export function ConnectionStatus({
   compact?: boolean;
 }) {
   const theme = useTheme();
-  const presentation = statusPresentation(phase, theme);
+  const { t } = useI18n();
+  const presentation = statusPresentation(phase, theme, t);
   return (
     <View style={styles.container}>
       {presentation.busy ? (
@@ -27,27 +32,28 @@ export function ConnectionStatus({
 }
 
 /** The phase as a short word, for labels and accessibility. */
-export function connectionPhaseLabel(phase: ConnectionPhase): string {
+export function connectionPhaseLabel(phase: ConnectionPhase, t?: Translator): string {
   switch (phase) {
     case 'connected':
-      return 'Connected';
+      return t ? t('daemon.phase_connected') : 'Connected';
     case 'connecting':
     case 'booting':
-      return 'Connecting';
+      return t ? t('daemon.phase_connecting') : 'Connecting';
     case 'reconnecting':
-      return 'Reconnecting';
+      return t ? t('connection.reconnecting') : 'Reconnecting';
     case 'error':
-      return 'Needs attention';
+      return t ? t('connection.needs_attention') : 'Needs attention';
     default:
-      return 'Offline';
+      return t ? t('connection.offline') : 'Offline';
   }
 }
 
 function statusPresentation(
   phase: ConnectionPhase,
   theme: ReturnType<typeof useTheme>,
+  t: Translator,
 ): { label: string; color: string; busy: boolean } {
-  const label = connectionPhaseLabel(phase);
+  const label = connectionPhaseLabel(phase, t);
   switch (phase) {
     case 'connected':
       return { label, color: theme.success, busy: false };

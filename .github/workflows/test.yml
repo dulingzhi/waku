@@ -90,3 +90,13 @@ jobs:
         run: |
           bun run --filter @waku/i18n check
           bun run --filter @waku/i18n test
+
+      # Mobile reads a generated catalog because Metro has no `?raw` import.
+      # `i18n:check` fails if the checked-in module drifted from the YAML, and
+      # the mobile suite asserts every key the app references exists.
+      - name: Check mobile i18n catalog and client
+        if: runner.os == 'Linux'
+        run: |
+          bun run i18n:check
+          bun run --filter @waku/mobile typecheck
+          bun run --filter @waku/mobile test

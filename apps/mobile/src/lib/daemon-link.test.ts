@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { PROTOCOL_VERSION, WakuClient, type WebSocketLike } from "@waku/client";
 
 import { DaemonLink, type DaemonLinkOptions } from "./daemon-link";
+import { MOBILE_CATALOG } from "./i18n-catalog";
+
+/** Pin English: connection copy otherwise follows the machine language. */
+const englishCopy = (key: string) => MOBILE_CATALOG.en[key] ?? key;
 
 class FakeSocket implements WebSocketLike {
   readyState = 0;
@@ -118,6 +122,7 @@ function fixture(options: Partial<DaemonLinkOptions> = {}) {
     random: () => 0.5,
     setTimer: clock.set,
     clearTimer: clock.clear,
+    translate: englishCopy,
     ...options,
   });
   const phases: string[] = [];

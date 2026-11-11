@@ -38,6 +38,8 @@ import {
   type ProviderModelSelection,
 } from '@/components/session-option-sheets';
 import { Sheet, SheetRow } from '@/components/sheet';
+import { PROJECTLESS_NAME } from '@/lib/project-presentation';
+import { useI18n } from '@/lib/i18n-context';
 import { Radius, Spacing } from '@/constants/theme';
 import { useAllProviderModels, useProviderCatalog, useTaskState } from '@/hooks/use-daemon-data';
 import { useComposerPicker } from '@/hooks/use-composer-picker';
@@ -69,6 +71,7 @@ type SheetKind =
 
 export default function NewTaskScreen() {
   const theme = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const headerInset = useScreenHeaderInset();
   const daemon = useDaemon();
@@ -96,7 +99,7 @@ export default function NewTaskScreen() {
   const modelCatalog = useAllProviderModels(installedProviders);
   const projects = taskState.data?.projects ?? [];
   const selectedProject = projects.find((item) => item.id === projectId);
-  const projectless = selectedProject?.name === 'No project';
+  const projectless = selectedProject?.name === PROJECTLESS_NAME;
   const branches = useQuery({
     queryKey: daemonKeys.branches(
       daemon.activeProfile?.id ?? 'disconnected',
@@ -340,7 +343,7 @@ export default function NewTaskScreen() {
     contextKey: selectedProject?.id ?? 'new-task',
     onServiceTier: setServiceTier,
     onGoal: async (operation) => {
-      if (!selectedProject || !provider) throw new Error('Choose a project and model first');
+      if (!selectedProject || !provider) throw new Error(t('new_task.choose_first'));
       const session = await runtime.createTask(selectedProject.id, provider, isolated && !projectless, '', {
         model, reasoningEffort, serviceTier, contextWindow, runtimeMode, baseBranch,
       });
@@ -353,12 +356,12 @@ export default function NewTaskScreen() {
     },
   });
   const modelLabel = !provider
-    ? catalog.isPending ? 'Checking agents…' : 'No agents installed'
+    ? catalog.isPending ? t('new_task.checking_agents') : t('new_task.no_agents')
     : activeModel?.name ?? model ?? providerLabel(provider);
   const branchLabel = baseBranch
     ?? branches.data?.default_branch
     ?? branches.data?.current
-    ?? 'Default branch';
+    ?? t('new_task.default_branch');
   const startDisabled = !selectedProject || !provider || !prompt.trim() || submitting;
 
   return (
@@ -378,14 +381,14 @@ export default function NewTaskScreen() {
             || daemon.phase === 'booting'
             || daemon.phase === 'reconnecting'
           }
-          value={daemon.activeProfile?.name ?? 'Add a daemon'}
+          value={daemon.activeProfile?.name ?? t('daemon.add_button')}
           onPress={() => setOpenSheet('daemon')}
         />
         <SelectorRow
           icon={{ ios: 'folder', android: 'folder', web: 'folder' }}
           label="Project"
           loading={taskState.isPending}
-          value={selectedProject?.name ?? 'Choose a project'}
+          value={selectedProject?.name ?? t('new_task.choose_project')}
           onPress={() => setOpenSheet('project')}
         />
         <SelectorRow
@@ -398,13 +401,13 @@ export default function NewTaskScreen() {
         <SelectorRow
           icon={{ ios: 'laptopcomputer', android: 'laptop_mac', web: 'laptop_mac' }}
           label="Workspace"
-          value={isolated ? 'Isolated worktree' : 'Work locally'}
+          value={isolated ? t('new_task.isolated_worktree') : t('new_task.work_locally')}
           onPress={() => setOpenSheet('workspace')}
         />
         {isolated && (
           <SelectorRow
             icon={{ ios: 'arrow.triangle.branch', android: 'account_tree', web: 'account_tree' }}
-            label="Base branch"
+            label={t('new_task.base_branch')}
             loading={branches.isPending && branches.fetchStatus !== 'idle'}
             value={branchLabel}
             onPress={() => setOpenSheet('branch')}
@@ -422,7 +425,7 @@ export default function NewTaskScreen() {
         )}
         <ComposerCard
           {...contextPicker.inputProps}
-          accessibilityLabel="Task prompt"
+          accessibilityLabel={t('new_task.prompt_placeholder')}
           autoFocus
           editable={!submitting}
           left={(
@@ -443,14 +446,14 @@ export default function NewTaskScreen() {
               {activeModel && modelHasConfigurableTraits(activeModel) && (
                 <ComposerIconButton
                   icon={{ ios: 'speedometer', android: 'speed', web: 'speed' }}
-                  label="Model options"
+                  label={t('composer_ui.model_options')}
                   onPress={() => setOpenSheet('traits')}
                 />
               )}
               <SendButton
                 busy={submitting}
                 disabled={startDisabled}
-                label="Start task"
+                label={t('new_task.start')}
                 onPress={() => void start()}
               />
             </>
@@ -475,8 +478,8 @@ export default function NewTaskScreen() {
           />
         ))}
         <SheetRow
-          description="Pick any folder on the daemon host, or create an empty workspace"
-          label="Browse daemon host…"
+          description={t('new_task.browse_daemon_hint')}
+          label={t('new_task.browse_daemon')}
           leading={(
             <AppSymbol
               name={{ ios: 'externaldrive', android: 'hard_drive', web: 'hard_drive' }}
@@ -512,21 +515,21 @@ export default function NewTaskScreen() {
 
       <Sheet onDismiss={() => setOpenSheet(null)} title="Workspace" visible={openSheet === 'workspace'}>
         <SheetRow
-          description="Run in the project checkout"
-          label="Work locally"
+          description={t('new_task.work_locally_hint')}
+          label={t('new_task.work_locally')}
           onPress={pick(() => setIsolated(false))}
           selected={!isolated}
         />
         <SheetRow
-          description="A separate branch and folder that never touches the checkout"
+          description={t('new_task.isolated_hint')}
           disabled={projectless}
-          label="Isolated worktree"
+          label={t('new_task.isolated_worktree')}
           onPress={pick(() => setIsolated(true))}
           selected={isolated}
         />
       </Sheet>
 
-      <Sheet onDismiss={() => setOpenSheet(null)} title="Base branch" visible={openSheet === 'branch'}>
+      <Sheet onDismiss={() => setOpenSheet(null)} title={t('new_task.base_branch')} visible={openSheet === 'branch'}>
         {branches.isPending ? (
           <View style={styles.sheetLoading}>
             <ActivityIndicator color={theme.textTertiary} />
@@ -542,7 +545,7 @@ export default function NewTaskScreen() {
         ) : (
           branches.data.branches.map((branch) => (
             <SheetRow
-              description={branch.name === branches.data?.current ? 'Current branch' : undefined}
+              description={branch.name === branches.data?.current ? t('new_task.current_branch') : undefined}
               key={branch.name}
               label={branch.name}
               onPress={pick(() => setBaseBranch(branch.name))}

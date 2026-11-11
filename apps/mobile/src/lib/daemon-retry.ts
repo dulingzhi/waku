@@ -1,5 +1,22 @@
 import { WakuConnectionError } from '@waku/client';
 
+/** Optional translator: without one the English defaults stay in error copy. */
+export type Translator = (key: string) => string;
+
+const englishFallback: Translator = (key) => DEFAULT_COPY[key] ?? key;
+
+/** English copy, used when no translator is supplied (tests, early startup). */
+const DEFAULT_COPY: Record<string, string> = {
+  'errors.daemon_rejected_token':
+    'The daemon rejected this token. Edit the connection and paste the current token from Waku’s Daemon settings.',
+  'errors.daemon_version_mismatch':
+    'This daemon runs a different Waku version than the app. Update Waku on the host, or update this app.',
+  'errors.not_a_daemon':
+    'Something other than a Waku daemon answered at this address. Check the address and port.',
+  'errors.daemon_timeout': 'The daemon didn’t answer in time.',
+  'errors.daemon_closed': 'The daemon connection closed.',
+};
+
 /** First wait after a failed attempt; every later wait doubles. */
 export const RECONNECT_BASE_DELAY_MS = 1_000;
 /** Longest wait between attempts once the backoff has grown. */
@@ -33,30 +50,35 @@ export interface ConnectionFailure {
 /** Turns a failed connect (or a dropped connection) into user-facing copy and
  * a retry decision. Only the client's own failures are retryable: storage
  * faults, missing tokens, and unknown errors need a person. */
-export function describeConnectionFailure(cause: unknown, fallback: string): ConnectionFailure {
+export function describeConnectionFailure(
+  cause: unknown,
+  fallback: string,
+  translate?: Translator,
+): ConnectionFailure {
+  const t = translate ?? englishFallback;
   if (cause instanceof WakuConnectionError) {
     switch (cause.kind) {
       case 'rejected':
         return {
           message:
-            'The daemon rejected this token. Edit the connection and paste the current token from Waku’s Daemon settings.',
+            t('errors.daemon_rejected_token'),
           retryable: false,
         };
       case 'protocol':
         return {
           message:
-            'This daemon runs a different Waku version than the app. Update Waku on the host, or update this app.',
+            t('errors.daemon_version_mismatch'),
           retryable: false,
         };
       case 'handshake':
         return {
-          message: 'Something other than a Waku daemon answered at this address. Check the address and port.',
+          message: t('errors.not_a_daemon'),
           retryable: false,
         };
       case 'timeout':
-        return { message: 'The daemon didn’t answer in time.', retryable: true };
+        return { message: t('errors.daemon_timeout'), retryable: true };
       case 'closed':
-        return { message: 'The daemon connection closed.', retryable: true };
+        return { message: t('errors.daemon_closed'), retryable: true };
       case 'unreachable':
         return { message: cleanNativeReason(cause.message) ?? fallback, retryable: true };
       case 'aborted':
@@ -71,8 +93,12 @@ export function describeConnectionFailure(cause: unknown, fallback: string): Con
 
 /** Copy for a live connection that ended: the peer's close reason when it
  * gave one, otherwise a neutral line. */
-export function describeDisconnect(reason: string | null | undefined): string {
-  return (reason && cleanNativeReason(reason)) || 'The daemon connection closed.';
+export function describeDisconnect(
+  reason: string | null | undefined,
+  translate?: Translator,
+): string {
+  const t = translate ?? englishFallback;
+  return (reason && cleanNativeReason(reason)) || t('errors.daemon_closed');
 }
 
 /** Native socket reasons read like "The operation couldn’t be completed.

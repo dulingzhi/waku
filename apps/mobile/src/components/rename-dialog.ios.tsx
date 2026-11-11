@@ -11,12 +11,14 @@ import { useRef } from 'react';
 import { Alert, StyleSheet } from 'react-native';
 
 import type { RenameDialogProps } from '@/components/rename-dialog.types';
+import { useI18n } from '@/lib/i18n-context';
 
 export function RenameDialog(props: RenameDialogProps) {
   return props.visible ? <NativeRenameDialog {...props} /> : null;
 }
 
 function NativeRenameDialog({ initialValue, onDismiss, onSubmit }: RenameDialogProps) {
+  const { t } = useI18n();
   const title = useNativeState(initialValue);
   const saving = useRef(false);
 
@@ -28,7 +30,7 @@ function NativeRenameDialog({ initialValue, onDismiss, onSubmit }: RenameDialogP
       .catch((cause) => {
         onDismiss();
         Alert.alert(
-          'Couldn\u2019t rename task',
+          t('rename.failed'),
           cause instanceof Error ? cause.message : String(cause),
         );
       });
@@ -41,7 +43,7 @@ function NativeRenameDialog({ initialValue, onDismiss, onSubmit }: RenameDialogP
         onIsPresentedChange={(isPresented) => {
           if (!isPresented) onDismiss();
         }}
-        title="Rename task">
+        title={t('task.rename')}>
         <SwiftUIAlert.Trigger>
           <Text modifiers={[opacity(0)]}>{'\u200B'}</Text>
         </SwiftUIAlert.Trigger>
@@ -49,11 +51,11 @@ function NativeRenameDialog({ initialValue, onDismiss, onSubmit }: RenameDialogP
           <TextField
             autoFocus
             modifiers={[submitLabel('done'), onNativeSubmit(save)]}
-            placeholder="Task title"
+            placeholder={t('task.title_field')}
             text={title}
           />
-          <Button label="Cancel" role="cancel" />
-          <Button label="Rename" onPress={save} />
+          <Button label={t('common.cancel')} role="cancel" />
+          <Button label={t('common.rename')} onPress={save} />
         </SwiftUIAlert.Actions>
       </SwiftUIAlert>
     </Host>

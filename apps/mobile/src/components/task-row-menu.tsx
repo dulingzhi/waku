@@ -1,17 +1,9 @@
-import { MenuView, type MenuAction } from '@expo/ui/community/menu';
+import { MenuView } from '@expo/ui/community/menu';
+import { useMemo } from 'react';
 import { Pressable } from 'react-native';
 
 import type { TaskRowMenuProps } from '@/components/task-row-menu.types';
-
-const Actions: MenuAction[] = [
-  { id: 'rename', title: 'Rename task', image: 'pencil' },
-  {
-    id: 'delete',
-    title: 'Delete task',
-    image: 'trash',
-    attributes: { destructive: true },
-  },
-];
+import { useI18n } from '@/lib/i18n-context';
 
 export function TaskRowMenu({
   accessibilityLabel,
@@ -22,9 +14,20 @@ export function TaskRowMenu({
   selected,
   style,
 }: TaskRowMenuProps) {
+  const { t } = useI18n();
+  const actions = useMemo(() => [
+    { id: 'rename', title: t('task.rename'), image: 'pencil' as const },
+    {
+      id: 'delete',
+      title: t('task.delete'),
+      image: 'trash' as const,
+      attributes: { destructive: true as const },
+    },
+  ], [t]);
+
   return (
     <MenuView
-      actions={Actions}
+      actions={actions}
       onPressAction={({ nativeEvent }) => {
         if (nativeEvent.event === 'rename') onRename();
         else if (nativeEvent.event === 'delete') onDelete();
@@ -32,7 +35,7 @@ export function TaskRowMenu({
       shouldOpenOnLongPress
       style={style}>
       <Pressable
-        accessibilityHint="Long press for actions"
+        accessibilityHint={t('task.row_actions_hint')}
         accessibilityLabel={accessibilityLabel}
         accessibilityRole="button"
         accessibilityState={{ selected }}

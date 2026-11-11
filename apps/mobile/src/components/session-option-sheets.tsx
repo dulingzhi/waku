@@ -25,6 +25,7 @@ import { NativeTint, Radius } from '@/constants/theme';
 import { useAllProviderModels, useProviderModels } from '@/hooks/use-daemon-data';
 import { useModelSheetListHeight } from '@/hooks/use-model-sheet-list-height';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import {
   resolveModelTraitSelection,
   resolveServiceTier,
@@ -40,8 +41,9 @@ export interface ModelSelection {
 export function modelDisplayName(
   models: ProviderModel[] | undefined,
   model: string | null,
+  fallback = 'Default model',
 ): string {
-  if (!model) return 'Default model';
+  if (!model) return fallback;
   return models?.find((item) => item.id === model)?.name ?? model;
 }
 
@@ -60,6 +62,7 @@ export function ModelSheet({
   onApply: (selection: ModelSelection) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const listHeight = useModelSheetListHeight(visible);
   const probe = useProviderModels(provider);
   const [search, setSearch] = useState('');
@@ -117,8 +120,8 @@ export function ModelSheet({
           ListEmptyComponent={(
             <Text style={[styles.note, { color: theme.textTertiary }]}>
               {search.trim()
-                ? 'No models match your search.'
-                : 'This agent doesn’t expose a model list; it will use its own default.'}
+                ? t('models.no_match')
+                : t('models.no_model_list')}
             </Text>
           )}
         />
@@ -144,6 +147,7 @@ export function ModelTraitsSheet({
   onApply: (changes: Partial<ModelTraitSelection>) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const resolved = resolveModelTraitSelection(model, selection);
 
   function pick(changes: Partial<ModelTraitSelection>) {
@@ -212,6 +216,7 @@ function ServiceTierOptions({
   onApply: (tier: string) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   if (!model.service_tiers.length) return null;
   const selected = resolveServiceTier(model, serviceTier);
 
@@ -271,6 +276,7 @@ export function ModelPickerSheet({
   onApply: (selection: ProviderModelSelection) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const listHeight = useModelSheetListHeight(visible);
   const catalog = useAllProviderModels(visible ? providers : []);
   const [browsing, setBrowsing] = useState<ProviderKind | null>(provider);
@@ -355,7 +361,7 @@ export function ModelPickerSheet({
           </View>
           <View style={styles.page}>
             <Pressable
-              accessibilityHint="Shows all providers"
+              accessibilityHint={t('models.all_providers')}
               accessibilityLabel={browsing ? providerLabel(browsing) : 'Provider'}
               accessibilityRole="button"
               onPress={() => slideTo(0)}
@@ -394,8 +400,8 @@ export function ModelPickerSheet({
                 ListEmptyComponent={(
                   <Text style={[styles.note, { color: theme.textTertiary }]}>
                     {search.trim()
-                      ? 'No models match your search.'
-                      : 'This agent doesn’t expose a model list; it will use its own default.'}
+                      ? t('models.no_match')
+                      : t('models.no_model_list')}
                   </Text>
                 )}
               />
@@ -426,6 +432,7 @@ function ModelSearchField({
   onChangeText: (value: string) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   return (
     <View style={[styles.searchField, { backgroundColor: theme.overlayStrong }]}>
       <AppSymbol
@@ -434,10 +441,10 @@ function ModelSearchField({
         tintColor={theme.textTertiary}
       />
       <TextInput
-        accessibilityLabel="Search models"
+        accessibilityLabel={t('models.search')}
         autoCapitalize="none"
         autoCorrect={false}
-        placeholder="Search models"
+        placeholder={t('models.search')}
         placeholderTextColor={theme.textTertiary}
         selectionColor={NativeTint}
         style={[styles.searchInput, { color: theme.text }]}
@@ -446,7 +453,7 @@ function ModelSearchField({
       />
       {value.length > 0 && (
         <Pressable
-          accessibilityLabel="Clear search"
+          accessibilityLabel={t('models.clear_search')}
           accessibilityRole="button"
           hitSlop={8}
           onPress={() => onChangeText('')}
@@ -462,11 +469,11 @@ function ModelSearchField({
   );
 }
 
-const ACCESS_MODES: Array<{ id: RuntimeMode; description: string }> = [
-  { id: 'ask', description: 'Approve every command and file edit.' },
-  { id: 'autoAcceptEdits', description: 'Edits apply automatically; commands still ask.' },
-  { id: 'auto', description: 'Works autonomously inside the project.' },
-  { id: 'fullAccess', description: 'No approval prompts. The agent acts freely.' },
+const ACCESS_MODES: Array<{ id: RuntimeMode; descriptionKey: string }> = [
+  { id: 'ask', descriptionKey: 'composer_ui.approve_everything' },
+  { id: 'autoAcceptEdits', descriptionKey: 'mode.auto_accept_edits_description' },
+  { id: 'auto', descriptionKey: 'composer_ui.works_autonomously' },
+  { id: 'fullAccess', descriptionKey: 'composer_ui.no_approval_prompts' },
 ];
 
 /** Access-mode picker mirroring the desktop composer's access control. */
@@ -481,13 +488,14 @@ export function AccessSheet({
   mode: RuntimeMode;
   onApply: (mode: RuntimeMode) => void;
 }) {
+  const { t } = useI18n();
   return (
-    <Sheet onDismiss={onDismiss} title="Agent access" visible={visible}>
+    <Sheet onDismiss={onDismiss} title={t('composer_ui.agent_access')} visible={visible}>
       {ACCESS_MODES.map((item) => (
         <SheetRow
-          description={item.description}
+          description={t(item.descriptionKey)}
           key={item.id}
-          label={runtimeModeLabel(item.id)}
+          label={runtimeModeLabel(item.id, t)}
           onPress={() => {
             void Haptics.selectionAsync();
             onApply(item.id);

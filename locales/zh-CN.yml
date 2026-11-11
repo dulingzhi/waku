@@ -1067,3 +1067,259 @@ usage_error.curl_did_not_finish: curl 未能完成请求
 usage_error.curl_failed: "curl 失败：%{error}"
 usage_error.unknown_error: 未知错误
 usage_error.curl_no_status: curl 未返回 HTTP 状态行
+language_picker.title: 语言
+task_history.title: 任务历史
+task_history.search: 搜索任务
+task_history.empty: 暂无任务
+task_history.empty_search: 没有匹配的任务
+task_history.daemon_hint: 打开守护进程切换器
+daemon.add_button: 添加守护进程
+daemon.add_title: 添加守护进程
+daemon.edit_title: 编辑守护进程
+daemon.list_title: 守护进程
+daemon.none_saved: 没有已保存的守护进程
+daemon.none_saved_body: 添加 Waku 桌面端「设置」中的「守护进程」所显示的地址和令牌。
+daemon.list_footer: 只有选中的守护进程保持连接。凭据由设备钥匙串保护，不会经过任何 Waku 服务。
+daemon.name_label: 守护进程名称
+daemon.address_label: 守护进程 WebSocket 地址
+daemon.token_label: 守护进程令牌
+daemon.connect_another: 添加守护进程…
+daemon.connect_another_hint: 连接另一台主机
+daemon.saving: 正在保存…
+daemon.removing: 正在移除…
+daemon.remove_button: 移除守护进程
+daemon.remove_body: 这会从此设备移除已保存的地址和令牌。任务仍保留在守护进程主机上。
+daemon.back_to_list: 返回守护进程列表
+daemon.token_keep_hint: 留空以保留已保存的凭据。
+daemon.token_where_hint: 从 Waku 桌面端 → 设置 → 守护进程复制地址和令牌。
+daemon.invalid_address: 请输入有效的 ws:// 或 wss:// WebSocket 地址。
+daemon.plaintext_blocked: 公网明文连接已被阻止。请对此主机使用 wss://。
+daemon.plaintext_warning: 未加密连接。仅在你信任的局域网或 tailnet 中使用。
+daemon.encrypted_browser: 已加密连接。令牌保留在此浏览器中。
+daemon.encrypted_device: 已加密连接。令牌存储在此设备的钥匙串中。
+session_unavailable: 此任务在守护进程上已不存在
+session.project_gone: 此任务的项目在守护进程上已不可用
+session.goals_need_codex: 目标功能需要 Codex
+session.codex_not_installed: 守护进程主机上未安装 Codex
+session.codex_start_failed: 守护进程无法启动 Codex
+session.steer_queued: 智能体无法在中途接受该消息，已加入下一轮队列。
+task.history_button: 任务历史
+task.options: 任务选项
+task.rename: 重命名任务
+task.title_field: 任务标题
+task.delete: 删除任务
+task.delete_body: 这会从守护进程为所有设备删除该任务及其对话记录。
+task.copy_last_response: 复制最后一条回复
+task.reload_transcript: 重新加载对话记录
+task.delete_failed: 无法删除任务
+task.model_change_failed: 无法更改模型
+task.row_actions_hint: 长按以显示操作
+new_task.title: 新建任务
+new_task.start: 开始任务
+new_task.prompt_placeholder: 任务提示词
+new_task.choose_first: 请先选择项目和模型
+new_task.checking_agents: 正在检查智能体…
+new_task.no_agents: 未安装任何智能体
+new_task.choose_project: 选择项目
+new_task.default_branch: 默认分支
+new_task.base_branch: 基础分支
+new_task.current_branch: 当前分支
+new_task.isolated_worktree: 隔离工作树
+new_task.work_locally: 本地工作
+new_task.work_locally_hint: 在项目检出目录中运行
+new_task.isolated_hint: 使用单独的分支和文件夹，不会影响检出目录
+new_task.browse_daemon: 浏览守护进程主机…
+new_task.browse_daemon_hint: 选择守护进程主机上的任意文件夹，或创建空工作区
+composer_ui.message_agent: 向智能体发送消息
+composer_ui.queue_follow_up: 排队一条后续消息…
+composer_ui.message_working: 向工作中的智能体发送消息…
+composer_ui.reconnect_to_message: 重新连接以向此智能体发送消息
+composer_ui.reconnecting: 正在重新连接…
+composer_ui.connecting: 正在连接…
+composer_ui.stop_agent: 停止智能体
+composer_ui.queue_message: 排队消息
+composer_ui.send_message: 发送消息
+composer_ui.dismiss_error: 关闭错误
+composer_ui.remove_queued: 移除排队消息
+composer_ui.model_options: 模型选项
+composer_ui.camera_permission: 拍照需要相机权限
+composer_ui.custom_answer: 自定义回答
+composer_ui.custom_answer_placeholder: 输入其他回答…
+composer_ui.mention_files: 提及文件
+composer_ui.add_to_message: 添加到消息
+composer_ui.search_commands: 搜索命令
+composer_ui.search_project_files: 搜索项目文件
+composer_ui.search_commands_placeholder: 搜索命令…
+composer_ui.search_files_placeholder: 搜索项目文件…
+composer_ui.loading_commands: 正在加载命令…
+composer_ui.finding_files: 正在查找文件…
+composer_ui.no_matching_commands: 没有匹配的命令
+composer_ui.no_matching_files: 没有匹配的文件
+composer_ui.fast_mode_unavailable: 此模型不支持快速模式
+composer_ui.agent_access: 智能体权限
+composer_ui.approve_everything: 每次命令和文件编辑都需要批准。
+composer_ui.works_autonomously: 在项目内自主工作。
+composer_ui.no_approval_prompts: 不再弹出批准提示，智能体可自由操作。
+sessions.untitled: 未命名会话
+sessions.search: 搜索会话…
+sessions.search_provider: 搜索提供商会话
+sessions.usage_limit: 已达到用量上限
+sessions.budget: 已达到预算上限
+goal.objective: 目标内容
+goal.objective_placeholder: 希望智能体持续完成什么？
+goal.set: 设置目标
+goal.save: 保存目标
+goal.replace: 替换目标
+goal.pause: 暂停目标
+goal.resume: 恢复目标
+goal.clear: 清除目标
+models.default: 默认模型
+models.no_match: 没有匹配的模型。
+models.search: 搜索模型
+models.clear_search: 清除搜索
+models.all_providers: 显示所有提供商
+connection.something_wrong: 出了点问题。
+connection.trying_again: 正在重试…
+connection.retry_now: 立即重试
+connection.retry_hint: 重试守护进程连接
+connection.retry: 立即重试守护进程连接
+connection.edit: 编辑守护进程连接
+connection.offline: 离线
+connection.needs_attention: 需要处理
+connection.reconnecting: 正在重新连接…
+connection.connecting_daemon: 正在连接守护进程…
+connection.not_connected: 未连接
+connection.switch_hint: 切换到此守护进程
+transcript.waiting_for_you: 等待你的输入
+transcript.loading_earlier: 正在加载更早的消息
+transcript.empty: 还没有消息
+transcript.load_failed: 无法加载此任务
+transcript.copy_hint: 长按以复制
+transcript.expand_work: 展开智能体的工作过程
+transcript.collapse_work: 收起智能体的工作过程
+transcript.new_content: 下方有新内容
+transcript.scroll_to_latest: 滚动到最新
+transcript.open_details: 打开详细信息
+transcript.show_group: 显示整个分组
+transcript.open_activity: 打开活动列表
+attachment.retry: 轻点重试
+attachment.no_preview: 无预览
+attachment.close_preview: 关闭图片预览
+workspace.no_workspace: 无工作区
+workspace.no_workspace_body: 此任务没有可用的工作区。
+workspace.shell_placeholder: 在此任务的工作区中运行 Shell
+workspace.files: 工作区文件
+workspace.changes: 工作区改动
+workspace.terminal_unsupported: 原生终端支持 iOS 和 Android。
+workspace.terminal_web_unavailable: 网页端不可用
+workspace.terminal_failed: 终端连接失败。
+workspace.shell_exited: Shell 已退出
+workspace.no_file: 无法读取文件
+workspace.no_files_loaded: 无法加载文件
+workspace.no_visible_files: 工作区中没有可见文件。
+workspace.no_files: 无文件
+workspace.collapse_folder: 收起文件夹
+workspace.expand_folder: 展开文件夹
+workspace.open_file: 打开文件
+workspace.back_to_files: 返回工作区文件列表
+workspace.review_source: 选择审查来源
+workspace.review_failed: 无法加载审查
+workspace.no_changes: 无改动
+workspace.no_changes_body: 此对比中没有改动。
+project_picker.add_current: 添加当前文件夹
+project_picker.path_label: 守护进程主机上的路径
+project_picker.open_path: 打开输入的路径
+project_picker.file_system: 文件系统
+project_picker.private_workspace: 在守护进程主机上创建私有工作区
+project_picker.loading: 正在加载文件夹…
+project_picker.empty: 此处没有文件夹
+project_picker.open_folder: 打开此文件夹
+errors.needs_daemon_and_project: 请先连接守护进程并选择项目
+errors.daemon_settings_load: 无法加载守护进程设置
+errors.remember_daemon: 无法记住所选守护进程
+errors.read_token: 无法读取此守护进程令牌
+errors.token_missing: 缺少此守护进程令牌。请编辑连接并重新添加。
+errors.load_daemons: 无法加载已保存的守护进程
+errors.daemon_gone: 此已保存的守护进程已不存在
+errors.use_wss: 局域网或私有网络之外的守护进程请使用 wss://
+errors.enter_token: 请输入守护进程令牌
+errors.enter_address: 请输入守护进程地址
+errors.invalid_daemon_address: 请输入有效的 ws:// 或 wss:// 守护进程地址
+errors.daemon_address_scheme: 守护进程地址必须使用 ws:// 或 wss://
+errors.daemon_address_host: 守护进程地址必须包含主机且不能包含凭据
+errors.daemon_rejected_token: 守护进程拒绝了此令牌。请编辑连接，并从 Waku 的守护进程设置中粘贴当前令牌。
+errors.daemon_version_mismatch: 此守护进程运行的 Waku 版本与应用不同。请更新主机上的 Waku，或更新此应用。
+errors.not_a_daemon: 此地址上响应的不是 Waku 守护进程。请检查地址和端口。
+errors.daemon_timeout: 守护进程没有及时响应。
+errors.daemon_closed: 守护进程连接已关闭。
+errors.daemon_stopped_responding: 守护进程已停止响应。
+errors.connect_failed: 无法连接到此守护进程。
+errors.absolute_path: 请输入守护进程主机上的绝对路径
+errors.unexpected_directory: 守护进程返回了意外的目录响应
+errors.unexpected_workspace: 守护进程返回了意外的工作区响应
+errors.unexpected_worktree: 守护进程返回了意外的工作树结果
+errors.unexpected_branches: 守护进程返回了意外的分支响应
+errors.unexpected_file_tree: 守护进程返回了意外的文件树
+errors.unexpected_command_catalog: 守护进程返回了意外的命令目录
+errors.unexpected_project_index: 守护进程返回了意外的项目文件索引
+errors.unexpected_file: 守护进程返回了意外的文件响应
+errors.unexpected_diff: 守护进程返回了意外的差异响应
+errors.attachment_no_daemon: 此附件没有守护进程引用
+errors.daemon_disconnected_short: Waku 守护进程已断开
+errors.client_disconnected: Waku 客户端已断开
+task_history.empty_search_body: 请尝试其他标题、项目或智能体。
+task_history.load_failed: 无法加载任务
+connection.running: 运行中
+transcript.last_reply: 最后回复：%{time}
+daemon.saved_daemon: 已保存的守护进程
+daemon.edit_named: 编辑 %{name}
+onboarding.daemon_title: 你的智能体，随处可用。
+onboarding.daemon_body: 连接到运行在你的 Mac、工作站或私有服务器上的 Waku。可以添加多个，随时切换。
+onboarding.daemon_security: 令牌保留在此设备上，并直接发送到你选择的主机。
+composer.attachment_preview: 预览 %{name}
+composer.attachment_retry_preview: 重试 %{name} 的预览
+composer_ui.commands: 命令
+composer_ui.files: 文件
+composer_ui.camera: 相机
+composer_ui.photo: 照片
+task.title: 任务
+workspace.terminal: 终端
+workspace.files_short: 文件
+workspace.review: 审查
+task_history.empty_body: 让智能体处理任何事 — 缺陷、功能，或关于代码的问题。
+rename.task_title: 重命名任务
+rename.task_title_field: 任务标题
+connection.the_daemon: 守护进程
+connection.cant_connect: 无法连接到 %{name}
+connection.retrying_in: "%{seconds} 秒后重试"
+connection.reconnecting_to: 正在重新连接到 %{name}…
+connection.cant_reach: 无法访问 %{name}
+connection.reconnected_to: 已重新连接到 %{name}
+connection.edit_short: 编辑
+models.no_model_list: 此智能体不提供模型列表，将使用其自带的默认模型。
+rename.failed: 无法重命名任务
+context.percent_full: 上下文已使用 %{percent}%
+composer_ui.searching: 正在搜索
+composer_ui.folder: 文件夹
+composer_ui.file: 文件
+composer_ui.attach_files: 文件
+composer_ui.camera_unavailable: 此设备无法使用相机
+composer_ui.photo_library: 照片图库
+composer_ui.file_too_large: "%{name} 过大，无法添加（最大 32 MB）"
+composer_ui.attach_failed: 无法添加该文件
+composer_ui.camera_permission_denied: 拍照需要相机权限
+composer_ui.photo_permission_denied: 选择照片需要照片权限
+diff.added: 已新增
+diff.deleted: 已删除
+diff.modified: 已修改
+sessions.active: 进行中
+sessions.paused: 已暂停
+sessions.blocked: 已停滞
+sessions.complete: 已完成
+sessions.none_found: 没有找到会话
+goal.limit_reached: 目标需要你的输入
+common.save: 保存
+common.optional: 可选
+daemon.add_short: 添加
+composer_ui.send_to_working: 发送给工作中的智能体
+daemon.title: 守护进程

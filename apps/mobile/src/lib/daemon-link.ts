@@ -1,5 +1,6 @@
 import { WakuClient, WakuRpcError, type WakuConnectionState } from '@waku/client';
 
+import { translateNow } from './i18n-context';
 import { describeConnectionFailure, describeDisconnect, reconnectDelayMs } from './daemon-retry';
 
 export type DaemonLinkPhase = 'connecting' | 'connected' | 'reconnecting' | 'error' | 'closed';
@@ -46,6 +47,9 @@ export interface DaemonLinkOptions {
   heartbeatIntervalMs?: number;
   /** A message this recent makes a foreground probe unnecessary. */
   freshnessMs?: number;
+  /** Resolves connection copy. Defaults to the app-wide language; tests pin it
+   * so assertions do not depend on the machine's locale. */
+  translate?: (key: string) => string;
 }
 
 export const DEFAULT_PROBE_TIMEOUT_MS = 8_000;
@@ -81,6 +85,7 @@ export class DaemonLink {
   private readonly probeTimeoutMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly freshnessMs: number;
+  private readonly translate: (key: string) => string;
   private readonly unsubscribeClient: () => void;
   private active: boolean;
   private retryTimer: TimerHandle | null = null;
@@ -102,6 +107,7 @@ export class DaemonLink {
     this.probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
     this.freshnessMs = options.freshnessMs ?? DEFAULT_FRESHNESS_MS;
+    this.translate = options.translate ?? translateNow;
     this.unsubscribeClient = this.client.subscribeConnectionState((state) => {
       this.onClientState(state);
     });
@@ -181,7 +187,7 @@ export class DaemonLink {
         if (this.closed || this.snapshot.phase !== 'connected') return false;
         this.live = false;
         this.client.disconnect();
-        this.drop('The daemon stopped responding.');
+        this.drop(this.translate('errors.daemon_stopped_responding'));
         return false;
       }
     })();
@@ -252,7 +258,11 @@ export class DaemonLink {
   }
 
   private onFailure(cause: unknown): void {
-    const failure = describeConnectionFailure(cause, 'Couldn’t connect to this daemon.');
+    const failure = describeConnectionFailure(
+      cause,
+      this.translate('errors.connect_failed'),
+      this.translate,
+    );
     if (!failure.retryable) {
       this.update({ phase: 'error', error: failure.message, outage: null });
       return;
@@ -280,7 +290,7 @@ export class DaemonLink {
     }
     if (state === 'disconnected' && this.live) {
       this.live = false;
-      this.drop(describeDisconnect(this.client.lastDisconnectReason));
+      this.drop(describeDisconnect(this.client.lastDisconnectReason, this.translate));
     }
   }
 

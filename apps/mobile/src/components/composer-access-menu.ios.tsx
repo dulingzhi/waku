@@ -23,23 +23,24 @@ import { AppSymbol } from './app-symbol';
 import type { ComposerAccessMenuProps } from './composer-access-menu.types';
 import { Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import { runtimeModeLabel } from '@/lib/session-presentation';
 
 const ACCESS_MODES: Array<{
   id: RuntimeMode;
-  description: string;
+  descriptionKey: string;
   icon: 'lock' | 'pencil' | 'sparkles' | 'lock.open';
 }> = [
-  { id: 'ask', description: 'Approve every command and file edit.', icon: 'lock' },
+  { id: 'ask', descriptionKey: 'composer_ui.approve_everything', icon: 'lock' },
   {
     id: 'autoAcceptEdits',
-    description: 'Edits apply automatically; commands still ask.',
+    descriptionKey: 'mode.auto_accept_edits_description',
     icon: 'pencil',
   },
-  { id: 'auto', description: 'Works autonomously inside the project.', icon: 'sparkles' },
+  { id: 'auto', descriptionKey: 'composer_ui.works_autonomously', icon: 'sparkles' },
   {
     id: 'fullAccess',
-    description: 'No approval prompts. The agent acts freely.',
+    descriptionKey: 'composer_ui.no_approval_prompts',
     icon: 'lock.open',
   },
 ];
@@ -48,6 +49,7 @@ const ACCESS_MODES: Array<{
  * composer trigger and receives the native popover arrow and dismissal model. */
 export function ComposerAccessMenu({ mode, onApply }: ComposerAccessMenuProps) {
   const theme = useTheme();
+  const { t } = useI18n();
   const selected = ACCESS_MODES.find((item) => item.id === mode) ?? ACCESS_MODES[3]!;
 
   return (
@@ -61,10 +63,10 @@ export function ComposerAccessMenu({ mode, onApply }: ComposerAccessMenuProps) {
           </RNHostView>
         )}
         modifiers={[
-          accessibilityLabel(`Agent access, ${runtimeModeLabel(mode)}`),
+          accessibilityLabel(`${t('composer_ui.agent_access')}, ${runtimeModeLabel(mode, t)}`),
           accessibilityAddTraits(['isButton']),
         ]}>
-        <Section title="Agent access">
+        <Section title={t('composer_ui.agent_access')}>
           {ACCESS_MODES.map((item) => (
             <Toggle
               isOn={item.id === mode}
@@ -75,14 +77,14 @@ export function ComposerAccessMenu({ mode, onApply }: ComposerAccessMenuProps) {
               }}>
               <Label systemImage={item.icon}>
                 <VStack alignment="leading" spacing={1}>
-                  <SwiftUIText>{runtimeModeLabel(item.id)}</SwiftUIText>
+                  <SwiftUIText>{runtimeModeLabel(item.id, t)}</SwiftUIText>
                   <SwiftUIText
                     modifiers={[
                       font({ textStyle: 'caption' }),
                       foregroundStyle({ type: 'hierarchical', style: 'secondary' }),
                       lineLimit(2),
                     ]}>
-                    {item.description}
+                    {t(item.descriptionKey)}
                   </SwiftUIText>
                 </VStack>
               </Label>

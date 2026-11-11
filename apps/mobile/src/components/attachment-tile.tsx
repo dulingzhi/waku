@@ -10,6 +10,7 @@ import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useTheme } from '@/hooks/use-theme';
 import { attachmentImageQuery } from '@/lib/attachments';
 import { useDaemon } from '@/lib/daemon-context';
+import { useI18n } from '@/lib/i18n-context';
 
 /** Fixed-size previews keep the composer and transcript steady while loading.
  * The remove target is a sibling of the preview, so tapping an image is safe. */
@@ -25,6 +26,7 @@ export const AttachmentTile = memo(function AttachmentTile({
   removeDisabled?: boolean;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const { activeProfile, client, phase } = useDaemon();
   const options = attachmentImageQuery(client, activeProfile, attachment, phase === 'connected');
   const image = useQuery(options);
@@ -42,8 +44,8 @@ export const AttachmentTile = memo(function AttachmentTile({
   return (
     <View style={[styles.frame, compact && styles.compact]}>
       <Pressable
-        accessibilityLabel={source ? `Preview ${attachment.name}`
-          : canRetry ? `Retry preview for ${attachment.name}` : attachment.name}
+        accessibilityLabel={source ? t('composer.attachment_preview', { name: attachment.name })
+          : canRetry ? t('composer.attachment_retry_preview', { name: attachment.name }) : attachment.name}
         accessibilityRole={interactive ? 'button' : 'text'}
         accessibilityState={{ busy: image.isFetching }}
         disabled={!interactive}
@@ -85,7 +87,7 @@ export const AttachmentTile = memo(function AttachmentTile({
             </Text>
             {(canRetry || failedSource === image.data) && (
               <Text style={[styles.status, { color: theme.textTertiary }]}>
-                {canRetry ? 'Tap to retry' : 'No preview'}
+                {canRetry ? t('attachment.retry') : t('attachment.no_preview')}
               </Text>
             )}
           </View>
@@ -93,7 +95,7 @@ export const AttachmentTile = memo(function AttachmentTile({
       </Pressable>
       {onRemove && (
         <Pressable
-          accessibilityLabel={`Remove ${attachment.name}`}
+          accessibilityLabel={t('composer.remove_attachment', { name: attachment.name })}
           accessibilityRole="button"
           accessibilityState={{ disabled: removeDisabled }}
           disabled={removeDisabled}
@@ -167,6 +169,7 @@ function AttachmentImagePreview({
   onError: () => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const reducedMotion = useReducedMotion();
   const [focused, setFocused] = useState(false);
   return (
@@ -183,7 +186,7 @@ function AttachmentImagePreview({
         <View style={styles.previewHeader}>
           <Text numberOfLines={1} style={[styles.previewTitle, { color: theme.text }]}>{name}</Text>
           <Pressable
-            accessibilityLabel="Close image preview"
+            accessibilityLabel={t('attachment.close_preview')}
             accessibilityRole="button"
             onBlur={() => setFocused(false)}
             onFocus={() => setFocused(true)}

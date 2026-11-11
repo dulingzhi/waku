@@ -35,6 +35,7 @@ import {
 import { Radius, Spacing } from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import {
   buildTranscriptPipeline,
   expandTranscriptRows,
@@ -117,6 +118,7 @@ export function TranscriptList({
   onDevSample?: (sample: TranscriptDevSample) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const reducedMotion = useReducedMotion();
   const markdownStyles = useMarkdownStyles();
   const scrollRef = useRef<ScrollView>(null);
@@ -505,8 +507,8 @@ export function TranscriptList({
         style={[styles.jumpFrame, { opacity: jumpOpacity }]}>
         <GlassSurface fallbackColor={theme.surface} interactive style={styles.jumpButton}>
           <Pressable
-            accessibilityHint={unseen ? 'New content arrived below' : undefined}
-            accessibilityLabel="Scroll to latest"
+            accessibilityHint={unseen ? t('transcript.new_content') : undefined}
+            accessibilityLabel={t('transcript.scroll_to_latest')}
             accessibilityRole="button"
             onPress={() => scrollToLatest(true)}
             style={({ pressed }) => [styles.jumpButtonInner, { opacity: pressed ? 0.6 : 1 }]}>

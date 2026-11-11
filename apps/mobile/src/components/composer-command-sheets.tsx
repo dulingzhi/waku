@@ -23,6 +23,7 @@ import { ActivityIndicator, FlatList, StyleSheet, Text, TextInput, View, useWind
 import { Sheet, SheetRow } from './sheet';
 import { NativeTint, Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { translateNow, useI18n } from '@/lib/i18n-context';
 import {
   createProject,
   daemonKeys,
@@ -73,7 +74,7 @@ export function useComposerLocalCommands({
       setResumeOpen(true);
     } else if (isFastModeToggleSubmission(provider, prompt, commands)) {
       const tier = toggledFastServiceTier(serviceTier, model?.service_tiers ?? []);
-      if (!tier) throw new Error('Fast mode is unavailable for this model');
+      if (!tier) throw new Error(translateNow('composer_ui.fast_mode_unavailable'));
       await onServiceTier(tier);
     } else {
       const command = parseGoalSubmission(provider, prompt, commands);
@@ -130,6 +131,7 @@ function ResumeSessionSheet({ provider, runtimeMode, onDismiss }: {
   onDismiss: () => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const daemon = useDaemon();
   const queryClient = useQueryClient();
   const { height } = useWindowDimensions();
@@ -178,8 +180,8 @@ function ResumeSessionSheet({ provider, runtimeMode, onDismiss }: {
   return (
     <Sheet visible onDismiss={onDismiss} scrollable={false} title={`Resume ${providerLabel(provider)} session`}>
       <TextInput
-        accessibilityLabel="Search provider sessions"
-        placeholder="Search sessions…"
+        accessibilityLabel={t('sessions.search_provider')}
+        placeholder={t('sessions.search')}
         placeholderTextColor={theme.textTertiary}
         selectionColor={NativeTint}
         style={[styles.input, { color: theme.text, backgroundColor: theme.inset }]}
@@ -198,7 +200,7 @@ function ResumeSessionSheet({ provider, runtimeMode, onDismiss }: {
           ListEmptyComponent={<Text style={[styles.note, { color: theme.textTertiary }]}>No matching sessions</Text>}
           renderItem={({ item }) => (
             <SheetRow
-              label={item.title || 'Untitled session'}
+              label={item.title || t('sessions.untitled')}
               description={item.cwd}
               disabled={Boolean(resuming)}
               leading={resuming === providerSessionKey(item.cursor) ? <ActivityIndicator size="small" /> : undefined}
@@ -207,7 +209,7 @@ function ResumeSessionSheet({ provider, runtimeMode, onDismiss }: {
           )}
         />
       )}
-      {sessions.error && <SheetRow label="Retry" onPress={() => { void sessions.refetch(); }} />}
+      {sessions.error && <SheetRow label={t('common.retry')} onPress={() => { void sessions.refetch(); }} />}
     </Sheet>
   );
 }
@@ -220,6 +222,7 @@ function GoalCommandSheet({ goal, prefill, replace, onRun, onDismiss }: {
   onDismiss: () => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const [objective, setObjective] = useState(prefill ?? goal?.objective ?? '');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -242,10 +245,10 @@ function GoalCommandSheet({ goal, prefill, replace, onRun, onDismiss }: {
         budgetLimited: 'Budget reached', complete: 'Complete',
       }[goal.status]}</Text>}
       <TextInput
-        accessibilityLabel="Goal objective"
+        accessibilityLabel={t('goal.objective')}
         multiline
         editable={!pending}
-        placeholder="What should the agent keep working on?"
+        placeholder={t('goal.objective_placeholder')}
         placeholderTextColor={theme.textTertiary}
         selectionColor={NativeTint}
         style={[styles.input, styles.objective, { color: theme.text, backgroundColor: theme.inset }]}
@@ -255,7 +258,7 @@ function GoalCommandSheet({ goal, prefill, replace, onRun, onDismiss }: {
       {replace && goal && <Text style={[styles.note, { color: theme.textSecondary }]}>This replaces the current goal: {goal.objective}</Text>}
       {error && <Text style={[styles.note, { color: theme.danger }]}>{error}</Text>}
       <SheetRow
-        label={goal ? replace ? 'Replace goal' : 'Save goal' : 'Set goal'}
+        label={goal ? replace ? t('goal.replace') : t('goal.save') : t('goal.set')}
         disabled={pending || !objective.trim()}
         leading={pending ? <ActivityIndicator size="small" /> : undefined}
         onPress={() => void run({

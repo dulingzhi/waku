@@ -6,6 +6,7 @@ import {
 } from '@expo/ui/swift-ui/modifiers';
 
 import type { TaskRowMenuProps } from '@/components/task-row-menu.types';
+import { useI18n } from '@/lib/i18n-context';
 
 /**
  * SwiftUI Menu's primary action fires a normal tap directly while reserving
@@ -21,19 +22,20 @@ export function TaskRowMenu({
   selected,
   style,
 }: TaskRowMenuProps) {
+  const { t } = useI18n();
   return (
     <Host ignoreSafeArea="all" matchContents style={style}>
       <Menu
         label={<RNHostView matchContents>{renderTrigger(false)}</RNHostView>}
         modifiers={[
           accessibilityLabel(label),
-          accessibilityHint('Long press for actions'),
+          accessibilityHint(t('task.row_actions_hint')),
           accessibilityAddTraits(selected ? ['isButton', 'isSelected'] : ['isButton']),
         ]}
         onPrimaryAction={onSelect}>
-        <Button label="Rename task" systemImage="pencil" onPress={onRename} />
+        <Button label={t('task.rename')} systemImage="pencil" onPress={onRename} />
         <Button
-          label="Delete task"
+          label={t('task.delete')}
           role="destructive"
           systemImage="trash"
           onPress={onDelete}

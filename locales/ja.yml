@@ -1119,3 +1119,259 @@ usage_error.curl_did_not_finish: curl がリクエストを完了しませんで
 usage_error.curl_failed: "curl に失敗しました：%{error}"
 usage_error.unknown_error: 不明なエラー
 usage_error.curl_no_status: curl から HTTP ステータス行が返されませんでした
+language_picker.title: 言語
+task_history.title: タスク履歴
+task_history.search: タスクを検索
+task_history.empty: タスクはまだありません
+task_history.empty_search: 一致するタスクがありません
+task_history.daemon_hint: デーモン切り替えを開きます
+daemon.add_button: デーモンを追加
+daemon.add_title: デーモンを追加
+daemon.edit_title: デーモンを編集
+daemon.list_title: デーモン
+daemon.none_saved: 保存されたデーモンはありません
+daemon.none_saved_body: Waku デスクトップの「設定」にある「デーモン」に表示されるアドレスとトークンを追加してください。
+daemon.list_footer: 選択したデーモンだけが接続を維持します。認証情報はデバイスのキーチェーンで保護され、Waku のサービスを経由しません。
+daemon.name_label: デーモン名
+daemon.address_label: デーモンの WebSocket アドレス
+daemon.token_label: デーモントークン
+daemon.connect_another: デーモンを追加…
+daemon.connect_another_hint: 別のホストに接続
+daemon.saving: 保存中…
+daemon.removing: 削除中…
+daemon.remove_button: デーモンを削除
+daemon.remove_body: このデバイスから保存済みのアドレスとトークンを削除します。タスクはデーモンホストに残ります。
+daemon.back_to_list: デーモン一覧に戻る
+daemon.token_keep_hint: 空欄のままにすると保存済みの認証情報を保持します。
+daemon.token_where_hint: Waku デスクトップ → 設定 → デーモンからアドレスとトークンをコピーしてください。
+daemon.invalid_address: 有効な ws:// または wss:// の WebSocket アドレスを入力してください。
+daemon.plaintext_blocked: 公開された平文接続はブロックされています。このホストには wss:// を使用してください。
+daemon.plaintext_warning: 暗号化されていない接続です。信頼できる LAN または tailnet でのみ使用してください。
+daemon.encrypted_browser: 暗号化された接続です。トークンはこのブラウザに保持されます。
+daemon.encrypted_device: 暗号化された接続です。トークンはこのデバイスのキーチェーンに保存されます。
+session_unavailable: このタスクはデーモン上に存在しません
+session.project_gone: このタスクのプロジェクトはデーモン上で利用できません
+session.goals_need_codex: ゴールには Codex が必要です
+session.codex_not_installed: デーモンホストに Codex がインストールされていません
+session.codex_start_failed: デーモンが Codex を起動できませんでした
+session.steer_queued: エージェントが途中で受け取れなかったため、次のターンにキューされました。
+task.history_button: タスク履歴
+task.options: タスクオプション
+task.rename: タスクの名前を変更
+task.title_field: タスク名
+task.delete: タスクを削除
+task.delete_body: デーモンからすべてのデバイスに対してこのタスクと会話履歴を削除します。
+task.copy_last_response: 最新の応答をコピー
+task.reload_transcript: 会話履歴を再読み込み
+task.delete_failed: タスクを削除できませんでした
+task.model_change_failed: モデルを変更できませんでした
+task.row_actions_hint: 長押しで操作を表示
+new_task.title: 新規タスク
+new_task.start: タスクを開始
+new_task.prompt_placeholder: タスクのプロンプト
+new_task.choose_first: 先にプロジェクトとモデルを選択してください
+new_task.checking_agents: エージェントを確認中…
+new_task.no_agents: エージェントがインストールされていません
+new_task.choose_project: プロジェクトを選択
+new_task.default_branch: デフォルトブランチ
+new_task.base_branch: ベースブランチ
+new_task.current_branch: 現在のブランチ
+new_task.isolated_worktree: 分離されたワークツリー
+new_task.work_locally: ローカルで作業
+new_task.work_locally_hint: プロジェクトのチェックアウト内で実行
+new_task.isolated_hint: チェックアウトに影響しない別のブランチとフォルダ
+new_task.browse_daemon: デーモンホストを参照…
+new_task.browse_daemon_hint: デーモンホスト上の任意のフォルダを選択するか、空のワークスペースを作成します
+composer_ui.message_agent: エージェントにメッセージ
+composer_ui.queue_follow_up: フォローアップをキュー…
+composer_ui.message_working: 作業中のエージェントにメッセージ…
+composer_ui.reconnect_to_message: 再接続してこのエージェントにメッセージ
+composer_ui.reconnecting: 再接続中…
+composer_ui.connecting: 接続中…
+composer_ui.stop_agent: エージェントを停止
+composer_ui.queue_message: メッセージをキュー
+composer_ui.send_message: メッセージを送信
+composer_ui.dismiss_error: エラーを閉じる
+composer_ui.remove_queued: キューのメッセージを削除
+composer_ui.model_options: モデルオプション
+composer_ui.camera_permission: 写真を撮るにはカメラへのアクセスが必要です
+composer_ui.custom_answer: 独自の回答
+composer_ui.custom_answer_placeholder: 別の回答を入力…
+composer_ui.mention_files: ファイルを指定
+composer_ui.add_to_message: メッセージに追加
+composer_ui.search_commands: コマンドを検索
+composer_ui.search_project_files: プロジェクトのファイルを検索
+composer_ui.search_commands_placeholder: コマンドを検索…
+composer_ui.search_files_placeholder: プロジェクトのファイルを検索…
+composer_ui.loading_commands: コマンドを読み込み中…
+composer_ui.finding_files: ファイルを検索中…
+composer_ui.no_matching_commands: 一致するコマンドがありません
+composer_ui.no_matching_files: 一致するファイルがありません
+composer_ui.fast_mode_unavailable: このモデルでは高速モードを利用できません
+composer_ui.agent_access: エージェントのアクセス権
+composer_ui.approve_everything: すべてのコマンドとファイル編集を承認します。
+composer_ui.works_autonomously: プロジェクト内で自律的に動作します。
+composer_ui.no_approval_prompts: 承認プロンプトはありません。エージェントは自由に動作します。
+sessions.untitled: 無題のセッション
+sessions.search: セッションを検索…
+sessions.search_provider: プロバイダーのセッションを検索
+sessions.usage_limit: 利用上限に達しました
+sessions.budget: 予算上限に達しました
+goal.objective: ゴールの内容
+goal.objective_placeholder: エージェントに何を続けてほしいですか？
+goal.set: ゴールを設定
+goal.save: ゴールを保存
+goal.replace: ゴールを置き換え
+goal.pause: ゴールを一時停止
+goal.resume: ゴールを再開
+goal.clear: ゴールを消去
+models.default: デフォルトモデル
+models.no_match: 一致するモデルがありません。
+models.search: モデルを検索
+models.clear_search: 検索をクリア
+models.all_providers: すべてのプロバイダーを表示
+connection.something_wrong: 問題が発生しました。
+connection.trying_again: 再試行中…
+connection.retry_now: 今すぐ再試行
+connection.retry_hint: デーモン接続を再試行
+connection.retry: デーモン接続を今すぐ再試行
+connection.edit: デーモン接続を編集
+connection.offline: オフライン
+connection.needs_attention: 対応が必要
+connection.reconnecting: 再接続中…
+connection.connecting_daemon: デーモンに接続中…
+connection.not_connected: 未接続
+connection.switch_hint: このデーモンに切り替えます
+transcript.waiting_for_you: あなたの入力を待っています
+transcript.loading_earlier: 以前のメッセージを読み込み中
+transcript.empty: メッセージはまだありません
+transcript.load_failed: このタスクを読み込めませんでした
+transcript.copy_hint: 長押しでコピー
+transcript.expand_work: エージェントの作業を表示
+transcript.collapse_work: エージェントの作業を折りたたむ
+transcript.new_content: 下に新しい内容があります
+transcript.scroll_to_latest: 最新へスクロール
+transcript.open_details: 詳細を開く
+transcript.show_group: グループ全体を表示
+transcript.open_activity: アクティビティ一覧を開く
+attachment.retry: タップして再試行
+attachment.no_preview: プレビューなし
+attachment.close_preview: 画像プレビューを閉じる
+workspace.no_workspace: ワークスペースなし
+workspace.no_workspace_body: このタスクには利用可能なワークスペースがありません。
+workspace.shell_placeholder: このタスクのワークスペースのシェル
+workspace.files: ワークスペースのファイル
+workspace.changes: ワークスペースの変更
+workspace.terminal_unsupported: ネイティブターミナルは iOS と Android で利用できます。
+workspace.terminal_web_unavailable: ウェブでは利用できません
+workspace.terminal_failed: ターミナル接続に失敗しました。
+workspace.shell_exited: シェルが終了しました
+workspace.no_file: ファイルを読み込めませんでした
+workspace.no_files_loaded: ファイルを読み込めませんでした
+workspace.no_visible_files: ワークスペースに表示可能なファイルがありません。
+workspace.no_files: ファイルなし
+workspace.collapse_folder: フォルダーを折りたたむ
+workspace.expand_folder: フォルダーを展開
+workspace.open_file: ファイルを開く
+workspace.back_to_files: ワークスペースのファイル一覧に戻る
+workspace.review_source: レビュー元を選択
+workspace.review_failed: レビューを読み込めませんでした
+workspace.no_changes: 変更なし
+workspace.no_changes_body: この比較に変更はありません。
+project_picker.add_current: 現在のフォルダーを追加
+project_picker.path_label: デーモンホスト上のパス
+project_picker.open_path: 入力したパスを開く
+project_picker.file_system: ファイルシステム
+project_picker.private_workspace: デーモンホストにプライベートワークスペースを作成します
+project_picker.loading: フォルダーを読み込み中…
+project_picker.empty: ここにフォルダーはありません
+project_picker.open_folder: このフォルダーを開く
+errors.needs_daemon_and_project: 先にデーモンに接続してプロジェクトを選択してください
+errors.daemon_settings_load: デーモン設定を読み込めませんでした
+errors.remember_daemon: 選択したデーモンを記憶できませんでした
+errors.read_token: このデーモントークンを読み込めませんでした
+errors.token_missing: このデーモントークンがありません。接続を編集して再度追加してください。
+errors.load_daemons: 保存されたデーモンを読み込めませんでした
+errors.daemon_gone: この保存されたデーモンは存在しません
+errors.use_wss: ローカルまたはプライベートネットワーク外のデーモンには wss:// を使用してください
+errors.enter_token: デーモントークンを入力してください
+errors.enter_address: デーモンアドレスを入力してください
+errors.invalid_daemon_address: 有効な ws:// または wss:// のデーモンアドレスを入力してください
+errors.daemon_address_scheme: デーモンアドレスは ws:// または wss:// を使用する必要があります
+errors.daemon_address_host: デーモンアドレスにはホストが必要で、認証情報を含められません
+errors.daemon_rejected_token: デーモンがこのトークンを拒否しました。接続を編集し、Waku のデーモン設定から現在のトークンを貼り付けてください。
+errors.daemon_version_mismatch: このデーモンはアプリと異なる Waku バージョンを実行しています。ホスト上の Waku を更新するか、このアプリを更新してください。
+errors.not_a_daemon: このアドレスで応答したのは Waku デーモンではありません。アドレスとポートを確認してください。
+errors.daemon_timeout: デーモンが時間内に応答しませんでした。
+errors.daemon_closed: デーモン接続が閉じられました。
+errors.daemon_stopped_responding: デーモンが応答を停止しました。
+errors.connect_failed: このデーモンに接続できませんでした。
+errors.absolute_path: デーモンホスト上の絶対パスを入力してください
+errors.unexpected_directory: デーモンから予期しないディレクトリ応答が返されました
+errors.unexpected_workspace: デーモンから予期しないワークスペース応答が返されました
+errors.unexpected_worktree: デーモンから予期しないワークツリー結果が返されました
+errors.unexpected_branches: デーモンから予期しないブランチ応答が返されました
+errors.unexpected_file_tree: デーモンから予期しないファイルツリーが返されました
+errors.unexpected_command_catalog: デーモンから予期しないコマンド一覧が返されました
+errors.unexpected_project_index: デーモンから予期しないプロジェクトファイル索引が返されました
+errors.unexpected_file: デーモンから予期しないファイル応答が返されました
+errors.unexpected_diff: デーモンから予期しない差分応答が返されました
+errors.attachment_no_daemon: この添付ファイルにはデーモン参照がありません
+errors.daemon_disconnected_short: Waku デーモンが切断されました
+errors.client_disconnected: Waku クライアントが切断されました
+task_history.empty_search_body: 別のタイトル、プロジェクト、エージェントを試してください。
+task_history.load_failed: タスクを読み込めませんでした
+connection.running: 実行中
+transcript.last_reply: 最新の応答：%{time}
+daemon.saved_daemon: 保存済みのデーモン
+daemon.edit_named: "%{name} を編集"
+onboarding.daemon_title: あなたのエージェントを、どこでも。
+onboarding.daemon_body: Mac、ワークステーション、プライベートサーバーで動作する Waku に接続します。複数追加して、いつでも切り替えられます。
+onboarding.daemon_security: トークンはこのデバイスに保持され、選択したホストに直接送信されます。
+composer.attachment_preview: "%{name} をプレビュー"
+composer.attachment_retry_preview: "%{name} のプレビューを再試行"
+composer_ui.commands: コマンド
+composer_ui.files: ファイル
+composer_ui.camera: カメラ
+composer_ui.photo: 写真
+task.title: タスク
+workspace.terminal: ターミナル
+workspace.files_short: ファイル
+workspace.review: レビュー
+task_history.empty_body: バグ、機能、コードについての質問など、何でもエージェントに任せられます。
+rename.task_title: タスクの名前を変更
+rename.task_title_field: タスク名
+connection.the_daemon: デーモン
+connection.cant_connect: "%{name} に接続できません"
+connection.retrying_in: "%{seconds} 秒後に再試行"
+connection.reconnecting_to: "%{name} に再接続中…"
+connection.cant_reach: "%{name} に到達できません"
+connection.reconnected_to: "%{name} に再接続しました"
+connection.edit_short: 編集
+models.no_model_list: このエージェントはモデル一覧を提供していません。独自のデフォルトを使用します。
+rename.failed: タスクの名前を変更できませんでした
+context.percent_full: コンテキストの使用率 %{percent}%
+composer_ui.searching: 検索中
+composer_ui.folder: フォルダー
+composer_ui.file: ファイル
+composer_ui.attach_files: ファイル
+composer_ui.camera_unavailable: このデバイスではカメラを利用できません
+composer_ui.photo_library: 写真ライブラリ
+composer_ui.file_too_large: "%{name} は大きすぎて添付できません（最大 32 MB）"
+composer_ui.attach_failed: そのファイルを追加できませんでした
+composer_ui.camera_permission_denied: 写真を撮るにはカメラへのアクセスが必要です
+composer_ui.photo_permission_denied: 写真を選ぶには写真へのアクセスが必要です
+diff.added: 追加済み
+diff.deleted: 削除済み
+diff.modified: 変更済み
+sessions.active: 進行中
+sessions.paused: 一時停止中
+sessions.blocked: 停止中
+sessions.complete: 完了
+sessions.none_found: セッションが見つかりません
+goal.limit_reached: ゴールにはあなたの入力が必要です
+common.save: 保存
+common.optional: 任意
+daemon.add_short: 追加
+composer_ui.send_to_working: 作業中のエージェントに送信
+daemon.title: デーモン

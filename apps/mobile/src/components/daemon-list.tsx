@@ -7,6 +7,7 @@ import { NativeTint, Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
 import { displayHost, type DaemonProfile } from '@/lib/daemon-profile';
+import { useI18n } from '@/lib/i18n-context';
 
 export function DaemonList({
   onEdit,
@@ -19,6 +20,7 @@ export function DaemonList({
 }) {
   const theme = useTheme();
   const daemon = useDaemon();
+  const { t } = useI18n();
   return (
     <View
       style={[
@@ -32,9 +34,9 @@ export function DaemonList({
           <View key={profile.id}>
             <View style={styles.row}>
               <Pressable
-                accessibilityHint="Switches to this daemon"
+                accessibilityHint={t('connection.switch_hint')}
                 accessibilityLabel={`${profile.name}, ${displayHost(profile.address)}, ${
-                  active ? connectionPhaseLabel(daemon.phase) : 'saved daemon'
+                  active ? connectionPhaseLabel(daemon.phase, t) : t('daemon.saved_daemon')
                 }`}
                 accessibilityRole="button"
                 accessibilityState={{ selected: active }}
@@ -67,7 +69,7 @@ export function DaemonList({
               </Pressable>
               {onEdit && (
                 <Pressable
-                  accessibilityLabel={`Edit ${profile.name}`}
+                  accessibilityLabel={t('daemon.edit_named', { name: profile.name })}
                   accessibilityRole="button"
                   hitSlop={6}
                   onPress={() => onEdit(profile)}

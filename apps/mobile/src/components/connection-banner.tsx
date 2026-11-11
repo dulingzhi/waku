@@ -14,6 +14,7 @@ import { NativeTint, Radius, Spacing } from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
+import { useI18n } from '@/lib/i18n-context';
 
 /** How long a dropped connection may stay quiet before it is announced; the
  * immediate retry usually lands well within this. */
@@ -42,7 +43,8 @@ export type ConnectionNotice =
  */
 export function useConnectionNotice(): ConnectionNotice | null {
   const daemon = useDaemon();
-  const name = daemon.activeProfile?.name ?? 'the daemon';
+  const { t } = useI18n();
+  const name = daemon.activeProfile?.name ?? t('connection.the_daemon');
   const outage = daemon.phase === 'reconnecting' ? daemon.outage : null;
   const [restoredUntil, setRestoredUntil] = useState<number | null>(null);
   const shown = useRef(false);
@@ -73,26 +75,28 @@ export function useConnectionNotice(): ConnectionNotice | null {
   if (daemon.phase === 'error') {
     return {
       kind: 'error',
-      title: `Can’t connect to ${name}`,
-      detail: daemon.error ?? 'Something went wrong.',
+      title: t('connection.cant_connect', { name }),
+      detail: daemon.error ?? t('connection.something_wrong'),
     };
   }
   if (visibleOutage) {
     const attempting = outage.nextRetryAt === null;
     const seconds = attempting ? 0 : Math.max(1, Math.ceil((outage.nextRetryAt! - now) / 1_000));
     const progress = attempting
-      ? outage.attempts === 0 ? null : 'Trying again…'
-      : `Retrying in ${seconds}s`;
+      ? outage.attempts === 0 ? null : t('connection.trying_again')
+      : t('connection.retrying_in', { seconds });
     const reason = outage.attempts > 0 ? outage.reason : null;
     return {
       kind: 'reconnecting',
-      title: outage.interrupted ? `Reconnecting to ${name}…` : `Can’t reach ${name}`,
+      title: outage.interrupted
+        ? t('connection.reconnecting_to', { name })
+        : t('connection.cant_reach', { name }),
       detail: [progress, reason].filter(Boolean).join(' · ') || null,
       attempting,
     };
   }
   if (daemon.phase === 'connected' && restoredUntil !== null && now < restoredUntil) {
-    return { kind: 'restored', title: `Reconnected to ${name}` };
+    return { kind: 'restored', title: t('connection.reconnected_to', { name }) };
   }
   return null;
 }
@@ -133,6 +137,7 @@ export function ConnectionBanner({ floating = false }: { floating?: boolean }) {
 
 function NoticeCard({ floating, notice }: { floating: boolean; notice: ConnectionNotice }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const daemon = useDaemon();
   const reducedMotion = useReducedMotion();
   const opacity = useRef(new Animated.Value(reducedMotion ? 1 : 0)).current;
@@ -179,22 +184,22 @@ function NoticeCard({ floating, notice }: { floating: boolean; notice: Connectio
       {notice.kind === 'reconnecting' && (
         <BannerAction
           disabled={notice.attempting}
-          label="Retry now"
-          accessibilityLabel="Retry daemon connection now"
+          label={t('connection.retry_now')}
+          accessibilityLabel={t('connection.retry')}
           onPress={() => void daemon.reconnect()}
         />
       )}
       {notice.kind === 'error' && (
         <View style={styles.actions}>
           <BannerAction
-            label="Retry"
-            accessibilityLabel="Retry daemon connection"
+            label={t('common.retry')}
+            accessibilityLabel={t('connection.retry_hint')}
             onPress={() => void daemon.reconnect()}
           />
           {daemon.activeProfile && (
             <BannerAction
-              label="Edit"
-              accessibilityLabel="Edit daemon connection"
+              label={t('connection.edit_short')}
+              accessibilityLabel={t('connection.edit')}
               onPress={() => router.push({
                 pathname: '/daemon-editor',
                 params: { id: daemon.activeProfile!.id },

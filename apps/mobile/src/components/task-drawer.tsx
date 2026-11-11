@@ -40,6 +40,7 @@ import { NativeTint, Radius, Spacing } from '@/constants/theme';
 import { useTaskState } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
+import { useI18n } from '@/lib/i18n-context';
 import { sessionIsRunning } from '@/lib/mobile-runtime';
 import { useRuntime } from '@/lib/runtime-context';
 import {
@@ -136,6 +137,7 @@ function TaskDrawerContent({
   const insets = useSafeAreaInsets();
   const daemon = useDaemon();
   const runtime = useRuntime();
+  const { t } = useI18n();
   const taskState = useTaskState();
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -174,7 +176,7 @@ function TaskDrawerContent({
     return taskState.data.sessions.filter((session) => {
       const project = projects.get(session.project_id);
       return [
-        displaySessionTitle(session),
+        displaySessionTitle(session, t('session.new_task')),
         project?.name,
         project?.path,
         providerLabel(session.provider),
@@ -183,8 +185,10 @@ function TaskDrawerContent({
     });
   }, [search, taskState.data]);
   const sections = useMemo(
-    () => taskState.data ? groupSessions(taskState.data.projects, visibleSessions) : [],
-    [taskState.data, visibleSessions],
+    () => taskState.data
+      ? groupSessions(taskState.data.projects, visibleSessions, new Date(), t)
+      : [],
+    [taskState.data, t, visibleSessions],
   );
   const showNewTask = useCallback(() => {
     onClose();
@@ -202,19 +206,19 @@ function TaskDrawerContent({
 
   function confirmDelete(session: AgentSession) {
     Alert.alert(
-      `Delete “${displaySessionTitle(session)}”?`,
-      'This removes the task and its transcript from the daemon for every device.',
+      `${t('task.delete')} “${displaySessionTitle(session, t('session.new_task'))}”?`,
+      t('task.delete_body'),
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: t('common.cancel'), style: 'cancel' },
         {
-          text: 'Delete',
+          text: t('task.delete'),
           style: 'destructive',
           onPress: () => {
             void runtime.deleteSession(session.id)
               .then(() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success))
               .catch((cause) => {
                 Alert.alert(
-                  'Couldn’t delete task',
+                  t('task.delete_failed'),
                   cause instanceof Error ? cause.message : String(cause),
                 );
               });
@@ -306,10 +310,10 @@ function TaskDrawerContent({
                   tintColor={theme.textSecondary}
                 />
                 <TextInput
-                  accessibilityLabel="Search tasks"
+                  accessibilityLabel={t('task_history.search')}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  placeholder="Search"
+                  placeholder={t('sidebar.search')}
                   placeholderTextColor={theme.textTertiary}
                   selectionColor={NativeTint}
                   style={[styles.searchInput, { color: theme.text }]}
@@ -318,7 +322,7 @@ function TaskDrawerContent({
                 />
                 {search.length > 0 && (
                   <Pressable
-                    accessibilityLabel="Clear search"
+                    accessibilityLabel={t('models.clear_search')}
                     accessibilityRole="button"
                     hitSlop={8}
                     onPress={() => setSearch('')}
@@ -335,7 +339,7 @@ function TaskDrawerContent({
             {daemon.phase === 'connected' && (
               <GlassSurface interactive style={styles.composeButton}>
                 <Pressable
-                  accessibilityLabel="New task"
+                  accessibilityLabel={t('session.new_task')}
                   accessibilityRole="button"
                   hitSlop={6}
                   onPress={showNewTask}
@@ -370,14 +374,15 @@ function TaskDrawerContent({
 
 function DaemonPill({ onPress }: { onPress: () => void }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const daemon = useDaemon();
   return (
     <GlassSurface interactive style={styles.daemonButton}>
       <Pressable
-        accessibilityHint="Opens the daemon switcher"
+        accessibilityHint={t('task_history.daemon_hint')}
         accessibilityLabel={daemon.activeProfile
-          ? `${connectionPhaseLabel(daemon.phase)}: ${daemon.activeProfile.name}`
-          : 'Add a daemon'}
+          ? `${connectionPhaseLabel(daemon.phase)}, ${daemon.activeProfile.name}`
+          : t('daemon.add_button')}
         accessibilityRole="button"
         hitSlop={8}
         onPress={onPress}
@@ -390,7 +395,7 @@ function DaemonPill({ onPress }: { onPress: () => void }) {
           />
         )}
         <Text numberOfLines={1} style={[styles.daemonButtonText, { color: theme.text }]}>
-          {daemon.activeProfile?.name ?? 'Add daemon'}
+          {daemon.activeProfile?.name ?? t('daemon.add_button')}
         </Text>
         <AppSymbol
           name={{ ios: 'chevron.down', android: 'keyboard_arrow_down', web: 'keyboard_arrow_down' }}
@@ -412,6 +417,7 @@ function TaskListEmpty({
   onNewTask: () => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const { phase } = useDaemon();
   const notice = useConnectionNotice();
   // The banner above the list is already explaining the wait.
@@ -421,7 +427,7 @@ function TaskListEmpty({
       <View style={styles.emptyState}>
         <ActivityIndicator color={theme.textTertiary} />
         <Text style={[styles.emptyTitle, { color: theme.textSecondary }]}>
-          {phase === 'reconnecting' ? 'Reconnecting…' : 'Connecting to daemon…'}
+          {phase === 'reconnecting' ? t('connection.reconnecting') : t('connection.connecting_daemon')}
         </Text>
       </View>
     );
@@ -429,15 +435,21 @@ function TaskListEmpty({
   if (searching) {
     return (
       <View style={styles.emptyState}>
-        <Text style={[styles.emptyTitle, { color: theme.text }]}>No matching tasks</Text>
-        <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>Try another title, project, or agent.</Text>
+        <Text style={[styles.emptyTitle, { color: theme.text }]}>
+          {t('task_history.empty_search')}
+        </Text>
+        <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>
+          {t('task_history.empty_search_body')}
+        </Text>
       </View>
     );
   }
   if (error) {
     return (
       <View style={styles.emptyState}>
-        <Text style={[styles.emptyTitle, { color: theme.text }]}>Couldn’t load tasks</Text>
+        <Text style={[styles.emptyTitle, { color: theme.text }]}>
+          {t('task_history.load_failed')}
+        </Text>
         <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>
           {error instanceof Error ? error.message : String(error)}
         </Text>
@@ -453,9 +465,9 @@ function TaskListEmpty({
           tintColor={theme.textTertiary}
         />
       </View>
-      <Text style={[styles.emptyTitle, { color: theme.text }]}>No tasks yet</Text>
+      <Text style={[styles.emptyTitle, { color: theme.text }]}>{t('task_history.empty')}</Text>
       <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>
-        Start an agent on anything — a bug, a feature, a question about the code.
+        {t('task_history.empty_body')}
       </Text>
       {phase === 'connected' && (
         <Pressable
@@ -465,7 +477,9 @@ function TaskListEmpty({
             styles.emptyAction,
             { backgroundColor: theme.inverse, opacity: pressed ? 0.7 : 1 },
           ]}>
-          <Text style={[styles.emptyActionText, { color: theme.onInverse }]}>New task</Text>
+          <Text style={[styles.emptyActionText, { color: theme.onInverse }]}>
+            {t('session.new_task')}
+          </Text>
         </Pressable>
       )}
     </View>
@@ -492,14 +506,15 @@ function SessionRow({
   onSelect: () => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const rowWidth = Math.max(0, drawerWidth - 24);
   const session = item.session;
   const lastReplyTime = session.last_reply_at == null
     ? null
-    : relativeSessionTime(session.last_reply_at, now);
+    : relativeSessionTime(session.last_reply_at, now, t);
   return (
     <TaskRowMenu
-      accessibilityLabel={`${displaySessionTitle(session)}, ${providerLabel(session.provider)} in ${item.projectName}${running ? ', Running' : ''}${lastReplyTime ? `, Last reply: ${lastReplyTime}` : ''}`}
+      accessibilityLabel={`${displaySessionTitle(session, t('session.new_task'))}, ${providerLabel(session.provider)} in ${item.projectName}${running ? `, ${t('connection.running')}` : ''}${lastReplyTime ? `, ${t('transcript.last_reply', { time: lastReplyTime })}` : ''}`}
       onDelete={onDelete}
       onRename={onRename}
       onSelect={onSelect}

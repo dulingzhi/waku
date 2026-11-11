@@ -21,6 +21,7 @@ import { Sheet, SheetRow } from '@/components/sheet';
 import { NativeTint, Radius } from '@/constants/theme';
 import { useReducedMotion } from '@/hooks/use-reduced-motion';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import { useDaemon } from '@/lib/daemon-context';
 import {
   isPrivateDaemonAddress,
@@ -39,6 +40,7 @@ export function DaemonPickerSheet({
   visible: boolean;
 }) {
   const daemon = useDaemon();
+  const { t } = useI18n();
   const reducedMotion = useReducedMotion();
   const { width } = useWindowDimensions();
   const [editorTarget, setEditorTarget] = useState<EditorTarget>(undefined);
@@ -144,14 +146,14 @@ export function DaemonPickerSheet({
             importantForAccessibility={editorTarget === undefined ? 'auto' : 'no-hide-descendants'}
             pointerEvents={editorTarget === undefined ? 'auto' : 'none'}
             style={{ width: pageWidth }}>
-            <SheetPageHeader title="Daemons" />
+            <SheetPageHeader title={t('daemon.list_title')} />
             <DaemonList
               onEdit={(item) => pushEditor(item.id)}
               onSelect={select}
             />
             <SheetRow
-              description="Connect another host"
-              label="Add Daemon…"
+              description={t('daemon.connect_another_hint')}
+              label={t('daemon.connect_another')}
               leading={(
                 <AppSymbol
                   name={{ ios: 'plus.circle', android: 'add_circle', web: 'add_circle' }}
@@ -195,6 +197,7 @@ function DaemonEditor({
   profile?: DaemonProfile;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const daemon = useDaemon();
   const [name, setName] = useState(profile?.name ?? '');
   const [address, setAddress] = useState(profile?.address ?? '');
@@ -264,10 +267,10 @@ function DaemonEditor({
     if (!profile || saving || removing) return;
     Alert.alert(
       `Remove ${profile.name}?`,
-      'This removes the saved address and token from this device. Tasks remain on the daemon host.',
+      t('daemon.remove_body'),
       [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Remove', style: 'destructive', onPress: () => void remove() },
+        { text: t('common.cancel'), style: 'cancel' },
+        { text: t('common.remove'), style: 'destructive', onPress: () => void remove() },
       ],
     );
   }
@@ -276,14 +279,14 @@ function DaemonEditor({
     <View style={styles.editor}>
       <SheetPageHeader
         backDisabled={saving || removing}
-        title={profile ? 'Edit Daemon' : 'Add Daemon'}
+        title={profile ? t('daemon.edit_title') : t('daemon.add_title')}
         onBack={onBack}
       />
       <View style={[styles.formGroup, { backgroundColor: theme.overlay }]}>
         <View style={styles.formRow}>
           <Text style={[styles.fieldLabel, { color: theme.text }]}>Name</Text>
           <TextInput
-            accessibilityLabel="Daemon name"
+            accessibilityLabel={t('daemon.name_label')}
             autoCapitalize="words"
             autoCorrect={false}
             editable={!saving && !removing}
@@ -292,7 +295,7 @@ function DaemonEditor({
               setLocalError(null);
             }}
             onSubmitEditing={() => addressInput.current?.focus()}
-            placeholder="Optional"
+            placeholder={t('common.optional')}
             placeholderTextColor={theme.textTertiary}
             returnKeyType="next"
             selectionColor={NativeTint}
@@ -305,7 +308,7 @@ function DaemonEditor({
           <Text style={[styles.fieldLabel, { color: theme.text }]}>Address</Text>
           <TextInput
             ref={addressInput}
-            accessibilityLabel="Daemon WebSocket address"
+            accessibilityLabel={t('daemon.address_label')}
             autoCapitalize="none"
             autoCorrect={false}
             clearButtonMode="while-editing"
@@ -331,7 +334,7 @@ function DaemonEditor({
           <Text style={[styles.fieldLabel, { color: theme.text }]}>Token</Text>
           <TextInput
             ref={tokenInput}
-            accessibilityLabel="Daemon token"
+            accessibilityLabel={t('daemon.token_label')}
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect={false}
@@ -424,11 +427,12 @@ function SheetPageHeader({
   title: string;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   return (
     <View style={styles.pageHeader}>
       {onBack ? (
         <Pressable
-          accessibilityLabel="Back to daemons"
+          accessibilityLabel={t('daemon.back_to_list')}
           accessibilityRole="button"
           accessibilityState={{ disabled: backDisabled }}
           disabled={backDisabled}
@@ -463,6 +467,7 @@ function ConnectionFootnote({
   security: ConnectionSecurity;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   let color: ColorValue = theme.textTertiary;
   let icon: Parameters<typeof AppSymbol>[0]['name'] = {
     ios: 'info.circle',

@@ -13,9 +13,12 @@ export interface DaemonProfileInput {
   token?: string;
 }
 
-export function normalizeDaemonAddress(value: string): string {
+export function normalizeDaemonAddress(
+  value: string,
+  t?: (key: string) => string,
+): string {
   let address = value.trim();
-  if (!address) throw new Error('Enter the daemon address');
+  if (!address) throw new Error(t?.('errors.enter_address') ?? 'Enter the daemon address');
 
   if (!/^[a-z][a-z\d+.-]*:\/\//i.test(address)) address = `ws://${address}`;
   if (/^http:\/\//i.test(address)) address = `ws://${address.slice(7)}`;
@@ -25,13 +28,13 @@ export function normalizeDaemonAddress(value: string): string {
   try {
     url = new URL(address);
   } catch {
-    throw new Error('Enter a valid ws:// or wss:// daemon address');
+    throw new Error(t?.('errors.invalid_daemon_address') ?? 'Enter a valid ws:// or wss:// daemon address');
   }
   if (url.protocol !== 'ws:' && url.protocol !== 'wss:') {
-    throw new Error('The daemon address must use ws:// or wss://');
+    throw new Error(t?.('errors.daemon_address_scheme') ?? 'The daemon address must use ws:// or wss://');
   }
   if (!url.hostname || url.username || url.password) {
-    throw new Error('The daemon address must contain a host and no credentials');
+    throw new Error(t?.('errors.daemon_address_host') ?? 'The daemon address must contain a host and no credentials');
   }
 
   url.pathname = '';

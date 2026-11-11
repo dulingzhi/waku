@@ -84,6 +84,15 @@ const GAP_TURN = 16;
 const GAP_GROUP = 12;
 const GAP_BLOCK = 12;
 
+const GROUP_LABEL_KEYS: Record<SessionGroupId, string> = {
+  today: 'sidebar.today',
+  yesterday: 'sidebar.yesterday',
+  week: 'sidebar.this_week',
+  month: 'sidebar.this_month',
+  year: 'sidebar.this_year',
+  more: 'sidebar.more',
+};
+
 const GROUPS: Array<{ id: SessionGroupId; title: string }> = [
   { id: 'today', title: 'Today' },
   { id: 'yesterday', title: 'Yesterday' },
@@ -93,9 +102,18 @@ const GROUPS: Array<{ id: SessionGroupId; title: string }> = [
   { id: 'more', title: 'More' },
 ];
 
-export function displaySessionTitle(session: AgentSession): string {
+/** Translation is optional so these builders stay usable without a provider;
+ * the English titles above are the fallback. */
+export type Translator = (key: string, params?: Record<string, string | number>) => string;
+
+function groupTitle(id: SessionGroupId, t?: Translator): string {
+  if (t) return t(GROUP_LABEL_KEYS[id]);
+  return GROUPS.find((group) => group.id === id)?.title ?? id;
+}
+
+export function displaySessionTitle(session: AgentSession, fallback?: string): string {
   if (session.title !== 'New task' && session.title.trim()) return session.title.trim();
-  return session.auto_title?.trim() || 'New Task';
+  return session.auto_title?.trim() || fallback || 'New Task';
 }
 
 export function sessionHasStarted(session: AgentSession): boolean {
@@ -114,8 +132,10 @@ export function groupSessions(
   projects: Project[],
   sessions: AgentSession[],
   now = new Date(),
+  t?: Translator,
 ): SessionGroup[] {
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+  const unknownProject = t ? t('sidebar.unknown_project') : 'Unknown project';
   const grouped = new Map<SessionGroupId, SessionListItem[]>();
   for (const session of sessions.filter(sessionHasStarted).sort((a, b) => (
     sessionTimestamp(b) - sessionTimestamp(a)
@@ -124,14 +144,14 @@ export function groupSessions(
     const items = grouped.get(id) ?? [];
     items.push({
       session,
-      projectName: projectNames.get(session.project_id) || 'Unknown project',
+      projectName: projectNames.get(session.project_id) || unknownProject,
       timestamp: sessionTimestamp(session),
     });
     grouped.set(id, items);
   }
   return GROUPS.flatMap((group) => {
     const data = grouped.get(group.id);
-    return data?.length ? [{ ...group, data }] : [];
+    return data?.length ? [{ ...group, title: groupTitle(group.id, t), data }] : [];
   });
 }
 
@@ -154,8 +174,18 @@ export function sessionDateGroup(timestamp: number, now = new Date()): SessionGr
   return 'more';
 }
 
-export function relativeSessionTime(timestamp: number, now = Date.now()): string {
+export function relativeSessionTime(
+  timestamp: number,
+  now = Date.now(),
+  t?: Translator,
+): string {
   const elapsed = Math.max(0, Math.floor(now / 1_000) - timestamp);
+  if (t) {
+    if (elapsed < 60) return t('sidebar.just_now');
+    if (elapsed < 3_600) return t('sidebar.minutes_ago', { count: Math.floor(elapsed / 60) });
+    if (elapsed < 86_400) return t('sidebar.hours_ago', { count: Math.floor(elapsed / 3_600) });
+    return t('sidebar.days_ago', { count: Math.floor(elapsed / 86_400) });
+  }
   if (elapsed < 60) return 'just now';
   if (elapsed < 3_600) return `${Math.floor(elapsed / 60)}m`;
   if (elapsed < 86_400) return `${Math.floor(elapsed / 3_600)}h`;
@@ -179,7 +209,16 @@ export function providerLabel(provider: ProviderKind): string {
   return labels[provider];
 }
 
-export function runtimeModeLabel(mode: RuntimeMode): string {
+export function runtimeModeLabel(mode: RuntimeMode, t?: Translator): string {
+  if (t) {
+    const keys: Record<RuntimeMode, string> = {
+      ask: 'mode.supervised',
+      autoAcceptEdits: 'mode.auto_accept_edits',
+      auto: 'mode.auto',
+      fullAccess: 'mode.full_access',
+    };
+    return t(keys[mode]);
+  }
   const labels: Record<RuntimeMode, string> = {
     ask: 'Ask first',
     autoAcceptEdits: 'Accept edits',

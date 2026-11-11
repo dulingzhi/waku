@@ -40,6 +40,7 @@ import { DiffView } from "@/components/diff-view";
 import { liquidGlass } from "@/components/glass-surface";
 import { MonoFont, NativeTint, Radius } from "@/constants/theme";
 import { useTheme } from "@/hooks/use-theme";
+import { useI18n } from "@/lib/i18n-context";
 import {
   collectWorkspaceDiff,
   daemonKeys,
@@ -66,24 +67,24 @@ const MAX_FILE_CHARACTERS = 250_000;
 const SURFACE_DETAILS: Record<
   TaskSurface,
   {
-    title: string;
-    subtitle: string;
+    labelKey: string;
+    subtitleKey: string;
     icon: Parameters<typeof AppSymbol>[0]["name"];
   }
 > = {
   terminal: {
-    title: "Terminal",
-    subtitle: "Shell in this task’s workspace",
+    labelKey: "workspace.terminal",
+    subtitleKey: "workspace.shell_placeholder",
     icon: { ios: "terminal", android: "terminal", web: "terminal" },
   },
   files: {
-    title: "Files",
-    subtitle: "Workspace files",
+    labelKey: "workspace.files_short",
+    subtitleKey: "workspace.files",
     icon: { ios: "folder", android: "folder", web: "folder" },
   },
   review: {
-    title: "Review",
-    subtitle: "Workspace changes",
+    labelKey: "workspace.review",
+    subtitleKey: "workspace.changes",
     icon: {
       ios: "doc.text.magnifyingglass",
       android: "difference",
@@ -164,6 +165,7 @@ function SurfaceHeader({
   action?: ReactNode;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const details = SURFACE_DETAILS[surface];
   return (
     <View style={[styles.header, { borderBottomColor: theme.border }]}>
@@ -179,13 +181,13 @@ function SurfaceHeader({
           numberOfLines={1}
           style={[styles.headerTitle, { color: theme.text }]}
         >
-          {details.title}
+          {t(details.labelKey)}
         </Text>
         <Text
           numberOfLines={1}
           style={[styles.headerSubtitle, { color: theme.textTertiary }]}
         >
-          {subtitle ?? details.subtitle}
+          {subtitle ?? t(details.subtitleKey)}
         </Text>
       </View>
       {action}
@@ -195,13 +197,14 @@ function SurfaceHeader({
 
 function TerminalSurface({ root }: { root: string | null }) {
   const theme = useTheme();
+  const { t } = useI18n();
 
   if (!root) {
     return (
       <View style={[styles.fill, { backgroundColor: theme.surface }]}>
         <PanelMessage
-          detail="This task does not have an available workspace."
-          title="No workspace"
+          detail={t('workspace.no_workspace_body')}
+          title={t('workspace.no_workspace')}
         />
       </View>
     );
@@ -210,8 +213,8 @@ function TerminalSurface({ root }: { root: string | null }) {
     return (
       <View style={[styles.fill, { backgroundColor: theme.surface }]}>
         <PanelMessage
-          detail="The native terminal is available on iOS and Android."
-          title="Unavailable on web"
+          detail={t('workspace.terminal_unsupported')}
+          title={t('workspace.terminal_web_unavailable')}
         />
       </View>
     );
@@ -227,6 +230,7 @@ function TerminalSurface({ root }: { root: string | null }) {
 function TerminalSession({ root }: { root: string }) {
   const daemon = useDaemon();
   const theme = useTheme();
+  const { t } = useI18n();
   const colorScheme = useColorScheme();
   const terminal = useRef<TerminalViewRef>(null);
   const terminalId = useRef(Crypto.randomUUID()).current;
@@ -253,7 +257,7 @@ function TerminalSession({ root }: { root: string }) {
         setError(
           typeof event.event.payload === "string"
             ? event.event.payload
-            : "The terminal connection failed.",
+            : t('workspace.terminal_failed'),
         );
       }
     });
@@ -335,7 +339,7 @@ function TerminalSession({ root }: { root: string }) {
               { color: error ? theme.danger : theme.textSecondary },
             ]}
           >
-            {error ?? (exited ? "Shell exited" : "Reconnecting…")}
+            {error ?? (exited ? t('workspace.shell_exited') : t('composer_ui.reconnecting'))}
           </Text>
         </View>
       ) : null}
@@ -346,6 +350,7 @@ function TerminalSession({ root }: { root: string }) {
 function FilesSurface({ root }: { root: string | null }) {
   const daemon = useDaemon();
   const theme = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const profileId = daemon.activeProfile?.id ?? "disconnected";
   const [expanded, setExpanded] = useState<string[]>([]);
@@ -379,8 +384,8 @@ function FilesSurface({ root }: { root: string | null }) {
       <View style={styles.fill}>
         <SurfaceHeader surface="files" />
         <PanelMessage
-          detail="This task does not have an available workspace."
-          title="No workspace"
+          detail={t('workspace.no_workspace_body')}
+          title={t('workspace.no_workspace')}
         />
       </View>
     );
@@ -565,6 +570,7 @@ function ReviewSurface({
 }) {
   const daemon = useDaemon();
   const theme = useTheme();
+  const { t } = useI18n();
   const insets = useSafeAreaInsets();
   const profileId = daemon.activeProfile?.id ?? "disconnected";
   const lastTurn = useMemo(() => latestReviewTurnSource(session), [session]);
@@ -617,8 +623,8 @@ function ReviewSurface({
       <View style={styles.fill}>
         <SurfaceHeader surface="review" />
         <PanelMessage
-          detail="This task does not have an available workspace."
-          title="No workspace"
+          detail={t('workspace.no_workspace_body')}
+          title={t('workspace.no_workspace')}
         />
       </View>
     );

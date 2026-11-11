@@ -6,6 +6,7 @@ import type { ComposerAccessMenuProps } from './composer-access-menu.types';
 import { AccessSheet } from './session-option-sheets';
 import { Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import { runtimeModeLabel } from '@/lib/session-presentation';
 
 const MODE_ICONS = {
@@ -18,12 +19,13 @@ const MODE_ICONS = {
 /** Non-iOS fallback. iOS replaces this with a native anchored menu. */
 export function ComposerAccessMenu({ mode, onApply }: ComposerAccessMenuProps) {
   const theme = useTheme();
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
 
   return (
     <>
       <Pressable
-        accessibilityLabel={`Agent access, ${runtimeModeLabel(mode)}`}
+        accessibilityLabel={`${t('composer_ui.agent_access')}, ${runtimeModeLabel(mode, t)}`}
         accessibilityRole="button"
         onPress={() => setOpen(true)}
         style={({ pressed }) => [styles.trigger, { opacity: pressed ? 0.55 : 1 }]}>

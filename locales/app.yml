@@ -2189,3 +2189,515 @@ usage_error.unknown_error:
   en: unknown error
 usage_error.curl_no_status:
   en: curl returned no HTTP status line
+language_picker.title:
+  en: Language
+task_history.title:
+  en: Task history
+task_history.search:
+  en: Search tasks
+task_history.empty:
+  en: No tasks yet
+task_history.empty_search:
+  en: No matching tasks
+task_history.daemon_hint:
+  en: Opens the daemon switcher
+daemon.add_button:
+  en: Add daemon
+daemon.add_title:
+  en: Add Daemon
+daemon.edit_title:
+  en: Edit Daemon
+daemon.list_title:
+  en: Daemons
+daemon.none_saved:
+  en: No saved daemons
+daemon.none_saved_body:
+  en: Add the address and token shown in Waku Desktop’s Daemon settings.
+daemon.list_footer:
+  en: Only the selected daemon stays connected. Credentials are protected by the device keychain and never pass through a Waku service.
+daemon.name_label:
+  en: Daemon name
+daemon.address_label:
+  en: Daemon WebSocket address
+daemon.token_label:
+  en: Daemon token
+daemon.connect_another:
+  en: Add Daemon…
+daemon.connect_another_hint:
+  en: Connect another host
+daemon.saving:
+  en: Saving…
+daemon.removing:
+  en: Removing…
+daemon.remove_button:
+  en: Remove Daemon
+daemon.remove_body:
+  en: This removes the saved address and token from this device. Tasks remain on the daemon host.
+daemon.back_to_list:
+  en: Back to daemons
+daemon.token_keep_hint:
+  en: Leave the token blank to keep the saved credential.
+daemon.token_where_hint:
+  en: Copy the address and token from Waku Desktop → Settings → Daemon.
+daemon.invalid_address:
+  en: Enter a valid ws:// or wss:// WebSocket address.
+daemon.plaintext_blocked:
+  en: Public plaintext connections are blocked. Use wss:// for this host.
+daemon.plaintext_warning:
+  en: Unencrypted connection. Use it only on a LAN or tailnet you trust.
+daemon.encrypted_browser:
+  en: Encrypted connection. The token stays in this browser.
+daemon.encrypted_device:
+  en: Encrypted connection. The token is stored in this device’s keychain.
+session_unavailable:
+  en: This task no longer exists on the daemon
+session.project_gone:
+  en: This task’s project is no longer available on the daemon
+session.goals_need_codex:
+  en: Goals require Codex
+session.codex_not_installed:
+  en: Codex is not installed on the daemon host
+session.codex_start_failed:
+  en: The daemon could not start Codex
+session.steer_queued:
+  en: The agent couldn’t take that mid-turn, so it was queued for the next turn.
+task.history_button:
+  en: Task history
+task.options:
+  en: Task options
+task.rename:
+  en: Rename task
+task.title_field:
+  en: Task title
+task.delete:
+  en: Delete task
+task.delete_body:
+  en: This removes the task and its transcript from the daemon for every device.
+task.copy_last_response:
+  en: Copy last response
+task.reload_transcript:
+  en: Reload transcript
+task.delete_failed:
+  en: Couldn’t delete task
+task.model_change_failed:
+  en: Couldn’t change model
+task.row_actions_hint:
+  en: Long press for actions
+new_task.title:
+  en: New Task
+new_task.start:
+  en: Start task
+new_task.prompt_placeholder:
+  en: Task prompt
+new_task.choose_first:
+  en: Choose a project and model first
+new_task.checking_agents:
+  en: Checking agents…
+new_task.no_agents:
+  en: No agents installed
+new_task.choose_project:
+  en: Choose a project
+new_task.default_branch:
+  en: Default branch
+new_task.base_branch:
+  en: Base branch
+new_task.current_branch:
+  en: Current branch
+new_task.isolated_worktree:
+  en: Isolated worktree
+new_task.work_locally:
+  en: Work locally
+new_task.work_locally_hint:
+  en: Run in the project checkout
+new_task.isolated_hint:
+  en: A separate branch and folder that never touches the checkout
+new_task.browse_daemon:
+  en: Browse daemon host…
+new_task.browse_daemon_hint:
+  en: Pick any folder on the daemon host, or create an empty workspace
+composer_ui.message_agent:
+  en: Message agent
+composer_ui.queue_follow_up:
+  en: Queue a follow-up…
+composer_ui.message_working:
+  en: Message the working agent…
+composer_ui.reconnect_to_message:
+  en: Reconnect to message this agent
+composer_ui.reconnecting:
+  en: Reconnecting…
+composer_ui.connecting:
+  en: Connecting…
+composer_ui.stop_agent:
+  en: Stop agent
+composer_ui.queue_message:
+  en: Queue message
+composer_ui.send_message:
+  en: Send message
+composer_ui.dismiss_error:
+  en: Dismiss error
+composer_ui.remove_queued:
+  en: Remove queued message
+composer_ui.model_options:
+  en: Model options
+composer_ui.camera_permission:
+  en: Camera access is required to take a photo
+composer_ui.custom_answer:
+  en: Custom answer
+composer_ui.custom_answer_placeholder:
+  en: Write another answer…
+composer_ui.mention_files:
+  en: Mention files
+composer_ui.add_to_message:
+  en: Add to message
+composer_ui.search_commands:
+  en: Search commands
+composer_ui.search_project_files:
+  en: Search project files
+composer_ui.search_commands_placeholder:
+  en: Search commands…
+composer_ui.search_files_placeholder:
+  en: Search project files…
+composer_ui.loading_commands:
+  en: Loading commands…
+composer_ui.finding_files:
+  en: Finding files…
+composer_ui.no_matching_commands:
+  en: No matching commands
+composer_ui.no_matching_files:
+  en: No matching files
+composer_ui.fast_mode_unavailable:
+  en: Fast mode is unavailable for this model
+composer_ui.agent_access:
+  en: Agent access
+composer_ui.approve_everything:
+  en: Approve every command and file edit.
+composer_ui.works_autonomously:
+  en: Works autonomously inside the project.
+composer_ui.no_approval_prompts:
+  en: No approval prompts. The agent acts freely.
+sessions.untitled:
+  en: Untitled session
+sessions.search:
+  en: Search sessions…
+sessions.search_provider:
+  en: Search provider sessions
+sessions.usage_limit:
+  en: Usage limit reached
+sessions.budget:
+  en: Budget reached
+goal.objective:
+  en: Goal objective
+goal.objective_placeholder:
+  en: What should the agent keep working on?
+goal.set:
+  en: Set goal
+goal.save:
+  en: Save goal
+goal.replace:
+  en: Replace goal
+goal.pause:
+  en: Pause goal
+goal.resume:
+  en: Resume goal
+goal.clear:
+  en: Clear goal
+models.default:
+  en: Default model
+models.no_match:
+  en: No models match your search.
+models.search:
+  en: Search models
+models.clear_search:
+  en: Clear search
+models.all_providers:
+  en: Shows all providers
+connection.something_wrong:
+  en: Something went wrong.
+connection.trying_again:
+  en: Trying again…
+connection.retry_now:
+  en: Retry now
+connection.retry_hint:
+  en: Retry daemon connection
+connection.retry:
+  en: Retry daemon connection now
+connection.edit:
+  en: Edit daemon connection
+connection.offline:
+  en: Offline
+connection.needs_attention:
+  en: Needs attention
+connection.reconnecting:
+  en: Reconnecting…
+connection.connecting_daemon:
+  en: Connecting to daemon…
+connection.not_connected:
+  en: Not connected
+connection.switch_hint:
+  en: Switches to this daemon
+transcript.waiting_for_you:
+  en: Waiting for you
+transcript.loading_earlier:
+  en: Loading earlier messages
+transcript.empty:
+  en: No messages yet
+transcript.load_failed:
+  en: Couldn’t load this task
+transcript.copy_hint:
+  en: Long press to copy
+transcript.expand_work:
+  en: Shows the agent’s work
+transcript.collapse_work:
+  en: Collapses the agent’s work
+transcript.new_content:
+  en: New content arrived below
+transcript.scroll_to_latest:
+  en: Scroll to latest
+transcript.open_details:
+  en: Opens the details
+transcript.show_group:
+  en: Shows the whole group
+transcript.open_activity:
+  en: Opens the activity list
+attachment.retry:
+  en: Tap to retry
+attachment.no_preview:
+  en: No preview
+attachment.close_preview:
+  en: Close image preview
+workspace.no_workspace:
+  en: No workspace
+workspace.no_workspace_body:
+  en: This task does not have an available workspace.
+workspace.shell_placeholder:
+  en: Shell in this task’s workspace
+workspace.files:
+  en: Workspace files
+workspace.changes:
+  en: Workspace changes
+workspace.terminal_unsupported:
+  en: The native terminal is available on iOS and Android.
+workspace.terminal_web_unavailable:
+  en: Unavailable on web
+workspace.terminal_failed:
+  en: The terminal connection failed.
+workspace.shell_exited:
+  en: Shell exited
+workspace.no_file:
+  en: Couldn’t read file
+workspace.no_files_loaded:
+  en: Couldn’t load files
+workspace.no_visible_files:
+  en: The workspace has no visible files.
+workspace.no_files:
+  en: No files
+workspace.collapse_folder:
+  en: Collapses folder
+workspace.expand_folder:
+  en: Expands folder
+workspace.open_file:
+  en: Opens file
+workspace.back_to_files:
+  en: Returns to the workspace file list
+workspace.review_source:
+  en: Choose review source
+workspace.review_failed:
+  en: Couldn’t load review
+workspace.no_changes:
+  en: No changes
+workspace.no_changes_body:
+  en: There are no changes in this comparison.
+project_picker.add_current:
+  en: Add current folder
+project_picker.path_label:
+  en: Path on daemon host
+project_picker.open_path:
+  en: Open entered path
+project_picker.file_system:
+  en: File system
+project_picker.private_workspace:
+  en: Creates a private workspace on the daemon host
+project_picker.loading:
+  en: Loading folder…
+project_picker.empty:
+  en: No folders here
+project_picker.open_folder:
+  en: Opens this folder
+errors.needs_daemon_and_project:
+  en: Connect to a daemon and choose a project first
+errors.daemon_settings_load:
+  en: Could not load daemon settings
+errors.remember_daemon:
+  en: Couldn’t remember the selected daemon
+errors.read_token:
+  en: Couldn’t read this daemon token
+errors.token_missing:
+  en: This daemon token is missing. Edit the connection to add it again.
+errors.load_daemons:
+  en: Couldn’t load saved daemons
+errors.daemon_gone:
+  en: This saved daemon no longer exists
+errors.use_wss:
+  en: Use wss:// for a daemon outside your local or private network
+errors.enter_token:
+  en: Enter the daemon token
+errors.enter_address:
+  en: Enter the daemon address
+errors.invalid_daemon_address:
+  en: Enter a valid ws:// or wss:// daemon address
+errors.daemon_address_scheme:
+  en: The daemon address must use ws:// or wss://
+errors.daemon_address_host:
+  en: The daemon address must contain a host and no credentials
+errors.daemon_rejected_token:
+  en: The daemon rejected this token. Edit the connection and paste the current token from Waku’s Daemon settings.
+errors.daemon_version_mismatch:
+  en: This daemon runs a different Waku version than the app. Update Waku on the host, or update this app.
+errors.not_a_daemon:
+  en: Something other than a Waku daemon answered at this address. Check the address and port.
+errors.daemon_timeout:
+  en: The daemon didn’t answer in time.
+errors.daemon_closed:
+  en: The daemon connection closed.
+errors.daemon_stopped_responding:
+  en: The daemon stopped responding.
+errors.connect_failed:
+  en: Couldn’t connect to this daemon.
+errors.absolute_path:
+  en: Enter an absolute path on the daemon host
+errors.unexpected_directory:
+  en: The daemon returned an unexpected directory response
+errors.unexpected_workspace:
+  en: The daemon returned an unexpected workspace response
+errors.unexpected_worktree:
+  en: The daemon returned an unexpected worktree result
+errors.unexpected_branches:
+  en: The daemon returned an unexpected branches response
+errors.unexpected_file_tree:
+  en: The daemon returned an unexpected file tree
+errors.unexpected_command_catalog:
+  en: The daemon returned an unexpected command catalog
+errors.unexpected_project_index:
+  en: The daemon returned an unexpected project file index
+errors.unexpected_file:
+  en: The daemon returned an unexpected file response
+errors.unexpected_diff:
+  en: The daemon returned an unexpected diff response
+errors.attachment_no_daemon:
+  en: This attachment has no daemon reference
+errors.daemon_disconnected_short:
+  en: Waku daemon disconnected
+errors.client_disconnected:
+  en: Waku client disconnected
+task_history.empty_search_body:
+  en: Try another title, project, or agent.
+task_history.load_failed:
+  en: Couldn’t load tasks
+connection.running:
+  en: Running
+transcript.last_reply:
+  en: "Last reply: %{time}"
+daemon.saved_daemon:
+  en: saved daemon
+daemon.edit_named:
+  en: Edit %{name}
+onboarding.daemon_title:
+  en: Your agents, everywhere.
+onboarding.daemon_body:
+  en: Connect to Waku running on your Mac, workstation, or private server. Add more than one and switch whenever you need.
+onboarding.daemon_security:
+  en: Tokens stay on this device and go directly to the host you choose.
+composer.attachment_preview:
+  en: Preview %{name}
+composer.attachment_retry_preview:
+  en: Retry preview for %{name}
+composer_ui.commands:
+  en: Commands
+composer_ui.files:
+  en: Files
+composer_ui.camera:
+  en: Camera
+composer_ui.photo:
+  en: Photo
+task.title:
+  en: Task
+workspace.terminal:
+  en: Terminal
+workspace.files_short:
+  en: Files
+workspace.review:
+  en: Review
+task_history.empty_body:
+  en: Start an agent on anything — a bug, a feature, a question about the code.
+rename.task_title:
+  en: Rename task
+rename.task_title_field:
+  en: Task title
+connection.the_daemon:
+  en: the daemon
+connection.cant_connect:
+  en: Can't connect to %{name}
+connection.retrying_in:
+  en: Retrying in %{seconds}s
+connection.reconnecting_to:
+  en: Reconnecting to %{name}…
+connection.cant_reach:
+  en: Can't reach %{name}
+connection.reconnected_to:
+  en: Reconnected to %{name}
+connection.edit_short:
+  en: Edit
+models.no_model_list:
+  en: This agent doesn’t expose a model list; it will use its own default.
+rename.failed:
+  en: Couldn't rename task
+context.percent_full:
+  en: Context %{percent} percent full
+composer_ui.searching:
+  en: Searching
+composer_ui.folder:
+  en: Folder
+composer_ui.file:
+  en: File
+composer_ui.attach_files:
+  en: Files
+composer_ui.camera_unavailable:
+  en: Camera is unavailable on this device
+composer_ui.photo_library:
+  en: Photo library
+composer_ui.file_too_large:
+  en: "%{name} is too large to attach (32 MB maximum)"
+composer_ui.attach_failed:
+  en: Couldn’t add that file
+composer_ui.camera_permission_denied:
+  en: Camera access is required to take a photo
+composer_ui.photo_permission_denied:
+  en: Photo access is required to choose a photo
+diff.added:
+  en: Added
+diff.deleted:
+  en: Deleted
+diff.modified:
+  en: Modified
+sessions.active:
+  en: Active
+sessions.paused:
+  en: Paused
+sessions.blocked:
+  en: Stalled
+sessions.complete:
+  en: Complete
+sessions.none_found:
+  en: No sessions found
+goal.limit_reached:
+  en: Goal needs your input
+common.save:
+  en: Save
+common.optional:
+  en: Optional
+daemon.add_short:
+  en: Add
+composer_ui.send_to_working:
+  en: Send to working agent
+daemon.title:
+  en: Daemons

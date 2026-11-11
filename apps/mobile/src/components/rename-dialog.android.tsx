@@ -11,12 +11,14 @@ import { useRef, useState } from 'react';
 import { StyleSheet } from 'react-native';
 
 import type { RenameDialogProps } from '@/components/rename-dialog.types';
+import { useI18n } from '@/lib/i18n-context';
 
 export function RenameDialog(props: RenameDialogProps) {
   return props.visible ? <NativeRenameDialog {...props} /> : null;
 }
 
 function NativeRenameDialog({ initialValue, onDismiss, onSubmit }: RenameDialogProps) {
+  const { t } = useI18n();
   const title = useNativeState(initialValue);
   const selection = useNativeState({ start: 0, end: initialValue.length });
   const saving = useRef(false);
@@ -44,7 +46,7 @@ function NativeRenameDialog({ initialValue, onDismiss, onSubmit }: RenameDialogP
           if (!saving.current) onDismiss();
         }}>
         <AlertDialog.Title>
-          <Text>Rename task</Text>
+          <Text>{t('task.rename')}</Text>
         </AlertDialog.Title>
         <AlertDialog.Text>
           <OutlinedTextField
@@ -58,7 +60,7 @@ function NativeRenameDialog({ initialValue, onDismiss, onSubmit }: RenameDialogP
             singleLine
             value={title}>
             <OutlinedTextField.Label>
-              <Text>Task title</Text>
+              <Text>{t('task.title_field')}</Text>
             </OutlinedTextField.Label>
             {error ? (
               <OutlinedTextField.SupportingText>
@@ -69,12 +71,12 @@ function NativeRenameDialog({ initialValue, onDismiss, onSubmit }: RenameDialogP
         </AlertDialog.Text>
         <AlertDialog.DismissButton>
           <TextButton enabled={!isSaving} onClick={onDismiss}>
-            <Text>Cancel</Text>
+            <Text>{t('common.cancel')}</Text>
           </TextButton>
         </AlertDialog.DismissButton>
         <AlertDialog.ConfirmButton>
           <TextButton enabled={!isSaving} onClick={() => save(title.get())}>
-            <Text>Rename</Text>
+            <Text>{t('common.rename')}</Text>
           </TextButton>
         </AlertDialog.ConfirmButton>
       </AlertDialog>

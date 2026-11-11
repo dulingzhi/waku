@@ -21,12 +21,14 @@ import { AppSymbol } from "@/components/app-symbol";
 import { Radius } from "@/constants/theme";
 import { useTheme } from "@/hooks/use-theme";
 import { useDaemon } from "@/lib/daemon-context";
+import { useI18n } from "@/lib/i18n-context";
 import {
   isPrivateDaemonAddress,
   normalizeDaemonAddress,
 } from "@/lib/daemon-profile";
 
 export default function DaemonEditorScreen() {
+  const { t } = useI18n();
   const colors = useNativeFormColors();
   const params = useLocalSearchParams<{ id?: string | string[] }>();
   const profileId = Array.isArray(params.id) ? params.id[0] : params.id;
@@ -104,11 +106,11 @@ export default function DaemonEditorScreen() {
     if (!profile || removing || saving) return;
     Alert.alert(
       `Remove ${profile.name}?`,
-      "This removes the saved address and token from this device. Tasks remain on the daemon host.",
+      t('daemon.remove_body'),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: t('common.cancel'), style: 'cancel' },
         {
-          text: "Remove",
+          text: t('common.remove'),
           style: "destructive",
           onPress: () => void remove(),
         },
@@ -120,7 +122,7 @@ export default function DaemonEditorScreen() {
     <View style={[styles.screen, { backgroundColor: colors.background }]}>
       <Stack.Screen
         options={{
-          title: profile ? "Edit Daemon" : "Add Daemon",
+          title: profile ? t('daemon.edit_title') : t('daemon.add_title'),
           contentStyle: { backgroundColor: colors.background },
           headerBackVisible: false,
           headerStyle: { backgroundColor: colors.background },
@@ -132,7 +134,7 @@ export default function DaemonEditorScreen() {
                 unstable_headerLeftItems: () => [
                   {
                     type: "button" as const,
-                    label: "Cancel",
+                    label: t('common.cancel'),
                     disabled: saving || removing,
                     onPress: navigateBack,
                   },
@@ -140,7 +142,7 @@ export default function DaemonEditorScreen() {
                 unstable_headerRightItems: () => [
                   {
                     type: "button" as const,
-                    label: saving ? "Saving…" : profile ? "Save" : "Add",
+                    label: saving ? t('daemon.saving') : profile ? t('common.save') : t('daemon.add_short'),
                     variant: "done" as const,
                     disabled: !canSave,
                     onPress: () => void save(),
@@ -151,7 +153,7 @@ export default function DaemonEditorScreen() {
                 headerLeft: () => (
                   <HeaderButton
                     disabled={saving || removing}
-                    label="Cancel"
+                    label={t('common.cancel')}
                     onPress={navigateBack}
                   />
                 ),
@@ -159,7 +161,7 @@ export default function DaemonEditorScreen() {
                   <HeaderButton
                     disabled={!canSave}
                     emphasized
-                    label={saving ? "Saving…" : profile ? "Save" : "Add"}
+                    label={saving ? t('daemon.saving') : profile ? t('common.save') : t('daemon.add_short')}
                     onPress={() => void save()}
                   />
                 ),
@@ -183,7 +185,7 @@ export default function DaemonEditorScreen() {
               Name
             </Text>
             <TextInput
-              accessibilityLabel="Daemon name"
+              accessibilityLabel={t('daemon.name_label')}
               autoCapitalize="words"
               autoCorrect={false}
               editable={!saving && !removing}
@@ -210,7 +212,7 @@ export default function DaemonEditorScreen() {
             </Text>
             <TextInput
               ref={addressInput}
-              accessibilityLabel="Daemon WebSocket address"
+              accessibilityLabel={t('daemon.address_label')}
               autoCapitalize="none"
               autoCorrect={false}
               clearButtonMode="while-editing"
@@ -241,7 +243,7 @@ export default function DaemonEditorScreen() {
             </Text>
             <TextInput
               ref={tokenInput}
-              accessibilityLabel="Daemon token"
+              accessibilityLabel={t('daemon.token_label')}
               autoCapitalize="none"
               autoComplete="off"
               autoCorrect={false}
@@ -265,7 +267,7 @@ export default function DaemonEditorScreen() {
               onSubmitEditing={() => void save()}
             />
             <Pressable
-              accessibilityLabel={revealed ? "Hide token" : "Reveal token"}
+              accessibilityLabel={revealed ? t('daemon.hide_token') : t('daemon.reveal_token')}
               accessibilityRole="button"
               accessibilityState={{ selected: revealed }}
               disabled={saving || removing}
@@ -338,7 +340,7 @@ export default function DaemonEditorScreen() {
                   <ActivityIndicator color={colors.danger} size="small" />
                 )}
                 <Text style={[styles.removeText, { color: colors.danger }]}>
-                  {removing ? "Removing…" : "Remove Daemon"}
+                  {removing ? t('daemon.removing') : t('daemon.remove_button')}
                 </Text>
               </Pressable>
             </View>
@@ -364,6 +366,7 @@ function ConnectionFootnote({
   profile: boolean;
   security: ConnectionSecurity;
 }) {
+  const { t } = useI18n();
   const colors = useNativeFormColors();
   let color = colors.secondaryText;
   let icon: SymbolViewProps["name"] = {
@@ -372,8 +375,8 @@ function ConnectionFootnote({
     web: "info",
   };
   let text = profile
-    ? "Leave the token blank to keep the saved credential."
-    : "Copy the address and token from Waku Desktop → Settings → Daemon.";
+    ? t('daemon.token_keep_hint')
+    : t('daemon.token_where_hint');
 
   if (security === "invalid") {
     color = colors.danger;
@@ -382,7 +385,7 @@ function ConnectionFootnote({
       android: "error",
       web: "error",
     };
-    text = "Enter a valid ws:// or wss:// WebSocket address.";
+    text = t('daemon.invalid_address');
   } else if (security === "insecure") {
     color = colors.danger;
     icon = {
@@ -390,19 +393,18 @@ function ConnectionFootnote({
       android: "gpp_bad",
       web: "warning",
     };
-    text =
-      "Public plaintext connections are blocked. Use wss:// for this host.";
+    text = t('daemon.plaintext_blocked');
   } else if (security === "private") {
     color = colors.warning;
     icon = { ios: "wifi", android: "wifi", web: "wifi" };
-    text = "Unencrypted connection. Use it only on a LAN or tailnet you trust.";
+    text = t('daemon.plaintext_warning');
   } else if (security === "secure") {
     color = colors.success;
     icon = { ios: "lock.fill", android: "lock", web: "lock" };
     text = Platform.select({
-      web: "Encrypted connection. The token stays in this browser.",
+      web: t('daemon.encrypted_browser'),
       default:
-        "Encrypted connection. The token is stored in this device’s keychain.",
+        t('daemon.encrypted_device'),
     });
   }
 

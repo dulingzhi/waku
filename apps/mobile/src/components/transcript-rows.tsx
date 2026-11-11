@@ -17,6 +17,7 @@ import {
 import { useRowAnchor } from '@/components/transcript-anchor';
 import { MonoFont, Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import type { TranscriptRow } from '@/lib/session-presentation';
 import type { MarkdownStyles } from '@/md/render';
 import type { TranscriptMarkdownCache } from '@/md/transcript-cache';
@@ -42,6 +43,7 @@ export const TranscriptRowView = memo(function TranscriptRowView({
   onToggleFold: (turnId: string) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   switch (row.kind) {
     case 'user':
       return <UserBubble message={row.message} />;
@@ -108,10 +110,11 @@ function FoldRow({
   onToggle: (turnId: string) => void;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const keepTop = useRowAnchor();
   return (
     <Pressable
-      accessibilityHint={expanded ? 'Collapses the agent’s work' : 'Shows the agent’s work'}
+      accessibilityHint={expanded ? t('transcript.collapse_work') : t('transcript.expand_work')}
       accessibilityLabel={label}
       accessibilityRole="button"
       accessibilityState={{ expanded }}
@@ -145,6 +148,7 @@ const UserBubble = memo(
 
 function UserBubbleInner({ message }: { message: Message }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const content = message.display_content ?? message.content;
 
   async function copy() {
@@ -166,7 +170,7 @@ function UserBubbleInner({ message }: { message: Message }) {
       ) : null}
       {content ? (
         <Pressable
-          accessibilityHint="Long press to copy"
+          accessibilityHint={t('transcript.copy_hint')}
           delayLongPress={350}
           onLongPress={() => void copy()}
           style={[styles.userBubble, { backgroundColor: theme.raised }]}>
@@ -179,6 +183,7 @@ function UserBubbleInner({ message }: { message: Message }) {
 
 function ChangedFilesCard({ checkpoint }: { checkpoint: Checkpoint }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const keepTop = useRowAnchor();
   const [open, setOpen] = useState(false);
   return (
@@ -255,6 +260,7 @@ function formatElapsed(seconds: number): string {
 /** The live footer under the streaming tail: spinner, flavour word, elapsed. */
 export function WorkingStrip({ session }: { session: AgentSession }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const startedAt = session.turns.at(-1)?.started_at ?? null;
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1_000));
   useEffect(() => {
@@ -263,7 +269,7 @@ export function WorkingStrip({ session }: { session: AgentSession }) {
   }, []);
   const elapsed = startedAt ? Math.max(0, now - startedAt) : 0;
   const word = session.status === 'waiting'
-    ? 'Waiting for you'
+    ? t('transcript.waiting_for_you')
     : `${FLAVOUR_WORDS[(flavourSeed(session.id) + Math.floor(elapsed / 7)) % FLAVOUR_WORDS.length]}…`;
   return (
     <View accessibilityLiveRegion="polite" style={styles.workingStrip}>
@@ -282,8 +288,9 @@ export function WorkingStrip({ session }: { session: AgentSession }) {
  * extends ahead of the reader so this is rarely on screen for long. */
 export function EarlierIndicator() {
   const theme = useTheme();
+  const { t } = useI18n();
   return (
-    <View accessibilityLabel="Loading earlier messages" style={styles.earlier}>
+    <View accessibilityLabel={t('transcript.loading_earlier')} style={styles.earlier}>
       <ActivityIndicator color={theme.textGhost} size="small" />
     </View>
   );
@@ -299,11 +306,12 @@ export function SessionEmpty({
   missing: boolean;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   if (loading) return <ActivityIndicator color={theme.textTertiary} />;
   return (
     <View style={styles.empty}>
       <Text style={[styles.emptyTitle, { color: theme.text }]}>
-        {missing ? 'Task not found' : error ? 'Couldn’t load this task' : 'No messages yet'}
+        {missing ? t('errors.task_not_found') : error ? 'Couldn’t load this task' : t('transcript.empty')}
       </Text>
       {Boolean(error) && (
         <Text style={[styles.emptyBody, { color: theme.textSecondary }]}>

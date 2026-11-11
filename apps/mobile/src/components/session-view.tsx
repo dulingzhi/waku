@@ -50,29 +50,30 @@ import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
 import { sessionBusy } from '@/lib/mobile-runtime';
 import { useRuntime } from '@/lib/runtime-context';
+import { useI18n } from '@/lib/i18n-context';
 import { displaySessionTitle } from '@/lib/session-presentation';
 
 const SURFACE_MENU_COMMANDS = [
-  { id: 'terminal', title: 'Terminal', symbol: 'terminal' },
-  { id: 'files', title: 'Files', symbol: 'folder' },
-  { id: 'review', title: 'Review', symbol: 'doc.text.magnifyingglass' },
+  { id: 'terminal', labelKey: 'workspace.terminal', symbol: 'terminal' },
+  { id: 'files', labelKey: 'workspace.files_short', symbol: 'folder' },
+  { id: 'review', labelKey: 'workspace.review', symbol: 'doc.text.magnifyingglass' },
 ] as const;
 
 const TASK_MENU_COMMANDS = [
-  { id: 'rename', title: 'Rename task', symbol: 'pencil', destructive: false },
+  { id: 'rename', labelKey: 'task.rename', symbol: 'pencil', destructive: false },
   {
     id: 'copy-last-response',
-    title: 'Copy last response',
+    labelKey: 'task.copy_last_response',
     symbol: 'doc.on.doc',
     destructive: false,
   },
   {
     id: 'reload',
-    title: 'Reload transcript',
+    labelKey: 'task.reload_transcript',
     symbol: 'arrow.clockwise',
     destructive: false,
   },
-  { id: 'delete', title: 'Delete task', symbol: 'trash', destructive: true },
+  { id: 'delete', labelKey: 'task.delete', symbol: 'trash', destructive: true },
 ] as const;
 
 export function SessionView({
@@ -85,6 +86,7 @@ export function SessionView({
   devPrompt?: string;
 }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const daemon = useDaemon();
   const runtime = useRuntime();
   const { openTaskDrawer } = useTaskDrawer();
@@ -186,9 +188,12 @@ export function SessionView({
     const current = sessionRef.current;
     if (!current) return;
     void runtimeRef.current.updateSessionOptions(current.id, selection).catch((cause) => {
-      Alert.alert('Couldn’t change model', cause instanceof Error ? cause.message : String(cause));
+      Alert.alert(
+        t('task.model_change_failed'),
+        cause instanceof Error ? cause.message : String(cause),
+      );
     });
-  }, []);
+  }, [t]);
 
   const copyLastResponse = useCallback(async () => {
     const lastAssistant = [...(sessionRef.current?.messages ?? [])]
@@ -203,12 +208,12 @@ export function SessionView({
     const current = sessionRef.current;
     if (!current) return;
     Alert.alert(
-      `Delete “${displaySessionTitle(current)}”?`,
-      'This removes the task and its transcript from the daemon for every device.',
+      `${t('task.delete')} “${displaySessionTitle(current, t('session.new_task'))}”?`,
+      t('task.delete_body'),
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: t('common.cancel'), style: 'cancel' },
         {
-          text: 'Delete',
+          text: t('task.delete'),
           style: 'destructive',
           onPress: () => {
             void runtimeRef.current.deleteSession(current.id)
@@ -217,13 +222,16 @@ export function SessionView({
                 navigateBack();
               })
               .catch((cause) => {
-                Alert.alert('Couldn’t delete task', cause instanceof Error ? cause.message : String(cause));
+                Alert.alert(
+                  t('task.delete_failed'),
+                  cause instanceof Error ? cause.message : String(cause),
+                );
               });
           },
         },
       ],
     );
-  }, []);
+  }, [t]);
 
   const handleTaskMenuCommand = useCallback(
     (command: string) => {
@@ -247,14 +255,14 @@ export function SessionView({
   const taskState = useTaskState().data;
   const project = taskState?.projects.find((item) => item.id === session?.project_id);
   const subtitleParts = [project?.name, daemon.activeProfile?.name].filter(Boolean);
-  const title = session ? displaySessionTitle(session) : 'Task';
+  const title = session ? displaySessionTitle(session, t('session.new_task')) : t('task.title');
   // The bar's subtitle doubles as the quiet link indicator, the way messaging
   // apps do it; the banner below only steps in when the outage persists.
   const linkSubtitle = daemon.phase === 'reconnecting'
-    ? daemon.outage?.interrupted ? 'Reconnecting…' : 'Connecting…'
+    ? daemon.outage?.interrupted ? t('composer_ui.reconnecting') : t('composer_ui.connecting')
     : daemon.phase === 'connecting' || daemon.phase === 'booting'
-      ? 'Connecting…'
-      : daemon.phase === 'error' ? 'Not connected' : null;
+      ? t('composer_ui.connecting')
+      : daemon.phase === 'error' ? t('connection.not_connected') : null;
   const subtitle = linkSubtitle ?? (subtitleParts.length ? subtitleParts.join(' · ') : null);
   const hasSession = Boolean(session);
   const transcriptMounted = Boolean(
@@ -264,7 +272,7 @@ export function SessionView({
     () => [
       ...SURFACE_MENU_COMMANDS.map((item) => ({
         id: item.id,
-        title: item.title,
+        title: t(item.labelKey),
         image: item.symbol,
       })),
       {
@@ -275,14 +283,14 @@ export function SessionView({
           { id: 'model', title: modelLabel, image: modelIcon, imageColor: theme.text },
           ...TASK_MENU_COMMANDS.map((item) => ({
             id: item.id,
-            title: item.title,
+            title: t(item.labelKey),
             image: item.symbol,
             attributes: item.destructive ? { destructive: true } : undefined,
           })),
         ],
       },
     ],
-    [modelIcon, modelLabel, theme.text],
+    [modelIcon, modelLabel, t, theme.text],
   );
 
   // The chrome lives in the native navigation bar, so it stays put while the
@@ -291,12 +299,12 @@ export function SessionView({
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
     const drawer: HeaderActionSpec = {
       icon: { ios: 'sidebar.left', android: 'menu', web: 'menu' },
-      label: 'Task history',
+      label: t('task.history_button'),
       onPress: openTaskDrawer,
     };
     const newTask: HeaderActionSpec = {
       icon: { ios: 'square.and.pencil', android: 'edit_square', web: 'edit' },
-      label: 'New task',
+      label: t('session.new_task'),
       onPress: () => router.dismissTo('/'),
     };
     const nativeItems: NativeStackHeaderItem[] = hasSession
@@ -304,8 +312,8 @@ export function SessionView({
           ...nativeHeaderButtons([newTask]),
           {
             type: 'menu',
-            label: 'Task options',
-            accessibilityLabel: 'Task options',
+            label: t('task.options'),
+            accessibilityLabel: t('task.options'),
             icon: { type: 'sfSymbol', name: 'ellipsis' },
             menu: {
               title,
@@ -314,7 +322,7 @@ export function SessionView({
               items: [
                 ...SURFACE_MENU_COMMANDS.map((item) => ({
                   type: 'action' as const,
-                  label: item.title,
+                  label: t(item.labelKey),
                   icon: { type: 'sfSymbol' as const, name: item.symbol },
                   onPress: () => handleTaskMenuCommand(item.id),
                 })),
@@ -332,7 +340,7 @@ export function SessionView({
                     },
                     ...TASK_MENU_COMMANDS.map((item) => ({
                       type: 'action' as const,
-                      label: item.title,
+                      label: t(item.labelKey),
                       icon: { type: 'sfSymbol' as const, name: item.symbol },
                       destructive: item.destructive,
                       onPress: () => handleTaskMenuCommand(item.id),
@@ -366,7 +374,7 @@ export function SessionView({
                     android: 'more_horiz',
                     web: 'more_horiz',
                   }}
-                  label="Task options"
+                  label={t('task.options')}
                 />
               </MenuView>
             </HeaderActionGroup>
@@ -457,7 +465,7 @@ export function SessionView({
       )}
       {session && (
         <RenameDialog
-          initialValue={displaySessionTitle(session)}
+          initialValue={displaySessionTitle(session, t('session.new_task'))}
           onDismiss={() => setRenaming(false)}
           onSubmit={(title) => runtime.renameSession(session.id, title)}
           visible={renaming}

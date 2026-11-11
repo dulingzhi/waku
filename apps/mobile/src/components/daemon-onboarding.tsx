@@ -3,9 +3,11 @@ import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { AppSymbol } from '@/components/app-symbol';
 import { Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 
 export function DaemonOnboarding({ onAddDaemon }: { onAddDaemon: () => void }) {
   const theme = useTheme();
+  const { t } = useI18n();
   return (
     <View style={[styles.screen, { backgroundColor: theme.background }]}>
       <Image
@@ -13,13 +15,14 @@ export function DaemonOnboarding({ onAddDaemon }: { onAddDaemon: () => void }) {
         source={require('@/assets/images/icon.png')}
         style={styles.appIcon}
       />
-      <Text style={[styles.title, { color: theme.text }]}>Your agents, everywhere.</Text>
+      <Text style={[styles.title, { color: theme.text }]}>
+        {t('onboarding.daemon_title')}
+      </Text>
       <Text style={[styles.body, { color: theme.textSecondary }]}>
-        Connect to Waku running on your Mac, workstation, or private server. Add more than one and
-        switch whenever you need.
+        {t('onboarding.daemon_body')}
       </Text>
       <Pressable
-        accessibilityLabel="Add a daemon"
+        accessibilityLabel={t('daemon.add_button')}
         accessibilityRole="button"
         onPress={onAddDaemon}
         style={({ pressed }) => [
@@ -31,7 +34,9 @@ export function DaemonOnboarding({ onAddDaemon }: { onAddDaemon: () => void }) {
           size={17}
           tintColor={theme.onInverse}
         />
-        <Text style={[styles.primaryButtonText, { color: theme.onInverse }]}>Add a daemon</Text>
+        <Text style={[styles.primaryButtonText, { color: theme.onInverse }]}>
+          {t('daemon.add_button')}
+        </Text>
       </Pressable>
       <View style={styles.securityNote}>
         <AppSymbol
@@ -40,7 +45,7 @@ export function DaemonOnboarding({ onAddDaemon }: { onAddDaemon: () => void }) {
           tintColor={theme.textTertiary}
         />
         <Text style={[styles.securityText, { color: theme.textTertiary }]}>
-          Tokens stay on this device and go directly to the host you choose.
+          {t('onboarding.daemon_security')}
         </Text>
       </View>
     </View>
