@@ -22,6 +22,7 @@
     "@tanstack/react-router-ssr-query": "^1.167.1",
     "@tanstack/react-start": "^1.168.44",
     "@waku/client": "workspace:*",
+    "@waku/i18n": "workspace:*",
     "@wterm/dom": "0.3.3",
     "@wterm/ghostty": "0.3.3",
     "@wterm/react": "0.3.3",

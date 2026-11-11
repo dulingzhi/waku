@@ -1,9 +1,19 @@
+// Shared between the desktop-driven web client and the mobile client. Both
+// read the same `locales/*.yml` sources the Rust app embeds, so language
+// detection here must stay behaviorally identical to
+// `crates/waku-protocol/src/i18n.rs`.
+
 export type AppLanguage = 'system' | 'en' | 'zh-CN' | 'ja'
 export type AppLocale = Exclude<AppLanguage, 'system'>
 export type TranslationParams = Record<string, string | number>
 
 export const APP_LANGUAGES: readonly AppLanguage[] = ['system', 'en', 'zh-CN', 'ja']
 
+/**
+ * Parses a rust-i18n catalog. `app.yml` nests each message under a locale key
+ * (`key:\n  en: value`) while the translated files are flat (`key: value`), so
+ * both shapes funnel through the same scalar parser.
+ */
 export function parseRustI18nCatalog(source: string, locale: AppLocale) {
   const messages: Record<string, string> = {}
   let parentKey: string | null = null

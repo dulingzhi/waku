@@ -82,3 +82,11 @@ jobs:
           bun run protocol:check
           bun run --filter @waku/client check
           bun run --filter @waku/client test
+
+      # The shared locale core is imported by both web and mobile, and its
+      # tests are what keep locales/*.yml in sync with each other.
+      - name: Check shared locale core
+        if: runner.os == 'Linux'
+        run: |
+          bun run --filter @waku/i18n check
+          bun run --filter @waku/i18n test

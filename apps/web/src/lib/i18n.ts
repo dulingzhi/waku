@@ -11,7 +11,7 @@ import {
   type AppLanguage,
   type AppLocale,
   type TranslationParams,
-} from './i18n-core'
+} from '@waku/i18n'
 
 export { APP_LANGUAGES }
 export type { AppLanguage, AppLocale }
