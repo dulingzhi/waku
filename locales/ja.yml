@@ -1218,13 +1218,6 @@ sessions.search_provider: プロバイダーのセッションを検索
 sessions.usage_limit: 利用上限に達しました
 sessions.budget: 予算上限に達しました
 goal.objective: ゴールの内容
-goal.objective_placeholder: エージェントに何を続けてほしいですか？
-goal.set: ゴールを設定
-goal.save: ゴールを保存
-goal.replace: ゴールを置き換え
-goal.pause: ゴールを一時停止
-goal.resume: ゴールを再開
-goal.clear: ゴールを消去
 models.default: デフォルトモデル
 models.no_match: 一致するモデルがありません。
 models.search: モデルを検索

@@ -2387,20 +2387,6 @@ sessions.budget:
   en: Budget reached
 goal.objective:
   en: Goal objective
-goal.objective_placeholder:
-  en: What should the agent keep working on?
-goal.set:
-  en: Set goal
-goal.save:
-  en: Save goal
-goal.replace:
-  en: Replace goal
-goal.pause:
-  en: Pause goal
-goal.resume:
-  en: Resume goal
-goal.clear:
-  en: Clear goal
 models.default:
   en: Default model
 models.no_match:

@@ -1166,13 +1166,6 @@ sessions.search_provider: 搜索提供商会话
 sessions.usage_limit: 已达到用量上限
 sessions.budget: 已达到预算上限
 goal.objective: 目标内容
-goal.objective_placeholder: 希望智能体持续完成什么？
-goal.set: 设置目标
-goal.save: 保存目标
-goal.replace: 替换目标
-goal.pause: 暂停目标
-goal.resume: 恢复目标
-goal.clear: 清除目标
 models.default: 默认模型
 models.no_match: 没有匹配的模型。
 models.search: 搜索模型
