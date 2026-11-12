@@ -233,6 +233,7 @@ fn parse_session_summaries(response: &Value, limit: usize) -> Vec<ProviderSessio
                 cwd,
                 created_at,
                 updated_at,
+                unavailable: None,
             })
         })
         .take(limit)

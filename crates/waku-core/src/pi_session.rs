@@ -281,6 +281,7 @@ fn summary_from_session(
         cwd: session.cwd.clone(),
         created_at: session.created_at,
         updated_at: session.updated_at,
+        unavailable: None,
     })
 }
 

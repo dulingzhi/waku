@@ -79,6 +79,7 @@ fn provider_summary(value: &Value) -> Option<ProviderSessionSummary> {
         cwd,
         created_at,
         updated_at,
+        unavailable: None,
     })
 }
 

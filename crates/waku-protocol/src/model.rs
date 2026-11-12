@@ -851,6 +851,19 @@ impl ThreadGoalStatus {
     }
 }
 
+/// Why a provider-native conversation cannot be continued from Waku.
+///
+/// The reason is an enum rather than a sentence so each client translates it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderSessionUnavailable {
+    /// The working directory the provider recorded is gone, so a new turn has
+    /// nowhere to run.
+    MissingWorkspace,
+    /// The transcript could not be read far enough to title or continue it.
+    Unreadable,
+}
+
 /// A resumable conversation discovered in a provider CLI's own history.
 ///
 /// This is deliberately lightweight: the command palette can list hundreds of
@@ -860,9 +873,17 @@ impl ThreadGoalStatus {
 pub struct ProviderSessionSummary {
     pub cursor: ProviderResumeCursor,
     pub title: String,
+    /// The working directory the provider recorded. It is kept even when the
+    /// directory is gone, so an unavailable row still says where the
+    /// conversation happened.
     pub cwd: PathBuf,
     pub created_at: u64,
     pub updated_at: u64,
+    /// `None` when the session can be continued. A session that cannot is
+    /// still listed, so a missing workspace is visible rather than silently
+    /// dropped, and the client disables the row and names the reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<ProviderSessionUnavailable>,
 }
 
 impl ProviderSessionSummary {

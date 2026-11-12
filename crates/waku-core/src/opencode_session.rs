@@ -131,6 +131,7 @@ fn session_summary(session: &SessionInfo) -> Option<ProviderSessionSummary> {
         cwd,
         created_at,
         updated_at: unix_seconds(session.time.updated).max(created_at),
+        unavailable: None,
     })
 }
 

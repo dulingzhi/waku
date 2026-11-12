@@ -105,6 +105,7 @@ fn catalog_summary(state_path: &Path) -> Option<ProviderSessionSummary> {
         cwd,
         created_at,
         updated_at,
+        unavailable: None,
     })
 }
 

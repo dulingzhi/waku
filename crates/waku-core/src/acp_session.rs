@@ -149,6 +149,7 @@ pub fn list_provider_sessions(
                             cwd: session.cwd,
                             created_at: updated_at,
                             updated_at,
+                            unavailable: None,
                         });
                     }
                     if found.len() >= limit {

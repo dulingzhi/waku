@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::model::{
     AgentTurn, Message, MessageRole, ProviderResumeCursor, ProviderSessionHistory,
-    ProviderSessionSummary, TurnStatus,
+    ProviderSessionSummary, ProviderSessionUnavailable, TurnStatus,
 };
 
 const TRANSCRIPT_TYPES: [&str; 5] = ["user", "assistant", "attachment", "system", "progress"];
@@ -273,13 +273,18 @@ fn session_summary_from_path(path: &Path) -> anyhow::Result<ProviderSessionSumma
         .iter()
         .filter_map(Value::as_object)
         .collect::<Vec<_>>();
+    // A workspace that has since been deleted still identifies where the
+    // conversation happened, so the session stays listed and the client
+    // explains why it cannot be continued. Only a transcript that never
+    // recorded a location is dropped, since there is nothing to show.
     let cwd = transcript
         .iter()
         .copied()
         .find_map(|entry| entry.get("cwd").and_then(Value::as_str))
         .map(PathBuf::from)
-        .filter(|cwd| cwd.is_absolute() && cwd.is_dir())
-        .ok_or_else(|| anyhow!("Claude session {session_id} has no available working directory"))?;
+        .filter(|cwd| cwd.is_absolute())
+        .ok_or_else(|| anyhow!("Claude session {session_id} has no working directory"))?;
+    let unavailable = (!cwd.is_dir()).then_some(ProviderSessionUnavailable::MissingWorkspace);
     let first_prompt = transcript
         .iter()
         .find(|entry| {
@@ -330,13 +335,15 @@ fn session_summary_from_path(path: &Path) -> anyhow::Result<ProviderSessionSumma
         cwd,
         created_at,
         updated_at,
+        unavailable,
     })
 }
 
 #[derive(Debug)]
 struct IndexedClaudeSession {
     first_prompt: String,
-    cwd: PathBuf,
+    /// Absent when the index recorded no usable project path.
+    cwd: Option<PathBuf>,
     created_at: u64,
     updated_at: u64,
 }
@@ -385,18 +392,60 @@ fn provider_session_files(projects_directory: &Path) -> anyhow::Result<Vec<(u64,
     Ok(candidates)
 }
 
-fn list_provider_sessions_from_history(
+fn list_provider_sessions_in(
     projects_directory: &Path,
-    history_path: &Path,
     limit: usize,
 ) -> anyhow::Result<Vec<ProviderSessionSummary>> {
-    let file = fs::File::open(history_path).with_context(|| {
-        format!(
-            "could not read Claude's terminal history at {}",
-            history_path.display()
-        )
-    })?;
-    let mut indexed = HashMap::<String, IndexedClaudeSession>::new();
+    if limit == 0 || !projects_directory.exists() {
+        return Ok(Vec::new());
+    }
+    // Every top-level transcript is a candidate, and `history.jsonl` only
+    // enriches it. The index is Claude's *interactive* CLI index: headless
+    // `-p` runs, which is how Waku starts Claude, never write to it. Listing
+    // the intersection therefore hid every session Waku itself created, so the
+    // index must not filter.
+    let indexed = read_history_index(projects_directory);
+    let mut candidates = provider_session_files(projects_directory)?;
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut sessions = Vec::new();
+    for (file_updated_at, path) in candidates {
+        if sessions.len() == limit {
+            break;
+        }
+        let Some(session_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let summary = indexed
+            .get(session_id)
+            .and_then(|entry| merge_indexed_summary(&path, session_id, entry, file_updated_at))
+            .or_else(|| session_summary_from_path(&path).ok());
+        if let Some(summary) = summary {
+            sessions.push(summary);
+        }
+    }
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    Ok(sessions)
+}
+
+/// The interactive index, keyed by session id. Absent when Claude has never run
+/// interactively, which is a normal state rather than an error.
+fn read_history_index(projects_directory: &Path) -> HashMap<String, IndexedClaudeSession> {
+    let Some(history_path) = projects_directory
+        .parent()
+        .map(|directory| directory.join("history.jsonl"))
+        .filter(|path| path.is_file())
+    else {
+        return HashMap::new();
+    };
+    let Ok(file) = fs::File::open(&history_path) else {
+        return HashMap::new();
+    };
+    let mut indexed = HashMap::new();
     for value in BufReader::new(file)
         .lines()
         .map_while(Result::ok)
@@ -417,19 +466,19 @@ fn list_provider_sessions_from_history(
         else {
             continue;
         };
-        let Some(cwd) = value
+        // The recorded project may itself be gone; a title is still useful.
+        let cwd = value
             .get("project")
             .and_then(Value::as_str)
             .map(PathBuf::from)
-            .filter(|cwd| cwd.is_absolute() && cwd.is_dir())
-        else {
-            continue;
-        };
+            .filter(|cwd| cwd.is_absolute());
         let timestamp = history_timestamp(&value["timestamp"]);
         indexed
             .entry(session_id.to_owned())
-            .and_modify(|session| {
-                session.cwd = cwd.clone();
+            .and_modify(|session: &mut IndexedClaudeSession| {
+                if cwd.is_some() {
+                    session.cwd = cwd.clone();
+                }
                 if timestamp > 0 {
                     session.created_at = if session.created_at == 0 {
                         timestamp
@@ -446,75 +495,35 @@ fn list_provider_sessions_from_history(
                 updated_at: timestamp,
             });
     }
-
-    let files = provider_session_files(projects_directory)?
-        .into_iter()
-        .filter_map(|(modified_at, path)| {
-            let session_id = path.file_stem()?.to_str()?.to_owned();
-            Some((session_id, (modified_at, path)))
-        })
-        .collect::<HashMap<_, _>>();
-    let mut sessions = indexed
-        .into_iter()
-        .filter_map(|(session_id, indexed)| {
-            let (file_updated_at, path) = files.get(&session_id)?;
-            let fallback_title = title_from_prompt(&indexed.first_prompt)?;
-            let mut summary = session_summary_from_path(path).unwrap_or(ProviderSessionSummary {
-                cursor: ProviderResumeCursor::Claude {
-                    session_id: session_id.clone(),
-                    resume_at: None,
-                },
-                title: fallback_title,
-                cwd: indexed.cwd.clone(),
-                created_at: indexed.created_at,
-                updated_at: indexed.updated_at,
-            });
-            summary.cwd = indexed.cwd;
-            if indexed.created_at > 0 {
-                summary.created_at = summary.created_at.min(indexed.created_at);
-            }
-            summary.updated_at = summary
-                .updated_at
-                .max(indexed.updated_at)
-                .max(*file_updated_at);
-            Some(summary)
-        })
-        .collect::<Vec<_>>();
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    sessions.truncate(limit);
-    Ok(sessions)
+    indexed
 }
 
-fn list_provider_sessions_in(
-    projects_directory: &Path,
-    limit: usize,
-) -> anyhow::Result<Vec<ProviderSessionSummary>> {
-    if limit == 0 || !projects_directory.exists() {
-        return Ok(Vec::new());
+/// Prefer the transcript's own reading — it knows the real title and working
+/// directory — and fall back to the interactive index only for what the
+/// transcript does not carry.
+fn merge_indexed_summary(
+    path: &Path,
+    session_id: &str,
+    indexed: &IndexedClaudeSession,
+    file_updated_at: u64,
+) -> Option<ProviderSessionSummary> {
+    if let Ok(mut summary) = session_summary_from_path(path) {
+        summary.updated_at = summary.updated_at.max(indexed.updated_at).max(file_updated_at);
+        return Some(summary);
     }
-    // `history.jsonl` is Claude's interactive CLI index. Headless `-p` and
-    // Agent SDK runs still have transcripts under `projects/` but are absent
-    // from this index, which naturally keeps Waku-created sessions out of the
-    // terminal resume picker even after their Waku task has been deleted.
-    let history_path = projects_directory
-        .parent()
-        .map(|directory| directory.join("history.jsonl"));
-    if let Some(history_path) = history_path.filter(|path| path.is_file()) {
-        return list_provider_sessions_from_history(projects_directory, &history_path, limit);
-    }
-    let mut candidates = provider_session_files(projects_directory)?;
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-
-    let mut sessions = Vec::new();
-    for (_, path) in candidates {
-        if let Ok(summary) = session_summary_from_path(&path) {
-            sessions.push(summary);
-            if sessions.len() == limit {
-                break;
-            }
-        }
-    }
-    Ok(sessions)
+    let cwd = indexed.cwd.clone()?;
+    let title = title_from_prompt(&indexed.first_prompt)?;
+    Some(ProviderSessionSummary {
+        cursor: ProviderResumeCursor::Claude {
+            session_id: session_id.to_owned(),
+            resume_at: None,
+        },
+        title,
+        unavailable: (!cwd.is_dir()).then_some(ProviderSessionUnavailable::MissingWorkspace),
+        cwd,
+        created_at: indexed.created_at,
+        updated_at: indexed.updated_at.max(file_updated_at),
+    })
 }
 
 fn provider_session_history_in(
@@ -981,21 +990,22 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    /// A session that exists only as a transcript — a headless `-p` run, which
+    /// is how Waku starts Claude — must be listed. Filtering by the
+    /// interactive index hid every session Waku itself created.
     #[test]
-    fn lists_resumable_sessions_and_imports_recent_visible_turns() {
+    fn lists_headless_sessions_alongside_terminal_ones() {
         let (root, source) = fixture();
         let projects = root.join("projects");
-        let headless = source
-            .parent()
-            .unwrap()
-            .join("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
+        let headless_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let headless = source.parent().unwrap().join(format!("{headless_id}.jsonl"));
         serde_json::to_writer(
             fs::File::create(headless).unwrap(),
             &json!({
                 "type": "user",
                 "uuid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                 "parentUuid": null,
-                "sessionId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "sessionId": headless_id,
                 "cwd": root.join("workspace"),
                 "message": {"role": "user", "content": "not from terminal history"}
             }),
@@ -1003,10 +1013,70 @@ mod tests {
         .unwrap();
 
         let sessions = list_provider_sessions_in(&projects, 10).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].title, "Generated first task title");
-        assert_eq!(sessions[0].cwd, root.join("workspace"));
-        assert_eq!(sessions[0].cursor.native_id(), SESSION);
+        assert_eq!(sessions.len(), 2);
+
+        // Absent from history.jsonl, so its title and location come from the
+        // transcript alone.
+        let headless = sessions
+            .iter()
+            .find(|session| session.cursor.native_id() == headless_id)
+            .expect("a transcript-only session is listed");
+        assert_eq!(headless.title, "not from terminal history");
+        assert_eq!(headless.cwd, root.join("workspace"));
+        assert_eq!(headless.unavailable, None);
+
+        // The terminal session keeps the AI title the index recorded.
+        let terminal = sessions
+            .iter()
+            .find(|session| session.cursor.native_id() == SESSION)
+            .expect("the terminal session is still listed");
+        assert_eq!(terminal.title, "Generated first task title");
+        assert_eq!(terminal.cwd, root.join("workspace"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A workspace that has since been deleted cannot be resumed, but the row
+    /// stays visible so the session does not vanish without explanation.
+    #[test]
+    fn keeps_sessions_whose_workspace_is_gone() {
+        let (root, source) = fixture();
+        let projects = root.join("projects");
+        let workspace = root.join("workspace");
+        let orphan_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        serde_json::to_writer(
+            fs::File::create(source.parent().unwrap().join(format!("{orphan_id}.jsonl"))).unwrap(),
+            &json!({
+                "type": "user",
+                "uuid": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                "parentUuid": null,
+                "sessionId": orphan_id,
+                "cwd": workspace,
+                "message": {"role": "user", "content": "workspace was deleted"}
+            }),
+        )
+        .unwrap();
+        fs::remove_dir_all(&workspace).unwrap();
+
+        let sessions = list_provider_sessions_in(&projects, 10).unwrap();
+        let orphan = sessions
+            .iter()
+            .find(|session| session.cursor.native_id() == orphan_id)
+            .expect("an orphaned session is still listed");
+        assert_eq!(
+            orphan.unavailable,
+            Some(ProviderSessionUnavailable::MissingWorkspace)
+        );
+        // The recorded path is kept so the row can still say where it ran.
+        assert_eq!(orphan.cwd, workspace);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn imports_recent_visible_turns() {
+        let (root, _) = fixture();
+        let projects = root.join("projects");
 
         let history = provider_session_history_in(&projects, SESSION, 1).unwrap();
         assert_eq!(history.turns.len(), 2);

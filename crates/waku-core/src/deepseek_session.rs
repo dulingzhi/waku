@@ -92,6 +92,7 @@ fn parse_provider_summaries(value: &Value, limit: usize) -> Vec<ProviderSessionS
                 cwd,
                 created_at: updated_at,
                 updated_at,
+                unavailable: None,
             })
         })
         .take(limit)

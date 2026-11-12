@@ -54,6 +54,7 @@ export type { ProviderSessionFork } from "./ProviderSessionFork";
 export type { ProviderSessionForkRequest } from "./ProviderSessionForkRequest";
 export type { ProviderSessionHistory } from "./ProviderSessionHistory";
 export type { ProviderSessionSummary } from "./ProviderSessionSummary";
+export type { ProviderSessionUnavailable } from "./ProviderSessionUnavailable";
 export type { ProviderSlice } from "./ProviderSlice";
 export type { QueuedMessage } from "./QueuedMessage";
 export type { ReasoningBlock } from "./ReasoningBlock";
