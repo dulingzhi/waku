@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     std::io::stdout().flush()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    waku_core::diagnostics::log(format!(
+    waku_protocol::diagnostics::log(format!(
         "waku-daemon started pid={} address={address} protocol={PROTOCOL_VERSION}",
         std::process::id()
     ));
@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
                         // This is the one shutdown Waku performs on its own. If
                         // the parent probe is wrong, a live app silently loses
                         // its daemon, so name the decision in the log.
-                        waku_core::diagnostics::log(format!(
+                        waku_protocol::diagnostics::log(format!(
                             "waku-daemon shutting down: parent pid {parent_pid} is not alive"
                         ));
                         monitor_shutdown.store(true, Ordering::Release);
@@ -152,7 +152,9 @@ fn process_is_alive(pid: u32) -> bool {
 /// another handle reports an exit code instead of `STILL_ACTIVE`.
 #[cfg(windows)]
 fn process_is_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE,
+    };
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -160,7 +162,11 @@ fn process_is_alive(pid: u32) -> bool {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            return false;
+            // Only a pid that does not exist justifies shutting down. Access
+            // denied, handle exhaustion, or any other transient failure leaves
+            // the parent's state unknown, and outliving a live app is the safer
+            // error than abandoning it mid-session.
+            return GetLastError() != ERROR_INVALID_PARAMETER;
         }
         let mut exit_code = 0_u32;
         let read = GetExitCodeProcess(handle, &mut exit_code);

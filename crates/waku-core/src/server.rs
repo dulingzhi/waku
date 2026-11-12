@@ -27,9 +27,16 @@ use crate::protocol::{
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// A socket write that makes no progress for this long means the client is
-/// not reading. Keeping the connection would let its event queue grow without
-/// bound, so it is dropped; clients reconnect and resume from their cursors.
-const SOCKET_WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+/// genuinely not reading. Keeping the connection would let its event queue grow
+/// without bound, so it is dropped; clients reconnect and resume from their
+/// cursors.
+///
+/// This is a backstop, not a responsiveness budget. A merely busy host — one
+/// descheduled by CPU pressure, or reading through a lossy network — can stall
+/// a send for seconds without being gone, and dropping it costs a reconnect.
+/// The queue cap below is what actually bounds memory, so the timeout can stay
+/// generous without risking growth.
+const SOCKET_WRITE_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_CONNECTIONS: usize = 64;
 const MAX_REPLAY_EVENTS_PER_SESSION: usize = 2048;
@@ -695,7 +702,7 @@ fn handle_connection(
                 // peer is merely slow (a busy host reading late). Report whether
                 // the underlying error was one `retryable_io` would tolerate, so
                 // a reproduced drop shows which side of that line it fell on.
-                crate::diagnostics::log(format!(
+                waku_protocol::diagnostics::log(format!(
                     "waku-daemon dropped connection {subscriber_id}: write failed: {error:#} \
                      (retryable={})",
                     write_failure_is_retryable(&error)
@@ -727,7 +734,7 @@ fn handle_connection(
                 }
             },
             Ok(Message::Close(_)) => {
-                crate::diagnostics::log(format!(
+                waku_protocol::diagnostics::log(format!(
                     "waku-daemon connection {subscriber_id}: client sent close"
                 ));
                 break;
@@ -738,13 +745,13 @@ fn handle_connection(
             Ok(_) => {}
             Err(tungstenite::Error::Io(error)) if retryable_io(&error) => {}
             Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
-                crate::diagnostics::log(format!(
+                waku_protocol::diagnostics::log(format!(
                     "waku-daemon connection {subscriber_id}: socket already closed"
                 ));
                 break;
             }
             Err(error) => {
-                crate::diagnostics::log(format!(
+                waku_protocol::diagnostics::log(format!(
                     "waku-daemon connection {subscriber_id}: transport failed: {error:#}"
                 ));
                 return Err(error).context("Waku daemon WebSocket failed");
@@ -754,7 +761,7 @@ fn handle_connection(
     if kicked.try_recv().is_ok() {
         // The hub evicts a subscriber that fell behind the queue cap; that is a
         // different drop from a stalled socket write.
-        crate::diagnostics::log(format!(
+        waku_protocol::diagnostics::log(format!(
             "waku-daemon dropped connection {subscriber_id}: evicted by the hub \
              (queue cap {MAX_QUEUED_MESSAGES_PER_SUBSCRIBER})"
         ));

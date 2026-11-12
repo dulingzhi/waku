@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::DaemonClient;
 use waku_protocol::{
     APP_EXECUTABLE_ENV, Command, DAEMON_TOKEN_ENV, DaemonReady, DaemonSettings, PROTOCOL_VERSION,
-    ResponsePayload,
+    ReplayCursor, ResponsePayload,
 };
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -129,6 +129,12 @@ pub fn parse_allowed_origins(text: &str) -> anyhow::Result<Vec<String>> {
 pub struct DaemonProcess {
     client: DaemonClient,
     child: Child,
+    /// The loopback address and bearer token this process was launched with.
+    /// Kept so a connection that drops — a flaky network or a suspended
+    /// machine, not a dead daemon — can be re-established without paying for a
+    /// process restart.
+    client_address: String,
+    token: String,
 }
 
 impl DaemonProcess {
@@ -224,7 +230,7 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        let client = match DaemonClient::connect(&client_address, token) {
+        let client = match DaemonClient::connect(&client_address, token.clone()) {
             Ok(client) => client,
             Err(error) => {
                 let _ = child.kill();
@@ -232,11 +238,33 @@ impl DaemonProcess {
                 return Err(error);
             }
         };
-        Ok(Self { client, child })
+        Ok(Self {
+            client,
+            child,
+            client_address,
+            token,
+        })
     }
 
     pub fn client(&self) -> DaemonClient {
         self.client.clone()
+    }
+
+    /// Swap in a fresh connection for the same live daemon, keeping the child
+    /// process. Subscribers are notified separately by the supervisor.
+    fn replace_client(&mut self, client: DaemonClient) {
+        self.client = client;
+    }
+
+    /// Everything needed to reconnect without holding the target lock during
+    /// network I/O: where this daemon listens, how to authenticate, and how far
+    /// each followed runtime had been replayed.
+    fn reconnect_parts(&self) -> (String, String, Vec<ReplayCursor>) {
+        (
+            self.client_address.clone(),
+            self.token.clone(),
+            self.client.last_sequences(),
+        )
     }
 
     fn has_exited(&mut self) -> bool {
@@ -556,6 +584,56 @@ fn monitor_daemon(
                 .client_updates
                 .lock()
                 .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
+            continue;
+        }
+        // A local daemon whose connection dropped is the same situation as a
+        // remote one: the process is healthy and reachable at its loopback
+        // address, so reconnect instead of restarting it. Without this a
+        // network blip — packet loss, a suspended laptop, a simulator like
+        // Clumsy — left the desktop permanently disconnected from a daemon it
+        // could still talk to, because the process never exits and nothing
+        // else ever retried.
+        let local_reconnect = {
+            let mut target = inner.target.lock();
+            match &mut *target {
+                DaemonTarget::Local(process) => {
+                    if process.client().is_disconnected() && !process.has_exited() {
+                        Some(process.reconnect_parts())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+        if let Some((address, token, resume_from)) = local_reconnect {
+            let _restart = inner.restart.lock();
+            let Ok(replacement) = DaemonClient::connect_with_resume(&address, token, resume_from)
+            else {
+                continue;
+            };
+            {
+                let mut target = inner.target.lock();
+                // The target may have been replaced while the connection was
+                // being established; only swap into the same disconnected one.
+                let DaemonTarget::Local(process) = &mut *target else {
+                    continue;
+                };
+                if !process.client().is_disconnected() {
+                    continue;
+                }
+                process.replace_client(replacement.clone());
+            }
+            inner
+                .client_updates
+                .lock()
+                .retain(|subscriber| subscriber.send(replacement.clone()).is_ok());
+            // A reconnected local daemon is the recovery path for a dropped
+            // link; record it so a "it just disconnected" report can be
+            // confirmed from the log instead of guessed at.
+            waku_protocol::diagnostics::log(format!(
+                "waku-client reconnected to local daemon at {address}"
+            ));
             continue;
         }
         let process_exited = match &mut *inner.target.lock() {
