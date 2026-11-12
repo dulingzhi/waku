@@ -690,7 +690,16 @@ fn handle_connection(
             break;
         }
         while let Ok(message) = outgoing_rx.try_recv() {
-            if write_json(&mut socket, &message).is_err() {
+            if let Err(error) = write_json(&mut socket, &message) {
+                // Diagnostic: a stalled write ends the connection even when the
+                // peer is merely slow (a busy host reading late). Report whether
+                // the underlying error was one `retryable_io` would tolerate, so
+                // a reproduced drop shows which side of that line it fell on.
+                crate::diagnostics::log(format!(
+                    "waku-daemon dropped connection {subscriber_id}: write failed: {error:#} \
+                     (retryable={})",
+                    write_failure_is_retryable(&error)
+                ));
                 break 'connection;
             }
         }
@@ -717,15 +726,38 @@ fn handle_connection(
                     eprintln!("waku-daemon ignored invalid message: {error}");
                 }
             },
-            Ok(Message::Close(_)) => break,
+            Ok(Message::Close(_)) => {
+                crate::diagnostics::log(format!(
+                    "waku-daemon connection {subscriber_id}: client sent close"
+                ));
+                break;
+            }
             Ok(Message::Ping(_)) => {
                 let _ = socket.flush();
             }
             Ok(_) => {}
             Err(tungstenite::Error::Io(error)) if retryable_io(&error) => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
-            Err(error) => return Err(error).context("Waku daemon WebSocket failed"),
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                crate::diagnostics::log(format!(
+                    "waku-daemon connection {subscriber_id}: socket already closed"
+                ));
+                break;
+            }
+            Err(error) => {
+                crate::diagnostics::log(format!(
+                    "waku-daemon connection {subscriber_id}: transport failed: {error:#}"
+                ));
+                return Err(error).context("Waku daemon WebSocket failed");
+            }
         }
+    }
+    if kicked.try_recv().is_ok() {
+        // The hub evicts a subscriber that fell behind the queue cap; that is a
+        // different drop from a stalled socket write.
+        crate::diagnostics::log(format!(
+            "waku-daemon dropped connection {subscriber_id}: evicted by the hub \
+             (queue cap {MAX_QUEUED_MESSAGES_PER_SUBSCRIBER})"
+        ));
     }
     hub.unsubscribe(subscriber_id);
     Ok(())
@@ -1030,6 +1062,14 @@ fn send_dispatch_error(
 
 fn retryable_io(error: &io::Error) -> bool {
     retryable_error(error)
+}
+
+/// Whether a failed socket write was a stall (`TimedOut`/`WouldBlock`) rather
+/// than a broken connection. Diagnostic only: the write path drops the
+/// connection either way, but the distinction says whether the peer was slow
+/// or actually gone.
+fn write_failure_is_retryable(error: &anyhow::Error) -> bool {
+    retryable_error(error.as_ref())
 }
 
 fn retryable_error(error: &(dyn std::error::Error + 'static)) -> bool {

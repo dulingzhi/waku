@@ -28,6 +28,10 @@ fn main() -> anyhow::Result<()> {
     std::io::stdout().flush()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    waku_core::diagnostics::log(format!(
+        "waku-daemon started pid={} address={address} protocol={PROTOCOL_VERSION}",
+        std::process::id()
+    ));
     if let Some(parent_pid) = arguments.parent_pid {
         let monitor_shutdown = shutdown.clone();
         std::thread::Builder::new()
@@ -35,6 +39,12 @@ fn main() -> anyhow::Result<()> {
             .spawn(move || {
                 while !monitor_shutdown.load(Ordering::Acquire) {
                     if !process_is_alive(parent_pid) {
+                        // This is the one shutdown Waku performs on its own. If
+                        // the parent probe is wrong, a live app silently loses
+                        // its daemon, so name the decision in the log.
+                        waku_core::diagnostics::log(format!(
+                            "waku-daemon shutting down: parent pid {parent_pid} is not alive"
+                        ));
                         monitor_shutdown.store(true, Ordering::Release);
                         break;
                     }
