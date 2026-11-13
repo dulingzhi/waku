@@ -49,18 +49,42 @@ impl AppLanguage {
     }
 
     fn from_system() -> Self {
-        Self::from_locale_id(&system_locale())
+        Self::from_preferred_locale_ids(preferred_locale_ids())
     }
 
-    fn from_locale_id(locale: &str) -> Self {
+    /// The first preferred language Waku ships. A language Waku does not ship
+    /// earlier in the list does not stop the search, which is how the shared
+    /// web and mobile resolvers in `packages/waku-i18n` read the same list: a
+    /// system preferring `["fr-FR", "zh-Hans-CN"]` reads Chinese, not English.
+    fn from_preferred_locale_ids<I, S>(locales: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        locales
+            .into_iter()
+            .find_map(|locale| Self::matched_locale_id(locale.as_ref()))
+            .unwrap_or(Self::English)
+    }
+
+    fn matched_locale_id(locale: &str) -> Option<Self> {
         let locale = locale.replace('_', "-").to_ascii_lowercase();
         if locale == "zh-cn" || locale == "zh-sg" || locale.starts_with("zh-hans") {
-            Self::SimplifiedChinese
+            Some(Self::SimplifiedChinese)
         } else if locale == "ja" || locale.starts_with("ja-") {
-            Self::Japanese
+            Some(Self::Japanese)
+        } else if locale == "en" || locale.starts_with("en-") {
+            // English is a shipped language like any other, so a system that
+            // prefers it must not fall through to a later Japanese entry.
+            Some(Self::English)
         } else {
-            Self::English
+            None
         }
+    }
+
+    #[cfg(test)]
+    fn from_locale_id(locale: &str) -> Self {
+        Self::matched_locale_id(locale).unwrap_or(Self::English)
     }
 }
 
@@ -86,26 +110,116 @@ fn locale_uses_east_asian_date_format(locale: &str) -> bool {
     matches!(locale, "zh-CN" | "ja")
 }
 
+/// The locales the operating system prefers, most preferred first. Waku reads
+/// the first one it ships; an empty list means the system reported nothing.
 #[cfg(target_os = "macos")]
-fn system_locale() -> String {
+fn preferred_locale_ids() -> Vec<String> {
     use objc2_foundation::NSLocale;
 
     NSLocale::preferredLanguages()
-        .firstObject()
+        .iter()
         .map(|locale| locale.to_string())
-        .unwrap_or_else(|| "en".to_owned())
+        .collect()
 }
 
-#[cfg(not(target_os = "macos"))]
-fn system_locale() -> String {
+/// Windows never sets `LANG`, so a Unix-style environment lookup leaves a
+/// Chinese Windows showing English. Ask the list the display-language picker
+/// writes, and fall back to the language the UI itself runs in when that list
+/// comes back empty.
+#[cfg(target_os = "windows")]
+fn preferred_locale_ids() -> Vec<String> {
+    let preferred = preferred_ui_languages();
+    if preferred.is_empty() {
+        return default_ui_language().into_iter().collect();
+    }
+    preferred
+}
+
+#[cfg(target_os = "windows")]
+fn preferred_ui_languages() -> Vec<String> {
+    use windows_sys::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+
+    // Only a sizing call that passes no buffer knows how long the list is,
+    // because a language name is variable length.
+    let mut languages = 0u32;
+    let mut characters = 0u32;
+    // SAFETY: a null buffer makes the call report the required length without
+    // writing anywhere, and both out parameters are valid for the call.
+    let sized = unsafe {
+        GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut languages,
+            std::ptr::null_mut(),
+            &mut characters,
+        )
+    };
+    if sized == 0 || characters == 0 {
+        return Vec::new();
+    }
+
+    let mut buffer = vec![0u16; characters as usize];
+    // SAFETY: `buffer` holds exactly the length the sizing call reported;
+    // `characters` counts UTF-16 code units, terminator included.
+    let filled = unsafe {
+        GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut languages,
+            buffer.as_mut_ptr(),
+            &mut characters,
+        )
+    };
+    if filled == 0 {
+        return Vec::new();
+    }
+
+    // The names are null separated and closed by a second null; a short list
+    // leaves the tail of the buffer zeroed, so skip empty names.
+    buffer
+        .split(|unit| *unit == 0)
+        .filter(|name| !name.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
+}
+
+/// The language Windows runs its own UI in, which is what "follow the system"
+/// means even when the preferred list is unavailable.
+#[cfg(target_os = "windows")]
+fn default_ui_language() -> Option<String> {
+    use windows_sys::Win32::Globalization::{GetUserDefaultUILanguage, LCIDToLocaleName};
+
+    /// `LOCALE_NAME_MAX_LENGTH`, the longest name `LCIDToLocaleName` accepts.
+    const LOCALE_NAME_MAX_LENGTH: usize = 85;
+
+    // A neutral sort order leaves the LCID equal to the LANGID the call wants.
+    // SAFETY: the call reads no arguments and only returns a language id.
+    let language_id = unsafe { GetUserDefaultUILanguage() };
+    let mut buffer = [0u16; LOCALE_NAME_MAX_LENGTH];
+    // SAFETY: `buffer` is the maximum number of UTF-16 code units the call
+    // documents, and `written` is checked before the buffer is read.
+    let written = unsafe {
+        LCIDToLocaleName(
+            language_id.into(),
+            buffer.as_mut_ptr(),
+            buffer.len() as i32,
+            0,
+        )
+    };
+    if written <= 1 {
+        return None;
+    }
+    // `written` counts the null terminator.
+    Some(String::from_utf16_lossy(&buffer[..written as usize - 1]))
+}
+
+/// Every other platform reports the locale through the POSIX environment.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn preferred_locale_ids() -> Vec<String> {
     std::env::var("LC_ALL")
         .or_else(|_| std::env::var("LC_MESSAGES"))
         .or_else(|_| std::env::var("LANG"))
-        .unwrap_or_else(|_| "en".to_owned())
-        .split('.')
-        .next()
-        .unwrap_or("en")
-        .to_owned()
+        .map(|value| value.split('.').next().unwrap_or_default().to_owned())
+        .into_iter()
+        .collect()
 }
 
 #[cfg(test)]
@@ -171,6 +285,34 @@ mod tests {
             AppLanguage::from_locale_id("zh-Hant-TW"),
             AppLanguage::English
         );
+    }
+
+    #[test]
+    fn the_first_shipped_preferred_language_wins() {
+        assert_eq!(
+            AppLanguage::from_preferred_locale_ids(["fr-FR", "zh-Hans-CN", "en-US"]),
+            AppLanguage::SimplifiedChinese
+        );
+        assert_eq!(
+            AppLanguage::from_preferred_locale_ids(["zh-Hant-TW", "ja-JP"]),
+            AppLanguage::Japanese
+        );
+        assert_eq!(
+            AppLanguage::from_preferred_locale_ids(["en-US", "ja-JP"]),
+            AppLanguage::English
+        );
+        assert_eq!(
+            AppLanguage::from_preferred_locale_ids(Vec::<String>::new()),
+            AppLanguage::English
+        );
+    }
+
+    /// Windows reports its languages through Win32 rather than the environment,
+    /// so an empty list here is exactly the Chinese-system-reads-English bug.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_reports_a_preferred_ui_language() {
+        assert!(!preferred_locale_ids().is_empty());
     }
 
     #[test]

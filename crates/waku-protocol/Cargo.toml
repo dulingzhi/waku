@@ -27,3 +27,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSLocale",
     "NSString",
 ] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows exposes the UI language list through Win32, not the POSIX locale
+# environment variables, so system language detection needs these bindings.
+windows-sys = { version = "0.61", features = ["Win32_Globalization"] }

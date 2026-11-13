@@ -123,8 +123,11 @@ quoted: "值：%{count}"
   test('matches the desktop system-language resolution', () => {
     expect(resolveLanguage('system', ['zh-Hans-SG', 'en-US'])).toBe('zh-CN')
     expect(resolveLanguage('system', ['zh-Hant-TW'])).toBe('en')
+    expect(resolveLanguage('system', ['zh-Hant-TW', 'ja-JP'])).toBe('ja')
     expect(resolveLanguage('system', ['ja-JP'])).toBe('ja')
     expect(resolveLanguage('system', ['fr-FR'])).toBe('en')
+    // A preferred English must not fall through to a later Japanese entry.
+    expect(resolveLanguage('system', ['en-US', 'ja-JP'])).toBe('en')
     expect(resolveLanguage('zh-CN', ['en-US'])).toBe('zh-CN')
   })
 

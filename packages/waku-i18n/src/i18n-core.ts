@@ -56,6 +56,9 @@ export function resolveLanguage(
       return 'zh-CN'
     }
     if (locale === 'ja' || locale.startsWith('ja-')) return 'ja'
+    // English is a shipped language like any other, so a system that prefers
+    // it must not fall through to a later Japanese entry.
+    if (locale === 'en' || locale.startsWith('en-')) return 'en'
   }
   return 'en'
 }
