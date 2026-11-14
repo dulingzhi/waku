@@ -50,6 +50,19 @@ jobs:
             pkg-config \
             xdg-desktop-portal
 
+      # `--profile minimal` installs rustc and cargo only, so the components
+      # the fmt and clippy steps below need are absent otherwise. Only the
+      # Linux runner lints, so the other two do not pay for the download.
+      - name: Install Rust formatting and lint tools
+        if: runner.os == 'Linux'
+        run: rustup component add rustfmt clippy
+
+      # Formatting is platform-independent, so one runner is enough, and the
+      # cheapest check failing first keeps a long matrix from being wasted.
+      - name: Check Rust formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --package waku --package waku-protocol --package waku-client --package waku-core --package waku-daemon -- --check
+
       - name: Cache Cargo
         uses: actions/cache@v6
         with:
@@ -63,6 +76,13 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      # Linux only: clippy shares the cached target directory with the test
+      # build, so the other two runners would repeat a long compile for lint
+      # output that is nearly platform-independent.
+      - name: Lint Rust
+        if: runner.os == 'Linux'
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Verify in-process Cua SDK and REPL lifecycle
         run: |
@@ -100,3 +120,11 @@ jobs:
           bun run i18n:check
           bun run --filter @waku/mobile typecheck
           bun run --filter @waku/mobile test
+
+      # Web shipped without any CI coverage: its 24 suites never ran and it was
+      # never typechecked, so a broken import could reach `main` unnoticed.
+      - name: Check web client
+        if: runner.os == 'Linux'
+        run: |
+          bun run --filter @waku/web typecheck
+          bun run --filter @waku/web test

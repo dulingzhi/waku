@@ -68,9 +68,105 @@ jobs:
             echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # A release ships five signed artifacts to users, so the tests have to run
+  # inside this workflow rather than being assumed from Tests: a tag push
+  # would otherwise publish a draft even with the suite red. This job gates
+  # every build job, and it starts as early as `version` allows so the
+  # expensive signed macOS build is never started on a red suite.
+  #
+  # It mirrors the Rust half of `.github/workflows/test.yml` — the same three
+  # operating systems, commands and Cua lifecycle check — because a failure
+  # that only shows up on Windows or macOS is exactly what the release must
+  # not discover after paying for those builds. The platform-independent
+  # JavaScript checks run on Linux only, as they do there.
+  #
+  # The Linux leg runs on ubuntu-22.04 with the release cache key on purpose:
+  # the build jobs need this job, and they then restore the `target/` it
+  # leaves warm under the same key.
+  test:
+    name: Test gate
+    needs: version
+    if: needs.version.outputs.published != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            clang \
+            cmake \
+            libfontconfig-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxi-dev \
+            libxtst-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            xdg-desktop-portal
+
+      - name: Cache Cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-rust-1.96.0-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-rust-1.96.0-release-
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Verify in-process Cua SDK and REPL lifecycle
+        run: |
+          cargo build --locked --package waku --bin waku_js_repl --package waku-computer-use --bin waku_computer_use
+          bun scripts/cua-driver.ts bundle target/debug target/debug/resources debug
+          bun scripts/test-computer-use.ts
+
+      - name: Install JavaScript dependencies
+        if: runner.os == 'Linux'
+        run: bun install --frozen-lockfile
+
+      - name: Check generated protocol and browser client
+        if: runner.os == 'Linux'
+        run: |
+          bun run protocol:check
+          bun run --filter @waku/client check
+          bun run --filter @waku/client test
+
+      - name: Check shared locale core
+        if: runner.os == 'Linux'
+        run: |
+          bun run --filter @waku/i18n check
+          bun run --filter @waku/i18n test
+
+      - name: Check mobile i18n catalog and client
+        if: runner.os == 'Linux'
+        run: |
+          bun run i18n:check
+          bun run --filter @waku/mobile typecheck
+          bun run --filter @waku/mobile test
+
   linux-x86_64:
     name: Linux x86_64
-    needs: version
+    needs: [version, test]
     if: needs.version.outputs.published != 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 90
@@ -133,7 +229,7 @@ jobs:
 
   linux-arm64:
     name: Linux arm64
-    needs: version
+    needs: [version, test]
     if: needs.version.outputs.published != 'true'
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 90
@@ -193,7 +289,7 @@ jobs:
 
   windows-x86_64:
     name: Windows x86_64
-    needs: version
+    needs: [version, test]
     if: needs.version.outputs.published != 'true'
     runs-on: windows-latest
     timeout-minutes: 90
@@ -245,7 +341,7 @@ jobs:
 
   windows-arm64:
     name: Windows arm64
-    needs: version
+    needs: [version, test]
     if: needs.version.outputs.published != 'true'
     runs-on: windows-11-arm
     timeout-minutes: 90
@@ -297,7 +393,7 @@ jobs:
 
   macos:
     name: macOS
-    needs: version
+    needs: [version, test]
     if: needs.version.outputs.published != 'true'
     runs-on: macos-latest
     timeout-minutes: 90
@@ -374,6 +470,7 @@ jobs:
     needs:
       [
         version,
+        test,
         linux-x86_64,
         linux-arm64,
         windows-x86_64,
