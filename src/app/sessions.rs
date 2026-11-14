@@ -1580,8 +1580,9 @@ impl Waku {
 
     pub(super) fn add_project(&mut self, cx: &mut Context<Self>) {
         if self.daemon.is_remote() {
-            self.show_toast(tr!("errors.remote_project_picker"));
-            cx.notify();
+            // The native prompt answers with a path on *this* machine, which a
+            // remote daemon cannot resolve. Browse its filesystem instead.
+            self.request_daemon_directory_picker(cx);
             return;
         }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -1594,20 +1595,25 @@ impl Waku {
             if let Ok(Ok(Some(paths))) = receiver.await
                 && let Some(path) = paths.into_iter().next()
             {
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(existing) = this.state.projects.iter().find(|p| p.path == path) {
-                        this.select_project(existing.id, cx);
-                        return;
-                    }
-                    let project = Project::from_path(path);
-                    let project_id = project.id;
-                    this.state.projects.push(project);
-                    this.analytics.track(crate::analytics::Event::ProjectAdded);
-                    this.create_session_for(project_id, this.state.last_provider, cx);
-                });
+                let _ = this.update(cx, |this, cx| this.begin_project_at(path, cx));
             }
         })
         .detach();
+    }
+
+    /// Add `path` as a project, or select it when it is already known. Shared
+    /// by the native prompt and the daemon folder browser, so a folder chosen
+    /// either way lands identically.
+    pub(super) fn begin_project_at(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Some(existing) = self.state.projects.iter().find(|p| p.path == path) {
+            self.select_project(existing.id, cx);
+            return;
+        }
+        let project = Project::from_path(path);
+        let project_id = project.id;
+        self.state.projects.push(project);
+        self.analytics.track(crate::analytics::Event::ProjectAdded);
+        self.create_session_for(project_id, self.state.last_provider, cx);
     }
 
     pub(super) fn create_projectless_session(&mut self, cx: &mut Context<Self>) {

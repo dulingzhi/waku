@@ -1236,6 +1236,14 @@ pub struct Waku {
     /// off-thread; frames only read this in-memory value.
     commit_dialog: Option<commit_dialog::CommitDialogState>,
     goal_dialog: Option<goal_dialog::GoalDialogState>,
+    /// A deferred open of the daemon folder browser, which needs a `Window`
+    /// for its filter field.
+    daemon_directory_picker_request: Option<()>,
+    daemon_directory_picker: Option<daemon_directory_picker::DaemonDirectoryPicker>,
+    /// Daemon directories the folder browser has listed. Listing a directory
+    /// is filesystem I/O on the daemon host, so it never happens in a frame.
+    daemon_directories:
+        QueryCache<Option<PathBuf>, Result<daemon_directory_picker::DirectoryListing, String>>,
     goal_dialog_request: Option<goal_dialog::GoalDialogRequest>,
     /// Goal operations accepted before the session's runtime exists. Goals
     /// attach to the provider thread, not to any turn, so `/goal` on a fresh
@@ -1631,6 +1639,7 @@ mod command_palette;
 mod commit_dialog;
 mod components;
 mod composer;
+mod daemon_directory_picker;
 mod drafts;
 mod file_search;
 mod goal_dialog;
@@ -1659,6 +1668,7 @@ use background_work::{
 pub use command_palette::init as init_command_palette;
 pub use commit_dialog::init as init_commit_dialog_keys;
 use components::*;
+pub use daemon_directory_picker::init as init_daemon_directory_picker_keys;
 pub use goal_dialog::init as init_goal_dialog_keys;
 pub use image_preview::init as init_image_preview_keys;
 use project_picker::ProjectPickerSite;
@@ -2862,6 +2872,9 @@ impl Waku {
                 commit_dialog: None,
                 goal_dialog: None,
                 goal_dialog_request: None,
+                daemon_directory_picker_request: None,
+                daemon_directory_picker: None,
+                daemon_directories: QueryCache::new(8),
                 pending_goal_operations: HashMap::new(),
                 goal_runtime_starts: HashSet::new(),
                 goal_observed_at: HashMap::new(),
