@@ -33,6 +33,10 @@ pub struct DaemonReady {
     pub pid: u32,
 }
 
+// Versioned wire type: variants differ in size by design, and boxing one would
+// change the union `ts-rs` generates for every client. Messages move one at a
+// time, so the spread costs nothing in practice.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(
     tag = "type",
@@ -70,6 +74,9 @@ pub struct ReplayCursor {
     pub sequence: u64,
 }
 
+// Versioned wire type: `ts-rs` derives the browser client's union from these
+// variants, so boxing one would change the generated TypeScript shape.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(
     tag = "type",
@@ -328,6 +335,9 @@ pub struct SequencedEvent {
     pub event: WireDriverEvent,
 }
 
+// Versioned wire type: `Event` carries a whole `SequencedEvent` while the rest
+// are small markers; boxing it would change the generated TypeScript union.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(
     tag = "type",
@@ -356,6 +366,9 @@ pub enum ServerMessage {
     ShuttingDown,
 }
 
+// Versioned wire type: both variants are already the flattened forms clients
+// read, and boxing either would change the generated TypeScript union.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(
     tag = "status",

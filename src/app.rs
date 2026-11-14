@@ -62,8 +62,9 @@ use crate::terminal::TerminalView;
 use crate::theme::{Theme, ThemePreference, sp};
 use crate::ui::text_field::TextField;
 use crate::ui::{
-    MenuChip, ProjectNameSelector, activity_icon, activity_noun, contain_scroll, file_icon, icon,
-    icon_button, motion, provider_color, provider_mark, status_color, toggle_switch,
+    MenuChip, ProjectNameSelector, UiAction, activity_icon, activity_noun, contain_scroll,
+    file_icon, icon, icon_button, motion, provider_color, provider_mark, status_color,
+    toggle_switch,
 };
 use crate::{
     CancelTaskSwitch, CancelTurn, CloseFind, CloseWindow, ConfirmTaskSwitch, CopySelection,
@@ -1040,6 +1041,10 @@ impl Default for ActivityScrollViewport {
     }
 }
 
+/// Settled turns' footers, keyed by row index: the label and the fingerprint
+/// the row kinds had when it was built.
+type AssistantFooterCache = RefCell<HashMap<usize, (Option<SharedString>, Option<u64>)>>;
+
 pub struct Waku {
     /// Owns the headless provider process for exactly as long as the desktop
     /// app entity. Debug builds can replace it independently after a rebuild;
@@ -1510,7 +1515,7 @@ pub struct Waku {
     /// every visible row on every frame, and the underlying turn walk and
     /// answer join are O(session). Footers exist only for settled turns,
     /// whose parts are immutable, and settling moves the fingerprint.
-    assistant_footer_cache: RefCell<HashMap<usize, (Option<SharedString>, Option<u64>)>>,
+    assistant_footer_cache: AssistantFooterCache,
     /// The row-kinds fingerprint `assistant_footer_cache` was built under.
     assistant_footer_fingerprint: Cell<Option<u64>>,
     /// The response row currently under the pointer. Response footers are

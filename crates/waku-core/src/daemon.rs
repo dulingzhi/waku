@@ -42,6 +42,10 @@ fn trim_resident_transcripts(state: &mut PersistedState, pinned: &HashSet<Uuid>)
     state.trim_idle_transcripts(pinned, RESIDENT_TRANSCRIPT_WINDOW);
 }
 
+/// One capture lock per (workspace, session, turn), so the same turn is never
+/// captured twice at once.
+type CheckpointCaptureLocks = Mutex<HashMap<(PathBuf, Uuid, usize), Arc<Mutex<()>>>>;
+
 pub struct WakuBackend {
     sessions: Mutex<HashMap<Uuid, (Uuid, DriverHandle)>>,
     terminals: Mutex<HashMap<Uuid, (Uuid, crate::terminal::DaemonTerminal)>>,
@@ -54,7 +58,7 @@ pub struct WakuBackend {
     composer_drafts: ComposerDraftStore,
     attachments: AttachmentStore,
     usage_scan_cache: Mutex<crate::usage_history::ScanCache>,
-    checkpoint_capture_locks: Mutex<HashMap<(PathBuf, Uuid, usize), Arc<Mutex<()>>>>,
+    checkpoint_capture_locks: CheckpointCaptureLocks,
     usage_rates_dir: std::path::PathBuf,
     default_cwd: std::path::PathBuf,
 }
@@ -290,11 +294,8 @@ impl Backend for WakuBackend {
                     }
                     crate::model::ProviderKind::Grok => {
                         ensure_shell_environment();
-                        let probe = match binary_override.as_deref() {
-                            override_value => {
-                                crate::model::provider_probe(provider, override_value)
-                            }
-                        };
+                        let probe =
+                            crate::model::provider_probe(provider, binary_override.as_deref());
                         let binary = probe.path.ok_or_else(|| anyhow!("grok is not installed"))?;
                         Some(crate::usage::fetch_grok_plan_usage(&binary)?)
                     }
@@ -724,11 +725,13 @@ impl Backend for WakuBackend {
             }),
             Command::OpenTerminal { cwd, cols, rows } => {
                 let terminal = self.open_terminal(&cwd, cols, rows, events)?;
-                let previous = self
+                // Releases the terminal this one replaces. On unix that drop is
+                // what ends the replaced shell; the underscore keeps the binding
+                // alive until the end of the arm on every platform.
+                let _replaced = self
                     .terminals
                     .lock()
                     .insert(session_id, (runtime_id, terminal));
-                drop(previous);
                 Ok(ResponsePayload::Ack)
             }
             Command::WriteTerminal { data } => {
@@ -758,18 +761,17 @@ impl Backend for WakuBackend {
                 Ok(ResponsePayload::Ack)
             }
             Command::CloseTerminal => {
-                let removed = {
+                let _removed = {
                     let mut terminals = self.terminals.lock();
-                    if let Some((active_runtime_id, _)) = terminals.get(&session_id) {
-                        if *active_runtime_id != runtime_id {
-                            bail!(
-                                "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
-                            );
-                        }
+                    if let Some((active_runtime_id, _)) = terminals.get(&session_id)
+                        && *active_runtime_id != runtime_id
+                    {
+                        bail!(
+                            "daemon terminal {session_id} belongs to runtime {active_runtime_id}, not {runtime_id}"
+                        );
                     }
                     terminals.remove(&session_id)
                 };
-                drop(removed);
                 Ok(ResponsePayload::Ack)
             }
             Command::Start { options } => {

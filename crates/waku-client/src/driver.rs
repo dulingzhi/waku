@@ -18,8 +18,10 @@ pub struct DriverEventSender {
 }
 
 impl DriverEventSender {
-    pub fn send(&self, event: DriverEvent) -> Result<(), SendError<DriverEvent>> {
-        self.events.send(event)?;
+    /// Mirrors `waku_core::driver::DriverEventSender`: the rejected event rides
+    /// inline in the error, so the error is boxed to keep this `Result` small.
+    pub fn send(&self, event: DriverEvent) -> Result<(), Box<SendError<DriverEvent>>> {
+        self.events.send(event).map_err(Box::new)?;
         let _ = self.wake.try_send(());
         Ok(())
     }

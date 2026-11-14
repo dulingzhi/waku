@@ -296,15 +296,13 @@ fn session_summary_from_path(path: &Path) -> anyhow::Result<ProviderSessionSumma
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("custom-title"))
         .filter_map(|entry| entry.get("customTitle").and_then(Value::as_str))
         .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .next_back();
+        .rfind(|title| !title.is_empty());
     let ai_title = entries
         .iter()
         .filter(|entry| entry.get("type").and_then(Value::as_str) == Some("ai-title"))
         .filter_map(|entry| entry.get("aiTitle").and_then(Value::as_str))
         .map(str::trim)
-        .filter(|title| !title.is_empty())
-        .next_back();
+        .rfind(|title| !title.is_empty());
     let title = custom_title
         .or(ai_title)
         .map(str::to_owned)
@@ -406,7 +404,7 @@ fn list_provider_sessions_in(
     // index must not filter.
     let indexed = read_history_index(projects_directory);
     let mut candidates = provider_session_files(projects_directory)?;
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
 
     let mut sessions = Vec::new();
     for (file_updated_at, path) in candidates {
@@ -508,7 +506,10 @@ fn merge_indexed_summary(
     file_updated_at: u64,
 ) -> Option<ProviderSessionSummary> {
     if let Ok(mut summary) = session_summary_from_path(path) {
-        summary.updated_at = summary.updated_at.max(indexed.updated_at).max(file_updated_at);
+        summary.updated_at = summary
+            .updated_at
+            .max(indexed.updated_at)
+            .max(file_updated_at);
         return Some(summary);
     }
     let cwd = indexed.cwd.clone()?;
@@ -661,7 +662,7 @@ fn session_metadata_in(
         .then(|| entry.get("uuid").and_then(Value::as_str).map(str::to_owned))
         .flatten()
     });
-    let title = entries.iter().filter_map(claude_title).last();
+    let title = entries.iter().filter_map(claude_title).next_back();
     Ok(ClaudeSessionMetadata {
         latest_message_id,
         title,
@@ -998,7 +999,10 @@ mod tests {
         let (root, source) = fixture();
         let projects = root.join("projects");
         let headless_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-        let headless = source.parent().unwrap().join(format!("{headless_id}.jsonl"));
+        let headless = source
+            .parent()
+            .unwrap()
+            .join(format!("{headless_id}.jsonl"));
         serde_json::to_writer(
             fs::File::create(headless).unwrap(),
             &json!({

@@ -7,6 +7,9 @@ use ts_rs::TS;
 use crate::model::{AgentSession, ProviderResumeCursor};
 
 /// Daemon-host native-session operation used when no live driver can fork.
+// Versioned wire type: `Cursor` embeds a whole `AgentSession` while the others
+// carry a few fields, and boxing it would change the generated TypeScript.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(tag = "provider", rename_all = "camelCase")]
 pub enum ProviderSessionForkRequest {

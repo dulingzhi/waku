@@ -41,7 +41,9 @@ pub fn log(message: impl AsRef<str>) {
     };
     // A poisoned lock only means another thread panicked mid-write; the log is
     // diagnostic, so proceed rather than propagate that.
-    let _guard = LOG_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = LOG_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_LOG_BYTES) {
         let _ = std::fs::write(path, b"--- Waku log restarted ---\n");
     }

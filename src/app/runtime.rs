@@ -2218,7 +2218,7 @@ impl Waku {
             return;
         }
         let Some(project_path) = self
-            .workspace_path_for_session(&source)
+            .workspace_path_for_session(source)
             .map(std::path::Path::to_path_buf)
         else {
             self.show_toast(tr!("errors.task_project_not_found"));
@@ -2269,7 +2269,7 @@ impl Waku {
             )
             && driver.is_none()
         {
-            match self.driver_start_request_for_session(&source, project_path.clone()) {
+            match self.driver_start_request_for_session(source, project_path.clone()) {
                 Ok(request) => Some(request),
                 Err(error) => {
                     self.show_toast(error.to_string());
@@ -2370,6 +2370,9 @@ impl Waku {
         .detach();
     }
 
+    // The pre-rewind state this settlement has to restore, all of it captured
+    // before the rewind started and none of it derivable from the result.
+    #[allow(clippy::too_many_arguments)]
     fn finish_message_rewind(
         &mut self,
         edit: MessageEdit,
@@ -2722,7 +2725,7 @@ impl Waku {
             reasoning_effort,
             service_tier,
             context_window,
-        } = self.session_options(&session);
+        } = self.session_options(session);
         Ok(DriverStartRequest {
             session_id: session.id,
             provider: session.provider,

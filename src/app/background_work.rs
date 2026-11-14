@@ -1723,6 +1723,9 @@ fn render_environment_summary_section(
         .child(compare)
 }
 
+// Nine independent paint inputs; a params struct would be a struct with nine
+// fields used once, which the rest of the row builders do not do either.
+#[allow(clippy::too_many_arguments)]
 fn render_environment_action_row(
     id: &'static str,
     focus: &FocusHandle,
@@ -1751,7 +1754,7 @@ fn render_environment_action_row(
     } else {
         icon(icon_path, 14.0, icon_foreground).into_any_element()
     };
-    let action: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(action);
+    let action: UiAction = Rc::new(action);
     let key_action = action.clone();
     div()
         .id(id)

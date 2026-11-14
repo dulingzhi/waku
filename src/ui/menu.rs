@@ -79,7 +79,12 @@ pub fn init(cx: &mut App) {
 }
 
 use crate::theme::{Theme, sp};
+use crate::ui::UiAction;
 use crate::ui::icon;
+
+/// Builds a menu card's entries. Read fresh at every open, so a menu whose
+/// contents depend on live state cannot go stale while it is closed.
+type MenuItemBuilder = Rc<dyn Fn(&mut App) -> Vec<MenuItem>>;
 
 /// One row of a menu.
 #[derive(Clone)]
@@ -96,7 +101,7 @@ pub enum MenuItem {
         /// action is temporarily unavailable, so the menu keeps a stable shape.
         disabled: bool,
         #[allow(clippy::type_complexity)]
-        on_click: Rc<dyn Fn(&mut Window, &mut App)>,
+        on_click: UiAction,
     },
     /// Opens a one-level flyout beside the parent card. `value` keeps the
     /// current choice visible in the parent row, matching native inspector
@@ -113,7 +118,7 @@ pub enum MenuItem {
         #[allow(clippy::type_complexity)]
         render: Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>,
         #[allow(clippy::type_complexity)]
-        on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+        on_click: Option<UiAction>,
     },
     /// A non-interactive caption grouping the rows beneath it.
     Header(SharedString),
@@ -199,7 +204,7 @@ impl MenuItem {
         }
     }
 
-    fn click_handler(self) -> Option<Rc<dyn Fn(&mut Window, &mut App)>> {
+    fn click_handler(self) -> Option<UiAction> {
         match self {
             Self::Entry {
                 disabled: false,
@@ -967,7 +972,7 @@ struct MenuCard {
 impl RenderOnce for MenuCard {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = Theme::current(cx);
-        let item_builder: Rc<dyn Fn(&mut App) -> Vec<MenuItem>> = {
+        let item_builder: MenuItemBuilder = {
             let handle = self.handle.clone();
             let base_items = self.items.clone();
             Rc::new(move |cx| {
@@ -1078,6 +1083,9 @@ impl RenderOnce for MenuCard {
     }
 }
 
+// One entry's whole draw: what it is, where it sits, and whether the keyboard
+// cursor or a submenu owns it.
+#[allow(clippy::too_many_arguments)]
 fn render_menu_item(
     item: MenuItem,
     index: usize,
@@ -1245,7 +1253,7 @@ fn row(
     highlighted: bool,
     theme: &Theme,
     handle: ContextMenuHandle,
-    on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_click: Option<UiAction>,
 ) -> gpui::Stateful<gpui::Div> {
     let hover = theme.overlay;
     let highlight = theme.overlay_strong;
@@ -1308,7 +1316,7 @@ fn next_highlight(focusable: &[usize], current: Option<usize>, key: &str) -> Opt
 fn on_menu_key(
     handle: &ContextMenuHandle,
     focusable: &[usize],
-    items: &Rc<dyn Fn(&mut App) -> Vec<MenuItem>>,
+    items: &MenuItemBuilder,
     event: &KeyDownEvent,
     window: &mut Window,
     cx: &mut App,

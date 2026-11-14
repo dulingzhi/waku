@@ -2064,6 +2064,9 @@ impl BackgroundWorkItem {
     }
 }
 
+// Versioned wire type: the reconcile variants carry whole registries while the
+// delta variants carry one item, and boxing would change the generated union.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BackgroundWorkEvent {

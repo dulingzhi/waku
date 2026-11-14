@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Hsla, Img, InteractiveElement, Interactivity,
     KeyDownEvent, ParentElement, PathBuilder, Pixels, RenderOnce, ScrollHandle, SharedString,
@@ -13,6 +15,11 @@ pub mod tooltip;
 
 use crate::model::{ActivityKind, ProviderKind, SessionStatus};
 use crate::theme::{Theme, sp};
+
+/// A one-shot UI action, shared by menu entries and the row controls that
+/// invoke one. Boxed behind `Rc` so a row can hold it across rebuilds and
+/// still hand out a clone to a click and a key press.
+pub type UiAction = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// A monochrome icon from the embedded set, tinted via text color. Sized in
 /// `sp` so icons keep pace with the chrome text they sit beside when the UI

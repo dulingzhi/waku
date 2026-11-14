@@ -722,6 +722,10 @@ impl<'a> Ctx<'a> {
 /// it first — underneath the glyphs — while the text's prepaint has already
 /// filled in the shared [`TextLayout`]. That ordering is what lets a pure-paint
 /// pass read real glyph geometry without a second layout pass.
+// The paint inputs for one laid-out run: its text and key, what is selected,
+// what matched a search, how links resolve, and the three washes. The layout
+// pass already produced everything else, so there is nothing left to bundle.
+#[allow(clippy::too_many_arguments)]
 fn text_element_with_selection(
     flat: &FlatText,
     runs: Vec<TextRun>,
@@ -2191,7 +2195,7 @@ mod tests {
             highlighted.iter().map(|run| run.len).sum::<usize>(),
             plain.iter().map(|run| run.len).sum::<usize>()
         );
-        assert!(highlighted.iter().all(|run| &run.font == &code_font));
+        assert!(highlighted.iter().all(|run| run.font == code_font));
     }
 
     #[test]

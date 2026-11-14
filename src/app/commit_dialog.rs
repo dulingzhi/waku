@@ -313,6 +313,9 @@ impl Waku {
         cx.notify();
     }
 
+    // Carries the dialog's captured commit inputs into an async task; each one
+    // is a separate value the task needs, so there is nothing to collapse.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_commit_message_generation(
         &mut self,
         id: Uuid,
@@ -395,6 +398,9 @@ impl Waku {
         .detach();
     }
 
+    // Carries the dialog's captured commit inputs into an async task; each one
+    // is a separate value the task needs, so there is nothing to collapse.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_git_action(
         &mut self,
         id: Uuid,
@@ -866,7 +872,7 @@ fn grouped_number(value: u64) -> String {
     let digits = value.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
     for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
         grouped.push(character);

@@ -84,6 +84,9 @@ impl ApiError {
         }
     }
 
+    /// Only the tests exercise this; production reaches OpenCode through
+    /// [`Self::status`] and the two predicates below.
+    #[cfg(test)]
     pub(crate) fn tag(&self) -> Option<&str> {
         match self {
             Self::Tagged { tag, .. } => Some(tag),
@@ -104,6 +107,7 @@ impl ApiError {
     /// A location-scoped route handed a directory the service cannot resolve
     /// answers HTTP 500 with an EMPTY body. That is a bad workspace, not a
     /// server fault, and treating it as the latter would retry forever.
+    #[cfg(test)]
     pub(crate) fn is_unresolvable_location(&self) -> bool {
         matches!(self, Self::Http { status: 500, body } if body.trim().is_empty())
     }
@@ -635,6 +639,11 @@ pub(crate) struct PermissionRequest {
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PermissionReply {
     Once,
+    /// Waku never sends this: [`reply_permission`] refuses it, because the
+    /// service would write a durable rule into `/api/permission/saved`, a
+    /// store shared with the user's own OpenCode. The variant stays so the
+    /// wire vocabulary is complete and the refusal is expressed in the type.
+    #[allow(dead_code)]
     Always,
     Reject,
 }
@@ -1541,10 +1550,10 @@ mod tests {
                         if line == "\r\n" {
                             break;
                         }
-                        if let Some((name, value)) = line.split_once(':') {
-                            if name.eq_ignore_ascii_case("content-length") {
-                                content_length = value.trim().parse::<usize>().unwrap();
-                            }
+                        if let Some((name, value)) = line.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            content_length = value.trim().parse::<usize>().unwrap();
                         }
                     }
                     request.read_exact(&mut vec![0; content_length]).unwrap();

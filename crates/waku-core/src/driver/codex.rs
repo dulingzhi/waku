@@ -1619,14 +1619,17 @@ fn codex_subagent_work(item: &Value) -> Vec<BackgroundWorkItem> {
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Rollback requests still awaiting their JSON-RPC reply, keyed by request id,
+/// with the turn position the rollback must land on.
+type PendingRollbacks = Mutex<HashMap<u64, (usize, Sender<Result<(), String>>)>>;
+
 #[allow(clippy::too_many_arguments)]
 fn handle_codex_message(
     value: Value,
     thread_id: &Mutex<Option<String>>,
     turn_id: &Mutex<Option<String>>,
     turn_ids: &Mutex<Vec<String>>,
-    pending_rollbacks: &Mutex<HashMap<u64, (usize, Sender<Result<(), String>>)>>,
+    pending_rollbacks: &PendingRollbacks,
     pending_steers: &Mutex<HashMap<u64, String>>,
     background_rpcs: &Mutex<BackgroundRpcState>,
     goal_rpcs: &Mutex<GoalRpcState>,
@@ -2659,7 +2662,7 @@ mod tests {
         thread_id: Mutex<Option<String>>,
         turn_id: Mutex<Option<String>>,
         turn_ids: Mutex<Vec<String>>,
-        rollbacks: Mutex<HashMap<u64, (usize, Sender<Result<(), String>>)>>,
+        rollbacks: PendingRollbacks,
         steers: Mutex<HashMap<u64, String>>,
         background: Mutex<BackgroundRpcState>,
         goals: Mutex<GoalRpcState>,

@@ -1975,6 +1975,9 @@ impl BrowserView {
         self.perform_editing_command("selectAll");
     }
 
+    // A toolbar button's whole appearance: glyph, enabled state, tooltip,
+    // theme and the action it runs.
+    #[allow(clippy::too_many_arguments)]
     fn toolbar_button(
         &self,
         id: &'static str,

@@ -24,7 +24,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_BUFFERED_EVENTS_PER_RUNTIME: usize = 4096;
 
 enum Outgoing {
-    Message(ClientMessage),
+    // Boxed: `ClientMessage` is a wire enum whose largest variant is ~700
+    // bytes, and this channel carries one message at a time.
+    Message(Box<ClientMessage>),
     Shutdown,
 }
 
@@ -181,7 +183,7 @@ impl DaemonClient {
         if self
             .inner
             .outgoing
-            .send(Outgoing::Message(message))
+            .send(Outgoing::Message(Box::new(message)))
             .is_err()
         {
             self.inner.pending.lock().remove(&request_id);
@@ -208,15 +210,17 @@ impl DaemonClient {
         }
         self.inner
             .outgoing
-            .send(Outgoing::Message(ClientMessage::Request(Request {
-                // The nil request id is reserved for fire-and-forget controls;
-                // the daemon executes them in the runtime mailbox but does
-                // not allocate or send a response.
-                request_id: Uuid::nil(),
-                session_id,
-                runtime_id,
-                command,
-            })))
+            .send(Outgoing::Message(Box::new(ClientMessage::Request(
+                Request {
+                    // The nil request id is reserved for fire-and-forget controls;
+                    // the daemon executes them in the runtime mailbox but does
+                    // not allocate or send a response.
+                    request_id: Uuid::nil(),
+                    session_id,
+                    runtime_id,
+                    command,
+                },
+            ))))
             .map_err(|_| anyhow!("Waku daemon connection is closed"))
     }
 

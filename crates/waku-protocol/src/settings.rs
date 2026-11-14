@@ -10,6 +10,7 @@ use crate::model::ProviderKind;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(default)]
+#[derive(Default)]
 pub struct DaemonSettings {
     pub computer_use_enabled: bool,
     pub computer_use_allowed_apps: Vec<ComputerAppGrant>,
@@ -18,18 +19,6 @@ pub struct DaemonSettings {
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
-}
-
-impl Default for DaemonSettings {
-    fn default() -> Self {
-        Self {
-            computer_use_enabled: false,
-            computer_use_allowed_apps: Vec::new(),
-            disabled_providers: Vec::new(),
-            provider_binary_overrides: HashMap::new(),
-            extra: BTreeMap::new(),
-        }
-    }
 }
 
 impl DaemonSettings {

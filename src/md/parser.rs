@@ -81,6 +81,10 @@ enum InlinePiece {
 }
 
 /// A markdown block. Containers nest.
+///
+/// `CodeBlock` and `BlockQuote` name the markdown constructs rather than
+/// repeating the enum's own name, so the repetition is deliberate.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
     Paragraph {
@@ -1295,9 +1299,8 @@ mod tests {
         let Block::Paragraph { runs } = &parser.tree().blocks[0].block else {
             panic!("expected a paragraph");
         };
-        assert_eq!(
+        assert!(
             runs.iter().find(|run| run.style.link.is_some()).is_some(),
-            true,
             "the definition should resolve the earlier reference"
         );
     }

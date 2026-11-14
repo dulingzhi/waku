@@ -573,7 +573,7 @@ pub fn serve(
         match listener.accept() {
             Ok((stream, _)) => {
                 if active_connections
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                         (active < MAX_CONNECTIONS).then_some(active + 1)
                     })
                     .is_err()
@@ -609,6 +609,9 @@ pub fn serve(
     Ok(())
 }
 
+// The handshake closure below must return tungstenite's own `ErrorResponse`,
+// so the same fixed signature that pins `validate_handshake` pins this call.
+#[allow(clippy::result_large_err)]
 fn handle_connection(
     stream: TcpStream,
     expected_token: &str,
@@ -770,6 +773,9 @@ fn handle_connection(
     Ok(())
 }
 
+// tungstenite's `accept_hdr_with_config` callback requires this exact
+// signature, so the 136-byte `ErrorResponse` cannot be boxed away here.
+#[allow(clippy::result_large_err)]
 fn validate_handshake(
     request: &HandshakeRequest,
     response: HandshakeResponse,

@@ -1297,7 +1297,8 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
         "expanding a turn fold"
     );
 
-    let mutations: Vec<(&str, fn(&mut AgentSession))> = vec![
+    type Mutation = (&'static str, fn(&mut AgentSession));
+    let mutations: Vec<Mutation> = vec![
         ("a new message", |session| {
             session.push_message(MessageRole::User, "One more thing");
         }),
