@@ -104,22 +104,36 @@ every provider has a recorded failure semantics note.
 and runs a command, and every remaining three-client difference has a written
 reason.
 
-**Caution** Windows needs a real ConPTY implementation, which is a separate
-piece of work. Land unix first; schedule Windows on its own.
+**Caution** Windows needs a ConPTY backend, which the `alacritty_terminal`
+crate this already builds on turns out to ship — the gap was the PTY's API
+shape, not a missing capability. That work has landed and has not been run
+against a real daemon; `docs/verification-checklist.md` lists what a Windows
+host has to prove.
 
 ## Stage 4 — Maintainability, then new work (about four weeks)
 
-1. Split the giant files, starting with `composer.rs` — 3850 lines and no
-   tests. One cohesive unit at a time, with tests and a performance check after
-   each.
-2. Pull pure functions out of `composer.rs`, `transcript.rs` and
-   `streaming.rs` — roughly 6000 lines between them with no unit tests.
+This stage's plan was written before anyone counted the tests, and the count
+was wrong. The app's tests live in `src/app/tests.rs`, declared by
+`src/app.rs`, and reach into their modules with `use super::...` — so counting
+`#[test]` per file reports zero for files that are in fact well covered. Before
+adding anything here, check `tests.rs` first.
+
+1. Cover what is genuinely untested, in `tests.rs`. That is now done for
+   `stream_delta_kind`, `stream_delta_text`, the fingerprint's determinism and
+   grouping, and the character-boundary truncation paths.
+2. Leave the giant files alone for now. `composer.rs` is 3800 lines of GPUI
+   rendering with a single pure function among them; splitting it would not make
+   any of it testable, because the rendering paths are not testable either way.
+   The real gain would be smaller files, and the cost is a plausible
+   performance regression with no automated way to detect one. Do this only
+   after a measurement baseline exists.
 3. Only then, explore parallel task orchestration: several agents working one
    problem with the results merged.
 
-**Done when** `composer.rs` is three files of at most 1500 lines each, the
-streaming CPU figures in `docs/performance.md` do not regress, and the
-extracted functions carry tests.
+**Done when** every pure function in `app` has a test that fails when its
+behaviour changes, and the fingerprint's guards cover both directions — a
+change that alters the rows moves it, and a change that does not leaves it
+alone.
 
 ## Stage 5 — Remote access over a relay, end to end encrypted (unscheduled)
 
