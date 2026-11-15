@@ -36,6 +36,16 @@ identity key rather than a second signing crate.
 surface in an app that ships on three platforms. That dependency review is
 step 0, not something to discover mid-implementation.
 
+Two facts about `snow` worth having in writing before anyone relies on it:
+
+- **It has not had a formal audit.** Its README says so in bold, and reads as a
+  design statement rather than a hedge: what it offers is a careful
+  implementation of a published specification, not a substitute for reviewing
+  the protocol built on top of it. That review is this plan's step 0.
+- **It fits the toolchain.** `snow` 0.10 targets edition 2024 and Rust 1.85;
+  this workspace is edition 2024 on Rust 1.99, so no version negotiation is
+  needed.
+
 ## The relay client is a new code path on the daemon side
 
 The daemon cannot currently make an outbound TLS connection at all:
@@ -60,15 +70,51 @@ the earlier plan.
 Steps 0 through 3 are 21-27 days and are the sensible first delivery: encrypted
 transport, usable today, with no relay in the picture.
 
-## The one unknown that can double the estimate
+## The TypeScript side: researched, and the answer is mixed
 
-**The TypeScript clients need their own Noise implementation.** `snow` is Rust
-only; the browser and React Native cannot use it. Whether a mature JS or WASM
-implementation exists, and which one, is unverified — and if none is suitable,
-step 2 grows into writing and reviewing a handshake implementation in
-TypeScript, which is a different kind of work from the rest of this plan.
+This was the unknown that could double the estimate. It no longer is — but the
+answer is not "use this library".
 
-That question should be answered in step 0.
+**What exists, and why none of them is a drop-in:**
+
+- [`noise-handshake`](https://socket.dev/npm/package/noise-handshake) — the
+  serialisation target for these experiments, and it fits: handshake state,
+  `rx`/`tx` transport keys, and a `hash` field that is the handshake hash the
+  authentication string needs. But it depends on `sodium-universal`, which is a
+  **native module**. React Native needs a native build, and the web client would
+  need a WASM bundle. Its health is also middling.
+- [`relayly`](https://socket.dev/npm/package/relayly) — a whole relay product,
+  not a primitive, and it says outright that it hand-writes Noise XX over
+  `@noble` primitives because *"no maintained Noise library fits this exact
+  cipher suite"*.
+- [`@kangentic/protocol`](https://npmjs.com/package/@kangentic/protocol) — same
+  pattern: pure TypeScript Noise over `@noble/curves`, `@noble/hashes` and
+  `@noble/ciphers`, no native module, runs on Node and React Native. It also
+  uses a short authentication string and documents the pairing ceremony.
+- [`@stonygrey/torann`](https://socket.dev/npm/package/@stonygrey/torann) — an
+  Expo module wrapping Swift and Kotlin Noise implementations. Native, so it is
+  React Native only, excludes the web client, and requires iOS 18 / API 33.
+
+**The pattern is the finding.** Every project that needed Noise in JavaScript
+wrote it over `@noble` rather than adopting a Noise library, and the reasons are
+consistent: the existing implementations pull native modules, and the ones that
+do not are either unmaintained or not Noise as a library.
+
+`@noble` itself is the solid half — audited, pure TypeScript, tree-shakable,
+works on browser, Node and React Native with a `getRandomValues` polyfill on
+Hermes. One project measured a full Noise IK handshake at 16 ms in Node and a
+1 KiB frame at 0.09 ms, which is comfortably enough for a transcript.
+
+**So step 2 has three routes**, none of them free:
+
+| Route | Cost | Risk |
+| --- | --- | --- |
+| Adopt `noise-handshake` | Lowest | A native module in both clients, plus a web build path |
+| Write Noise over `@noble` | 6-8 days, twice (web and mobile) | Hand-written handshake logic in the client that holds the token |
+| Depend on a product like `relayly` or `@kangentic` | Lowest code | Ties this feature to a third party's roadmap and threat model |
+
+A route has to be chosen in step 0, before the record layer is written, because
+the Rust and TypeScript sides must agree on a wire format byte for byte.
 
 ## What this plan does not promise
 
@@ -83,13 +129,25 @@ That question should be answered in step 0.
 ## Open questions before step 2
 
 Each of these changes the code, so they should be answered before it is
-written rather than during:
+written rather than during.
 
-1. **`snow` or `ring` directly?** A reviewed protocol composition against
-   primitives already in the tree. The second option is more code to get right
-   and easier to review line by line.
+1. **Which TypeScript route?** Researched above; still a choice between a native
+   module, a hand-written Noise over `@noble`, and depending on a product. It
+   decides how much hand-written handshake code sits in the client that holds
+   the token.
 2. **Where does the daemon's long-lived identity key live**, and how is it
    rotated after a compromise? Without one, every pairing is trust-on-first-use.
-3. **Single-use pairing codes, or reusable until they expire?**
-4. **What happens on a device that cannot hold a hardware-backed key** — the
-   mobile client is the open case.
+   The obvious shapes are a file at `~/.waku/identity.key` with 0600, or the
+   system keychain. The first is portable and the second is where a macOS user
+   expects a key; choosing one is a decision, not a detail.
+3. **Single-use pairing codes, or reusable until they expire?** A single-use
+   code cannot be replayed, but it also cannot be shown on a screen for someone
+   to come back to later.
+4. **Does the relay or the daemon mint the session id?** The daemon is simpler.
+   The relay can reject an id already in use, which the daemon cannot know.
+
+**Answered, and no longer open:** `snow` over a hand-rolled composition, and
+`ring` cannot be used directly because it is transitive. The authentication
+string comes from the Noise handshake hash, which both `snow`
+(`get_handshake_hash`) and `noise-handshake` (`hash` in the completed state)
+expose.
