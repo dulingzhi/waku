@@ -81,6 +81,16 @@ export const daemonKeys = {
     root,
     source,
   ] as const,
+  /** Which retained turn counts (the value passed as `turnCount` by a rewind)
+   * still have a git checkpoint ref. A rewind affordance may only appear for
+   * a turn count this set contains. */
+  sessionTurnRefs: (profileId: string, root: string, sessionId: string) => [
+    'daemon',
+    profileId,
+    'session-turn-refs',
+    root,
+    sessionId,
+  ] as const,
 };
 
 export async function loadTaskState(client: WakuClient): Promise<TaskState> {
@@ -277,6 +287,24 @@ export async function applyComposerDraftChanges(
     await client.request({ type: 'applyComposerDraftChanges', changes }),
     'ack',
   );
+}
+
+export async function listSessionTurnRefs(
+  client: WakuClient,
+  cwd: string,
+  sessionId: string,
+): Promise<number[]> {
+  const response = expectResponse(
+    await client.request({
+      type: 'workspace',
+      operation: { type: 'sessionTurnRefs', cwd, session_id: sessionId },
+    }),
+    'workspace',
+  );
+  if (response.result.type !== 'turnRefs') {
+    throw new Error('The daemon returned an unexpected checkpoint response');
+  }
+  return response.result.turn_counts;
 }
 
 export async function inspectBranches(

@@ -53,6 +53,9 @@ export type TranscriptRow =
       /** True for every block of a message that is still streaming — freshly
        * minted settled rows fade in on mount while this holds. */
       streaming: boolean;
+      /** True for the message's final block: the one that carries the footer
+       * timestamp and the per-response actions. */
+      last: boolean;
       footerTimestamp: number | null;
       topGap: number;
     }
@@ -207,6 +210,104 @@ export function providerLabel(provider: ProviderKind): string {
     pi: 'Pi',
   };
   return labels[provider];
+}
+
+/**
+ * Providers whose daemon can roll a native conversation back to a turn, and
+ * separately fork one. Mirrors `ProviderKind::supports_conversation_rollback`
+ * and `supports_conversation_fork` in `crates/waku-protocol`: Kimi and Fx are
+ * absent from both because neither can reproduce Waku's turn-count
+ * semantics. The two capabilities currently accept the same providers, but
+ * they are distinct in the protocol, so they keep distinct predicates.
+ */
+const PROVIDERS_WITH_ROLLBACK: ReadonlySet<ProviderKind> = new Set<ProviderKind>([
+  'amp', 'claude', 'codex', 'cursor', 'deepSeek', 'openCode', 'grok', 'ohMyPi', 'pi',
+]);
+
+export function providerSupportsRollback(provider: ProviderKind): boolean {
+  return PROVIDERS_WITH_ROLLBACK.has(provider);
+}
+
+export function providerSupportsFork(provider: ProviderKind): boolean {
+  return PROVIDERS_WITH_ROLLBACK.has(provider);
+}
+
+/**
+ * The turn count a fork of this response would carry, or null when the
+ * response cannot be forked.
+ *
+ * The daemon's `validate_response_fork` accepts a turn count whose turn the
+ * provider actually started, on a session that is not mid-turn and whose
+ * provider cursor belongs to the same provider. It does not require a
+ * checkpoint ref: a fork that cannot copy the refs still succeeds and reports
+ * `checkpointWarning`, so gating on checkpoints here would hide a working
+ * action.
+ */
+export function responseForkTurnCount(
+  session: AgentSession,
+  message: Message,
+): number | null {
+  if (
+    message.role !== 'assistant'
+    || message.streaming
+    || (session.status !== 'idle' && session.status !== 'failed')
+    || !session.provider_cursor
+    || session.provider_cursor.provider !== session.provider
+    || !providerSupportsFork(session.provider)
+  ) {
+    return null;
+  }
+  const turn = message.turn_id
+    ? session.turns.find((candidate) => candidate.id === message.turn_id)
+    : undefined;
+  if (!turn?.provider_turn_started) return null;
+  return turn.turn_count;
+}
+
+/**
+ * The turn count a rewind from this user message would pass to the daemon, or
+ * null when the message cannot open a rewind.
+ *
+ * The daemon reads that value as the turn being rewound from and keeps
+ * `turn_count - 1` turns, so this returns the message's own turn count while
+ * gating on whether the *retained* count still has a checkpoint ref — the
+ * restore needs that ref to put the worktree back.
+ *
+ * Only the prompt that opened a turn is a rewind boundary: a steer joins the
+ * running turn as another user message, and checkpoints are per turn, so
+ * rewinding from a steer would resubmit the steer text in place of the prompt
+ * that actually opened the turn.
+ */
+export function userMessageRewindTurnCount(
+  session: AgentSession,
+  message: Message,
+  availableRetainedTurnCounts: ReadonlySet<number>,
+): number | null {
+  if (
+    message.role !== 'user'
+    || (session.status !== 'idle' && session.status !== 'failed')
+    || !providerSupportsRollback(session.provider)
+  ) {
+    return null;
+  }
+  const turn = message.turn_id
+    ? session.turns.find((candidate) => candidate.id === message.turn_id)
+    : undefined;
+  if (!turn) return null;
+  // Turn messages are contiguous, so checking the immediately preceding
+  // message is enough to tell the opening prompt from a later steer.
+  const index = session.messages.findIndex((candidate) => candidate.id === message.id);
+  if (index < 0) return null;
+  const previous = session.messages[index - 1];
+  if (previous?.turn_id === turn.id) return null;
+  const retainedTurnCount = Math.max(0, turn.turn_count - 1);
+  if (!availableRetainedTurnCounts.has(retainedTurnCount)) return null;
+  const rollbackTurns = session.turns
+    .slice(retainedTurnCount)
+    .filter((candidate) => candidate.provider_turn_started)
+    .length;
+  if (rollbackTurns > 0 && !session.provider_cursor) return null;
+  return turn.turn_count;
 }
 
 export function runtimeModeLabel(mode: RuntimeMode, t?: Translator): string {
@@ -482,6 +583,7 @@ function expandPipelineRow(
       node: block.node,
       live: streaming && last,
       streaming,
+      last,
       footerTimestamp: last ? row.footerTimestamp : null,
       topGap: 0,
     });

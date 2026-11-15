@@ -50,6 +50,7 @@ import {
   type NewSessionOptions,
   type SessionOptionChanges,
 } from './mobile-runtime';
+import { translateNow } from './i18n-context';
 import {
   clearDaemonDisconnectErrors,
   isDaemonDisconnectError,
@@ -95,6 +96,10 @@ interface RuntimeContextValue {
   permissions: Record<string, PendingPermission | undefined>;
   userInputs: Record<string, PendingUserInput | undefined>;
   errors: Record<string, string | undefined>;
+  /** Turn count of the response a fork is replacing, per session. */
+  responseForks: Record<string, number | undefined>;
+  /** Turn count a rewind is truncating to, per session. */
+  messageRewinds: Record<string, number | undefined>;
   attachSession: (session: AgentSession) => Promise<boolean>;
   sendPrompt: (
     session: AgentSession,
@@ -128,6 +133,18 @@ interface RuntimeContextValue {
   renameSession: (sessionId: string, title: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<void>;
+  /** Branch a task from one of its completed responses. */
+  forkSessionFromResponse: (
+    session: AgentSession,
+    turnCount: number,
+  ) => Promise<{ session: AgentSession; checkpointWarning: string | null }>;
+  /** Truncate a task at a message and resubmit it as a new turn. */
+  rewindSessionToMessage: (
+    session: AgentSession,
+    turnCount: number,
+    prompt: string,
+    attachments?: MessageAttachment[],
+  ) => Promise<{ session: AgentSession; cleanupWarning: string | null }>;
   dismissError: (sessionId: string) => void;
 }
 
@@ -145,6 +162,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [permissions, setPermissions] = useState<Record<string, PendingPermission | undefined>>({});
   const [userInputs, setUserInputs] = useState<Record<string, PendingUserInput | undefined>>({});
   const [errors, setErrors] = useState<Record<string, string | undefined>>({});
+  const [responseForks, setResponseForks] = useState<Record<string, number | undefined>>({});
+  const [messageRewinds, setMessageRewinds] = useState<Record<string, number | undefined>>({});
   const hasRecoveredDisconnectError = daemon.phase === 'connected'
     && Object.values(errors).some(isDaemonDisconnectError);
   const entries = useRef(new Map<string, RuntimeEntry>());
@@ -159,6 +178,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const cacheGenerations = useRef(new Map<string, number>());
   const pendingSteers = useRef(new Map<string, PendingSubmission[]>());
   const drainingQueues = useRef(new Set<string>());
+  /** A second fork/rewind for the same task must not race the first: both
+   * truncate history, so a double tap would emit two contradictory commands. */
+  const responseForksInFlight = useRef(new Set<string>());
+  const messageRewindsInFlight = useRef(new Set<string>());
   const sendPromptRef = useRef<
     ((
       session: AgentSession,
@@ -901,6 +924,114 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     await persistOrdered(next);
   }, [cacheSession, daemon.activeProfile?.id, persistOrdered, queryClient]);
 
+  const forkSessionFromResponse = useCallback(async (
+    session: AgentSession,
+    turnCount: number,
+  ): Promise<{ session: AgentSession; checkpointWarning: string | null }> => {
+    const client = daemon.client;
+    const profileId = daemon.activeProfile?.id;
+    if (!client || !profileId || daemon.phase !== 'connected') {
+      throw new Error(translateNow('errors.daemon_disconnected'));
+    }
+    if (responseForksInFlight.current.has(session.id)) {
+      throw new Error(translateNow('errors.task_already_forking'));
+    }
+    responseForksInFlight.current.add(session.id);
+    setResponseForks((values) => ({ ...values, [session.id]: turnCount }));
+    try {
+      const runtime = entries.current.get(session.id);
+      const response = await client.request(
+        { type: 'forkSessionFromResponse', turnCount },
+        session.id,
+        runtime?.runtimeId,
+      );
+      if (response.type !== 'sessionForked') {
+        throw new Error(translateNow('errors.unexpected_daemon_response', {
+          expected: 'sessionForked',
+          actual: response.type,
+        }));
+      }
+      // The fork is a new task: it enters the cache and, through cacheSession,
+      // the task list the session view reads.
+      cacheSession(response.session);
+      await queryClient.invalidateQueries({ queryKey: daemonKeys.taskState(profileId) });
+      return {
+        session: response.session,
+        checkpointWarning: response.checkpointWarning,
+      };
+    } finally {
+      responseForksInFlight.current.delete(session.id);
+      setResponseForks((values) => removeKey(values, session.id));
+    }
+  }, [cacheSession, daemon.activeProfile?.id, daemon.client, daemon.phase, queryClient]);
+
+  const rewindSessionToMessage = useCallback(async (
+    session: AgentSession,
+    turnCount: number,
+    prompt: string,
+    attachments: MessageAttachment[] = [],
+  ): Promise<{ session: AgentSession; cleanupWarning: string | null }> => {
+    const client = daemon.client;
+    const profileId = daemon.activeProfile?.id;
+    if (!client || !profileId || daemon.phase !== 'connected') {
+      throw new Error(translateNow('errors.daemon_disconnected'));
+    }
+    if (messageRewindsInFlight.current.has(session.id)) {
+      throw new Error(translateNow('errors.task_already_rewinding'));
+    }
+    messageRewindsInFlight.current.add(session.id);
+    setMessageRewinds((values) => ({ ...values, [session.id]: turnCount }));
+    try {
+      // The daemon truncates what it has stored; a write still in flight
+      // would land afterwards and restore the turns the rewind removed.
+      const pending = persistTails.current.get(session.id);
+      if (pending) await pending;
+      const runtime = entries.current.get(session.id);
+      const response = await client.request(
+        { type: 'rewindSessionToMessage', turnCount },
+        session.id,
+        runtime?.runtimeId,
+      );
+      if (response.type !== 'sessionRewound') {
+        throw new Error(translateNow('errors.unexpected_daemon_response', {
+          expected: 'sessionRewound',
+          actual: response.type,
+        }));
+      }
+      // The live runtime still holds the pre-rewind conversation, so drop it
+      // and let the resubmitted prompt start a fresh one.
+      removeRuntime(session.id);
+      cacheSession(response.session);
+      // The rewind rewrote the working tree and the per-turn git refs behind
+      // it, so every workspace projection the task surfaces read is stale —
+      // including the turn-ref set the rewind affordances themselves are
+      // gated on. Leaving that one stale would keep a destructive control
+      // enabled against refs that no longer exist.
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['daemon', profileId, 'workspace-tree'] }),
+        queryClient.invalidateQueries({ queryKey: ['daemon', profileId, 'workspace-diff'] }),
+        queryClient.invalidateQueries({ queryKey: ['daemon', profileId, 'branches'] }),
+        queryClient.invalidateQueries({ queryKey: ['daemon', profileId, 'session-turn-refs'] }),
+      ]).catch(() => {});
+      await sendPrompt(response.session, prompt, attachments);
+      return {
+        session: response.session,
+        cleanupWarning: response.cleanupWarning,
+      };
+    } finally {
+      messageRewindsInFlight.current.delete(session.id);
+      setMessageRewinds((values) => removeKey(values, session.id));
+    }
+  }, [
+    cacheSession,
+    daemon.activeProfile?.id,
+    daemon.client,
+    daemon.phase,
+    queryClient,
+    removeRuntime,
+    sendPrompt,
+  ]);
+
   const dismissError = useCallback((sessionId: string) => {
     setErrors((values) => removeKey(values, sessionId));
   }, []);
@@ -974,7 +1105,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     setPermissions({});
     setUserInputs({});
     setErrors({});
+    setResponseForks({});
+    setMessageRewinds({});
     revalidatedConnections.current = 0;
+    responseForksInFlight.current.clear();
+    messageRewindsInFlight.current.clear();
     return () => {
       for (const entry of entries.current.values()) entry.unsubscribe();
       entries.current.clear();
@@ -982,6 +1117,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       persistTails.current.clear();
       pendingSteers.current.clear();
       drainingQueues.current.clear();
+      responseForksInFlight.current.clear();
+      messageRewindsInFlight.current.clear();
       for (const timer of persistTimers.current.values()) clearTimeout(timer);
       persistTimers.current.clear();
     };
@@ -993,6 +1130,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       permissions,
       userInputs,
       errors,
+      responseForks,
+      messageRewinds,
       attachSession,
       sendPrompt,
       steerPrompt,
@@ -1005,6 +1144,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       renameSession,
       deleteSession,
       removeQueuedMessage,
+      forkSessionFromResponse,
+      rewindSessionToMessage,
       dismissError,
     }}>
       {children}

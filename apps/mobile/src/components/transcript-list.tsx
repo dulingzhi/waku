@@ -39,7 +39,9 @@ import { useI18n } from '@/lib/i18n-context';
 import {
   buildTranscriptPipeline,
   expandTranscriptRows,
+  responseForkTurnCount,
   stabilizeTranscriptRows,
+  userMessageRewindTurnCount,
   type TranscriptRow,
 } from '@/lib/session-presentation';
 import {
@@ -107,6 +109,11 @@ export function TranscriptList({
   headerInset,
   onUnderHeaderChange,
   onDevSample,
+  retainedTurnCounts,
+  forkingTurnCount,
+  rewindingTurnCount,
+  onForkResponse,
+  onRewindMessage,
 }: {
   ref?: Ref<TranscriptListHandle>;
   session: AgentSession;
@@ -116,6 +123,13 @@ export function TranscriptList({
   headerInset: number;
   onUnderHeaderChange: (under: boolean) => void;
   onDevSample?: (sample: TranscriptDevSample) => void;
+  /** Retained turn counts that still have a git checkpoint ref. A rewind
+   * control appears only for a message whose retained count is in here. */
+  retainedTurnCounts: ReadonlySet<number>;
+  forkingTurnCount?: number;
+  rewindingTurnCount?: number;
+  onForkResponse?: (turnCount: number) => void;
+  onRewindMessage?: (turnCount: number, prompt: string) => void;
 }) {
   const theme = useTheme();
   const { t } = useI18n();
@@ -149,6 +163,33 @@ export function TranscriptList({
 
   const freshRows = useMemo(() => expandTranscriptRows(pipeline, md, start), [md, pipeline, start]);
   const rows = useStableRows(freshRows);
+
+  // Which rows offer a fork or rewind. Resolved per rendered row for the same
+  // reason as the rows themselves: it reads the session and the turn-ref set,
+  // and it must not run inside the memoized row view — the row objects stay
+  // stable while those inputs change underneath them.
+  const actionsByKey = useMemo(() => {
+    const map = new Map<string, {
+      forkTurnCount: number | null;
+      rewindTurnCount: number | null;
+    }>();
+    const messagesById = new Map(session.messages.map((message) => [message.id, message]));
+    for (const row of rows) {
+      if (row.kind === 'user') {
+        map.set(row.key, {
+          forkTurnCount: null,
+          rewindTurnCount: userMessageRewindTurnCount(session, row.message, retainedTurnCounts),
+        });
+      } else if (row.kind === 'md' && row.last) {
+        const message = messagesById.get(row.messageId);
+        map.set(row.key, {
+          forkTurnCount: message ? responseForkTurnCount(session, message) : null,
+          rewindTurnCount: null,
+        });
+      }
+    }
+    return map;
+  }, [retainedTurnCounts, rows, session]);
 
   // Messages already present when this list first rendered (or hydrated)
   // show their markdown at full opacity — only content streamed while
@@ -478,6 +519,7 @@ export function TranscriptList({
           </View>
           {rows.map((_, reversed) => {
             const row = rows[rows.length - 1 - reversed]!;
+            const action = actionsByKey.get(row.key);
             return (
               <TranscriptRowFrame
                 key={row.key}
@@ -488,6 +530,12 @@ export function TranscriptList({
                 seeded={row.kind === 'md' && seeded.ids.has(row.messageId)}
                 veils={veils}
                 onToggleFold={toggleFold}
+                forkTurnCount={action?.forkTurnCount ?? null}
+                forking={action?.forkTurnCount != null && action.forkTurnCount === forkingTurnCount}
+                rewindTurnCount={action?.rewindTurnCount ?? null}
+                rewinding={action?.rewindTurnCount != null && action.rewindTurnCount === rewindingTurnCount}
+                onForkResponse={onForkResponse}
+                onRewindMessage={onRewindMessage}
               />
             );
           })}
@@ -546,6 +594,12 @@ const TranscriptRowFrame = memo(function TranscriptRowFrame({
   seeded,
   markdownStyles,
   onToggleFold,
+  forkTurnCount,
+  forking,
+  rewindTurnCount,
+  rewinding,
+  onForkResponse,
+  onRewindMessage,
 }: {
   row: TranscriptRow;
   keepRowTop: KeepRowTop;
@@ -554,6 +608,12 @@ const TranscriptRowFrame = memo(function TranscriptRowFrame({
   seeded: boolean;
   markdownStyles: MarkdownStyles;
   onToggleFold: (turnId: string) => void;
+  forkTurnCount?: number | null;
+  forking?: boolean;
+  rewindTurnCount?: number | null;
+  rewinding?: boolean;
+  onForkResponse?: (turnCount: number) => void;
+  onRewindMessage?: (turnCount: number, prompt: string) => void;
 }) {
   const keepTop = useCallback(
     (apply: () => void) => keepRowTop(row.key, apply),
@@ -569,6 +629,12 @@ const TranscriptRowFrame = memo(function TranscriptRowFrame({
           seeded={seeded}
           veils={veils}
           onToggleFold={onToggleFold}
+          forkTurnCount={forkTurnCount}
+          forking={forking}
+          rewindTurnCount={rewindTurnCount}
+          rewinding={rewinding}
+          onForkResponse={onForkResponse}
+          onRewindMessage={onRewindMessage}
         />
       </RowAnchorProvider>
     </View>

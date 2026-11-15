@@ -34,6 +34,12 @@ export const TranscriptRowView = memo(function TranscriptRowView({
   seeded,
   markdownStyles,
   onToggleFold,
+  forkTurnCount,
+  forking,
+  rewindTurnCount,
+  rewinding,
+  onForkResponse,
+  onRewindMessage,
 }: {
   row: TranscriptRow;
   md: TranscriptMarkdownCache;
@@ -41,12 +47,29 @@ export const TranscriptRowView = memo(function TranscriptRowView({
   seeded: boolean;
   markdownStyles: MarkdownStyles;
   onToggleFold: (turnId: string) => void;
+  /** Set only on the assistant reply that can be forked from. */
+  forkTurnCount?: number | null;
+  forking?: boolean;
+  /** Set only on the user prompt that can open a rewind. */
+  rewindTurnCount?: number | null;
+  rewinding?: boolean;
+  onForkResponse?: (turnCount: number) => void;
+  onRewindMessage?: (turnCount: number, prompt: string) => void;
 }) {
   const theme = useTheme();
   const { t } = useI18n();
   switch (row.kind) {
     case 'user':
-      return <UserBubble message={row.message} />;
+      return (
+        <UserBubble
+          message={row.message}
+          onRewind={rewindTurnCount != null && onRewindMessage
+            ? () => onRewindMessage(rewindTurnCount, row.message.display_content ?? row.message.content)
+            : undefined}
+          rewinding={rewinding ?? false}
+          rewindLabel={t(rewinding ? 'session.reverting_message' : 'session.revert_to_here')}
+        />
+      );
     case 'system':
       return (
         <View style={styles.systemFrame}>
@@ -78,6 +101,31 @@ export const TranscriptRowView = memo(function TranscriptRowView({
             <Text style={[styles.messageFooter, { color: theme.textGhost }]}>
               {formatMessageTime(row.footerTimestamp)}
             </Text>
+          )}
+          {forkTurnCount != null && row.last && onForkResponse && (
+            <View style={styles.assistantActions}>
+              <Pressable
+                accessibilityLabel={t(forking ? 'session.forking_task' : 'session.fork_task')}
+                accessibilityRole="button"
+                accessibilityState={{ disabled: forking }}
+                disabled={forking}
+                hitSlop={10}
+                onPress={() => onForkResponse(forkTurnCount)}
+                style={({ pressed }) => [styles.forkButton, { opacity: pressed || forking ? 0.5 : 1 }]}>
+                {forking
+                  ? <ActivityIndicator size="small" />
+                  : (
+                      <AppSymbol
+                        name={{ ios: 'arrow.triangle.branch', android: 'fork_right', web: 'fork_right' }}
+                        size={13}
+                        tintColor={theme.textTertiary}
+                      />
+                    )}
+                <Text style={[styles.forkLabel, { color: theme.textTertiary }]}>
+                  {t(forking ? 'session.forking_task_title' : 'session.fork_task_title')}
+                </Text>
+              </Pressable>
+            </View>
           )}
         </>
       );
@@ -143,10 +191,25 @@ const UserBubble = memo(
     previous.message.id === next.message.id &&
     previous.message.content === next.message.content &&
     previous.message.display_content === next.message.display_content &&
-    previous.message.attachments === next.message.attachments,
+    previous.message.attachments === next.message.attachments &&
+    previous.rewinding === next.rewinding &&
+    previous.rewindLabel === next.rewindLabel &&
+    Boolean(previous.onRewind) === Boolean(next.onRewind),
 );
 
-function UserBubbleInner({ message }: { message: Message }) {
+function UserBubbleInner({
+  message,
+  onRewind,
+  rewinding = false,
+  rewindLabel,
+}: {
+  message: Message;
+  /** Present only when this prompt opened a turn that can be rewound from;
+   * absent hides the control entirely rather than disabling it. */
+  onRewind?: () => void;
+  rewinding?: boolean;
+  rewindLabel?: string;
+}) {
   const theme = useTheme();
   const { t } = useI18n();
   const content = message.display_content ?? message.content;
@@ -177,6 +240,27 @@ function UserBubbleInner({ message }: { message: Message }) {
           <Text selectable style={[styles.userText, { color: theme.text }]}>{content}</Text>
         </Pressable>
       ) : null}
+      {onRewind && (
+        <Pressable
+          accessibilityLabel={rewindLabel}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: rewinding }}
+          disabled={rewinding}
+          hitSlop={10}
+          onPress={onRewind}
+          style={({ pressed }) => [styles.rewindButton, { opacity: pressed || rewinding ? 0.5 : 1 }]}>
+          {rewinding
+            ? <ActivityIndicator size="small" />
+            : (
+                <AppSymbol
+                  name={{ ios: 'arrow.uturn.backward', android: 'undo', web: 'undo' }}
+                  size={12}
+                  tintColor={theme.textGhost}
+                />
+              )}
+          <Text style={[styles.rewindLabel, { color: theme.textGhost }]}>{rewindLabel}</Text>
+        </Pressable>
+      )}
     </View>
   );
 }
@@ -333,6 +417,23 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   userText: { fontSize: 14, lineHeight: 21 },
+  rewindButton: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+  },
+  rewindLabel: { fontSize: 11 },
+  assistantActions: { flexDirection: 'row', marginTop: 4 },
+  forkButton: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+  },
+  forkLabel: { fontSize: 11 },
   messageFooter: { fontSize: 10.5, marginTop: 10 },
   systemFrame: { alignItems: 'center' },
   systemMessage: {

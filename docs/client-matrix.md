@@ -28,7 +28,7 @@ point, which the roadmap lists first, is that a reader can tell the two apart.
 | Skills | yes | yes | no |
 | Usage and cost | yes | yes | no |
 | Attachments | yes | yes | yes |
-| Resume / fork / rewind | yes | yes | no |
+| Resume / fork / rewind | yes | yes | resume, fork and rewind |
 | Background work | yes | yes | no |
 | Computer Use | yes (Debug builds) | **no, hardcoded off** | no |
 | Multiple daemons | yes | **one connection** | yes |
@@ -65,17 +65,40 @@ daemon side behind `#[cfg(unix)]` and bails on every other platform. The
 capability: the unix `Pty` exposes `file()` and `child()`, the Windows one
 exposes `child_watcher()` and the `EventedReadWrite` reader and writer.
 
-**Mobile, fork, rewind and background work.** Absent, not half-built.
-`apps/mobile/src/lib/runtime-context.tsx` exposes attach, prompt, steer, create,
-cancel, respond, user input, options, goal, rename, delete and queued-message
-removal — and nothing else. No fork, no rewind, no background work, while
-`packages/waku-client/src/generated/Command.ts` carries all four. The i18n
-catalogue still holds `errors.rollback_*` strings no code references, which is
-what a planned surface that never landed looks like.
+**Mobile, fork and rewind.** Closed. `apps/mobile/src/lib/runtime-context.tsx`
+now exposes `forkSessionFromResponse` and `rewindSessionToMessage` with the same
+signatures the web client uses, and the transcript rows carry the controls. Two
+details are worth knowing before changing them:
 
-Closing these means starting at the runtime layer — issuing the request,
-handling the forked session, handling `checkpointWarning` — rather than adding
-a button.
+- The affordances are per-message, not in the task menu, because both commands
+  take a turn count. `responseForkTurnCount` and `userMessageRewindTurnCount` in
+  `apps/mobile/src/lib/session-presentation.ts` decide eligibility, and a
+  message that fails leaves the control out entirely rather than showing it
+  disabled. Fork does *not* require a checkpoint ref — the daemon's
+  `validate_response_fork` reports `checkpointWarning` instead of failing — but
+  rewind does, because the restore needs the ref.
+- **The confirmation differs between clients, on purpose.** Desktop
+  (`src/app/components.rs`) and web (`apps/web/src/components/transcript.tsx`)
+  both confirm a rewind by opening an edit bubble seeded with the original
+  prompt: the submit *is* the confirmation, and there is no separate dialog.
+  Mobile has no message-edit bubble yet, so it uses an `Alert` with a
+  destructive button instead. When the bubble lands, delete the alert rather
+  than keeping both. The alert body currently borrows `session.rewound`, whose
+  wording reads as a completed rewind rather than a pending one, because
+  `locales/*.yml` had no confirm-body key when this shipped.
+
+Rewind also invalidates the `session-turn-refs` query after succeeding, since
+that is the same ref set the controls are gated on; without it the buttons stay
+stale for up to the query's `staleTime` and a destructive action can be
+repeated against refs that no longer exist.
+
+**Mobile, background work.** Still absent, and not planned for this phase.
+Unlike fork and rewind this is not a request/response surface: the daemon pushes
+`backgroundWork` runtime events, and the ~250-line decode-and-reduce state
+machine (including `reconcileProcesses` / `reconcileLive`) lives inside
+`apps/web/src/lib/runtime-context.tsx` rather than in `packages/waku-client`.
+Porting it means moving that module to the shared package first, which touches
+the web client — a change that needs its own authorisation and verification.
 
 **Mobile, Skills and Usage.** No hits for the skills commands anywhere under
 `apps/mobile`, and no settings route for usage. The i18n catalogue still carries
@@ -101,8 +124,8 @@ the point. Before closing one, decide which kind it is:
 
 1. **Deliberate** — a browser surface on a phone, or a native path prompt for a
    remote machine. Write the reason down and leave the cell alone.
-2. **Unfinished** — the code exists and nothing calls it (mobile fork and
-   rewind). Cheap to close, and the cheapest wins available.
+2. **Unfinished** — the code exists and nothing calls it (mobile Skills and
+   Usage). Cheap to close, and the cheapest wins available.
 3. **Not yet wired** — the protocol and one other client already do it (the
    desktop remote terminal). The work is a client change, not a protocol one.
 

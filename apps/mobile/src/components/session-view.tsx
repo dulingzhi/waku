@@ -45,13 +45,13 @@ import {
   type TranscriptListHandle,
 } from '@/components/transcript-list';
 import { SessionEmpty } from '@/components/transcript-rows';
-import { useProviderModels, useSession, useTaskState } from '@/hooks/use-daemon-data';
+import { useProviderModels, useSession, useSessionTurnRefs, useTaskState } from '@/hooks/use-daemon-data';
 import { useTheme } from '@/hooks/use-theme';
 import { useDaemon } from '@/lib/daemon-context';
-import { sessionBusy } from '@/lib/mobile-runtime';
+import { sessionBusy, sessionCwd } from '@/lib/mobile-runtime';
 import { useRuntime } from '@/lib/runtime-context';
 import { useI18n } from '@/lib/i18n-context';
-import { displaySessionTitle } from '@/lib/session-presentation';
+import { displaySessionTitle, providerSupportsFork, providerSupportsRollback } from '@/lib/session-presentation';
 
 const SURFACE_MENU_COMMANDS = [
   { id: 'terminal', labelKey: 'workspace.terminal', symbol: 'terminal' },
@@ -252,8 +252,84 @@ export function SessionView({
     [confirmDelete, copyLastResponse, openTaskSurface],
   );
 
+  const forkResponse = useCallback((turnCount: number) => {
+    const current = sessionRef.current;
+    if (!current) return;
+    void runtimeRef.current.forkSessionFromResponse(current, turnCount)
+      .then((result) => {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        // The fork is a different task; showing it is the only way the user
+        // sees what they just created.
+        router.push({ pathname: '/session/[id]', params: { id: result.session.id } });
+        if (result.checkpointWarning) {
+          Alert.alert(
+            t('session.forked_with_checkpoint_warning', { error: result.checkpointWarning }),
+          );
+        }
+      })
+      .catch((cause) => {
+        Alert.alert(
+          t('errors.fork_task', { error: cause instanceof Error ? cause.message : String(cause) }),
+        );
+      });
+  }, [t]);
+
+  /**
+   * Rewind opens the rewind for this message *and resubmits its prompt*, the
+   * way the desktop and web clients do it: the client offers an edit bubble
+   * seeded with the original prompt, and that resubmission is what makes the
+   * rewind happen. The confirmation is therefore the submit itself — there is
+   * no separate alert, and adding one would make mobile stricter than the
+   * clients it mirrors.
+   *
+   * Until the edit bubble exists on mobile the prompt is resubmitted as-is, so
+   * the destructive step is still the user's tap on "Revert to here" rather
+   * than something the app does on its own.
+   */
+  const rewindMessage = useCallback((turnCount: number, prompt: string) => {
+    const current = sessionRef.current;
+    if (!current) return;
+    Alert.alert(
+      t('session.revert_to_here_title'),
+      // No dedicated confirm body key exists, and the mobile catalog is
+      // generated from locales/*.yml — state the consequence instead.
+      t('session.rewound', { turn: turnCount }),
+      [
+        { text: t('common.cancel'), style: 'cancel' },
+        {
+          text: t('session.revert_to_here'),
+          style: 'destructive',
+          onPress: () => {
+            void runtimeRef.current.rewindSessionToMessage(current, turnCount, prompt)
+              .then((result) => {
+                void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                listRef.current?.followNextGrowth();
+                if (result.cleanupWarning) {
+                  Alert.alert(t('session.rewound_with_stale_refs', {
+                    turn: turnCount,
+                    error: result.cleanupWarning,
+                  }));
+                }
+              })
+              .catch((cause) => {
+                Alert.alert(t('errors.rewind_task', {
+                  error: cause instanceof Error ? cause.message : String(cause),
+                }));
+              });
+          },
+        },
+      ],
+    );
+  }, [t]);
+
   const taskState = useTaskState().data;
   const project = taskState?.projects.find((item) => item.id === session?.project_id);
+  const cwd = session && project ? sessionCwd(session, project) : undefined;
+  const turnRefs = useSessionTurnRefs(cwd, session?.id);
+  const retainedTurnCounts = useMemo(
+    () => new Set(turnRefs.data ?? []),
+    [turnRefs.data],
+  );
   const subtitleParts = [project?.name, daemon.activeProfile?.name].filter(Boolean);
   const title = session ? displaySessionTitle(session, t('session.new_task')) : t('task.title');
   // The bar's subtitle doubles as the quiet link indicator, the way messaging
@@ -281,6 +357,10 @@ export function SessionView({
         displayInline: true,
         subactions: [
           { id: 'model', title: modelLabel, image: modelIcon, imageColor: theme.text },
+          // Forking and rewinding are per-message actions that need the
+          // message's turn count and its checkpoint ref, so they live on the
+          // transcript rows instead of here. The menu keeps the session-wide
+          // commands only.
           ...TASK_MENU_COMMANDS.map((item) => ({
             id: item.id,
             title: t(item.labelKey),
@@ -410,6 +490,11 @@ export function SessionView({
               ref={listRef}
               running={running}
               session={session}
+              retainedTurnCounts={retainedTurnCounts}
+              forkingTurnCount={runtime.responseForks[session.id]}
+              rewindingTurnCount={runtime.messageRewinds[session.id]}
+              onForkResponse={forkResponse}
+              onRewindMessage={rewindMessage}
               onDevSample={devPrompt ? probe.sample : undefined}
               onUnderHeaderChange={setUnderHeader}
             />

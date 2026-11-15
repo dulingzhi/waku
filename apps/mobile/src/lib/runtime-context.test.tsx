@@ -91,6 +91,25 @@ function fixture(options: { attached?: boolean } = {}) {
           return { type: 'started', supportsSteer: true };
         case 'saveTaskState':
           return { type: 'taskStateSaved', sessions: command.sessions };
+        case 'forkSessionFromResponse':
+          return {
+            type: 'sessionForked',
+            session: { ...history, id: 'forked', title: 'Forked task' },
+            checkpointWarning: null,
+          };
+        case 'rewindSessionToMessage': {
+          const turnCount = command.turnCount;
+          return {
+            type: 'sessionRewound',
+            session: {
+              ...history,
+              turns: history.turns.slice(0, turnCount),
+              messages: [],
+              status: 'idle' as const,
+            },
+            cleanupWarning: null,
+          };
+        }
         default:
           return { type: 'ack' };
       }
@@ -231,5 +250,50 @@ describe('mobile runtime history', () => {
       'Continued response',
     ]);
     expect(f.current().turns).toEqual(f.history.turns);
+  });
+
+  test('forks from a response and joins the new task to the task state', async () => {
+    const f = fixture();
+    f.queryClient.setQueryData(f.key, f.history);
+    f.queryClient.setQueryData(daemonKeys.taskState('profile'), {
+      defaultCwd: '/repo',
+      projectlessRoot: null,
+      projects: [{ id: 'project', name: 'Project', path: '/repo', created_at: 0 }],
+      sessions: [f.history],
+    });
+    const result = await f.runtime.forkSessionFromResponse(f.history, 1);
+    expect(f.commands.find((command) => command.type === 'forkSessionFromResponse'))
+      .toEqual({ type: 'forkSessionFromResponse', turnCount: 1 });
+    expect(result.session.id).toBe('forked');
+    expect(result.checkpointWarning).toBeNull();
+    // The fork must reach the task list the session view renders from.
+    expect(f.queryClient.getQueryData<{ sessions: AgentSession[] }>(
+      daemonKeys.taskState('profile'),
+    )?.sessions.some((session) => session.id === 'forked')).toBe(true);
+  });
+
+  test('rejects a second fork while the first is still in flight', async () => {
+    const f = fixture();
+    f.queryClient.setQueryData(f.key, f.history);
+    const first = f.runtime.forkSessionFromResponse(f.history, 1);
+    await expect(f.runtime.forkSessionFromResponse(f.history, 1)).rejects.toThrow();
+    await first;
+    expect(f.commands.filter((command) => command.type === 'forkSessionFromResponse'))
+      .toHaveLength(1);
+  });
+
+  test('rewinds to a message, drops the stale runtime and resubmits the prompt', async () => {
+    const f = fixture();
+    f.queryClient.setQueryData(f.key, f.history);
+    await f.runtime.attachSession(f.history);
+    const result = await f.runtime.rewindSessionToMessage(f.history, 1, 'Retry differently');
+    expect(f.commands.find((command) => command.type === 'rewindSessionToMessage'))
+      .toEqual({ type: 'rewindSessionToMessage', turnCount: 1 });
+    expect(result.cleanupWarning).toBeNull();
+    // One surviving turn plus the resubmitted prompt's new turn.
+    expect(f.current().turns).toHaveLength(2);
+    expect(f.current().messages.at(-1)?.content).toBe('Retry differently');
+    expect(f.commands.filter((command) => command.type === 'prompt'))
+      .toEqual([{ type: 'prompt', prompt: 'Retry differently', turnId: expect.any(String), messageId: expect.any(String) }]);
   });
 });

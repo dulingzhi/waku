@@ -11,9 +11,13 @@ import {
   expandTranscriptRows,
   findActivityBlock,
   groupSessions,
+  providerSupportsFork,
+  providerSupportsRollback,
   relativeSessionTime,
+  responseForkTurnCount,
   sessionDateGroup,
   stabilizeTranscriptRows,
+  userMessageRewindTurnCount,
 } from './session-presentation';
 
 describe('mobile session presentation', () => {
@@ -331,6 +335,109 @@ function turn(overrides: Partial<AgentTurn> & Pick<AgentTurn, 'id' | 'status'>):
     ...overrides,
   };
 }
+
+describe('mobile fork and rewind affordances', () => {
+  const turn = (overrides: Partial<AgentTurn>): AgentTurn => ({
+    id: 'turn-1',
+    turn_count: 1,
+    status: 'completed',
+    provider_turn_started: true,
+    started_at: 1,
+    completed_at: 2,
+    checkpoint: null,
+    ...overrides,
+  });
+  const cursor = { provider: 'codex' as const, threadId: 'thread' };
+
+  test('lets the reply of a started turn fork when the task is settled', () => {
+    const current = session({
+      provider_cursor: cursor,
+      turns: [turn({})],
+      messages: [
+        { id: 'u1', turn_id: 'turn-1', role: 'user', content: 'go', created_at: 1, streaming: false },
+        { id: 'a1', turn_id: 'turn-1', role: 'assistant', content: 'done', created_at: 2, streaming: false },
+      ],
+    });
+    expect(responseForkTurnCount(current, current.messages[1]!)).toBe(1);
+  });
+
+  test('hides the fork while the task is running or the reply is streaming', () => {
+    const current = session({ provider_cursor: cursor, turns: [turn({})], messages: [
+      { id: 'a1', turn_id: 'turn-1', role: 'assistant', content: 'done', created_at: 2, streaming: false },
+    ] });
+    expect(responseForkTurnCount({ ...current, status: 'working' }, current.messages[0]!)).toBeNull();
+    expect(responseForkTurnCount({ ...current, messages: [
+      { ...current.messages[0]!, streaming: true },
+    ] }, { ...current.messages[0]!, streaming: true })).toBeNull();
+  });
+
+  test('hides the fork when the turn never reached the provider', () => {
+    const current = session({
+      provider_cursor: cursor,
+      turns: [turn({ provider_turn_started: false })],
+      messages: [
+        { id: 'a1', turn_id: 'turn-1', role: 'assistant', content: 'done', created_at: 2, streaming: false },
+      ],
+    });
+    expect(responseForkTurnCount(current, current.messages[0]!)).toBeNull();
+  });
+
+  test('hides the fork when the provider cannot roll a conversation back', () => {
+    const current = session({
+      provider: 'kimi',
+      provider_cursor: { provider: 'kimi', sessionId: 'k' },
+      turns: [turn({})],
+      messages: [
+        { id: 'a1', turn_id: 'turn-1', role: 'assistant', content: 'done', created_at: 2, streaming: false },
+      ],
+    });
+    expect(responseForkTurnCount(current, current.messages[0]!)).toBeNull();
+    expect(providerSupportsFork('kimi')).toBe(false);
+    expect(providerSupportsRollback('kimi')).toBe(false);
+  });
+
+  test('rewinds from the prompt that opened a turn, not from a steer', () => {
+    const current = session({
+      provider_cursor: cursor,
+      turns: [turn({ turn_count: 1 }), turn({ id: 'turn-2', turn_count: 2 })],
+      messages: [
+        { id: 'u1', turn_id: 'turn-1', role: 'user', content: 'first', created_at: 1, streaming: false },
+        { id: 'u2', turn_id: 'turn-2', role: 'user', content: 'second', created_at: 2, streaming: false },
+        // A steer joins turn 2 as another user message.
+        { id: 'u3', turn_id: 'turn-2', role: 'user', content: 'steer', created_at: 3, streaming: false },
+      ],
+    });
+    // Turn 2 keeps turn 1, whose ref must exist for the restore.
+    expect(userMessageRewindTurnCount(current, current.messages[1]!, new Set([1]))).toBe(2);
+    // The steer cannot open a rewind of its own.
+    expect(userMessageRewindTurnCount(current, current.messages[2]!, new Set([1]))).toBeNull();
+  });
+
+  test('hides the rewind without a checkpoint ref for the retained turn', () => {
+    const current = session({
+      provider_cursor: cursor,
+      turns: [turn({ turn_count: 1 }), turn({ id: 'turn-2', turn_count: 2 })],
+      messages: [
+        { id: 'u1', turn_id: 'turn-1', role: 'user', content: 'first', created_at: 1, streaming: false },
+        { id: 'u2', turn_id: 'turn-2', role: 'user', content: 'second', created_at: 2, streaming: false },
+      ],
+    });
+    expect(userMessageRewindTurnCount(current, current.messages[1]!, new Set())).toBeNull();
+  });
+
+  test('hides the rewind while the task is still running', () => {
+    const current = session({
+      provider_cursor: cursor,
+      turns: [turn({ turn_count: 1 }), turn({ id: 'turn-2', turn_count: 2 })],
+      messages: [
+        { id: 'u1', turn_id: 'turn-1', role: 'user', content: 'first', created_at: 1, streaming: false },
+        { id: 'u2', turn_id: 'turn-2', role: 'user', content: 'second', created_at: 2, streaming: false },
+      ],
+      status: 'working',
+    });
+    expect(userMessageRewindTurnCount(current, current.messages[1]!, new Set([1]))).toBeNull();
+  });
+});
 
 function session(overrides: Partial<AgentSession>): AgentSession {
   return {

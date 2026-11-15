@@ -9,6 +9,7 @@ import {
 import {
   daemonKeys,
   hydrateSession,
+  listSessionTurnRefs,
   loadDaemonSettings,
   loadTaskState,
   probeProvider,
@@ -176,6 +177,23 @@ export function useProviderCatalog() {
     isPending: settings.isPending || queries.some((query) => query.isPending && query.fetchStatus !== 'idle'),
     error: settings.error,
   };
+}
+
+export function useSessionTurnRefs(
+  cwd: string | undefined,
+  sessionId: string | undefined,
+) {
+  const { activeProfile, client, phase } = useDaemon();
+  return useQuery({
+    queryKey: daemonKeys.sessionTurnRefs(
+      activeProfile?.id ?? 'disconnected',
+      cwd ?? 'none',
+      sessionId ?? 'none',
+    ),
+    queryFn: () => listSessionTurnRefs(requireClient(client), cwd!, sessionId!),
+    enabled: phase === 'connected' && Boolean(activeProfile && client && cwd && sessionId),
+    staleTime: 5_000,
+  });
 }
 
 function requireClient(client: ReturnType<typeof useDaemon>['client']) {
