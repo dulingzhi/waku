@@ -52,21 +52,39 @@ statement can be traced to an implementation or is marked unimplemented.
 The highest-value stage, because provider coverage is both the strongest
 feature and the largest risk.
 
-1. Golden fixtures per provider, recorded from real payloads. The repo has one
-   fixture today (`codex_fork.sh`).
+1. Golden fixtures per provider, recorded from real payloads. The repo had one
+   fixture before this stage (`codex_fork.sh`), with a replay mechanism in
+   `docs/provider-fixtures.md`.
 2. Cover the four that broke most recently first: OpenCode 2.0's rename, Cursor
    model discovery, Pi's startup handshake, Claude's model naming.
 3. Combination cases — fork after steering, rewind at a turn boundary. The
    0.1.20 "forked at the wrong turn" bug was a combination nobody tested.
 4. Failure semantics per provider, in Kimi's shape: record what the protocol
    says when the turn cannot run at all, since Kimi reports a clean `end_turn`.
-5. Split the 30 `#[ignore]`d tests into CI-runnable (recorded or mocked) and
-   genuinely hardware-bound. The first group joins CI; the second stays manual
-   and moves onto the release checklist.
 
-**Done when** at least 12 of the ignored tests run in CI, a deliberately broken
-event mapping fails the suite, and every provider has a recorded failure
-semantics note.
+**Scope, after the first pass through the ignored tests.** The plan began with
+"move 12 of the ignored tests into CI". Working through them showed that fewer
+can honestly make that move, and the reason is worth recording:
+
+- Replay covers a driver's parser and event mapping. It cannot cover process
+  start, the writer thread, or anything read from disk, because
+  `test_event_channel()` returns the event outlet and there is no inlet for
+  requests. Standing in for a process would mean a transport seam in all eleven
+  drivers, which is an architecture change, not a test addition.
+- A test that needs a real service to prove that *the service* honours a
+  contract stays `#[ignore]`d. Faking the service would test the client's
+  passthrough instead, under a name that claims something else.
+- A test whose only assertion is "the list is not empty" does not justify
+  changing production code to make it injectable.
+
+So the outcome is a smaller set of tests that genuinely run in CI, and a
+release checklist for the rest. Tests that cannot move are listed with the
+reason, not silently dropped.
+
+**Done when** the replay mechanism runs in CI against at least one provider
+end to end, a deliberately broken event mapping fails the suite, the ignored
+tests that cannot move are on the release checklist with their reasons, and
+every provider has a recorded failure semantics note.
 
 ## Stage 3 — Align the clients and finish remote (about four weeks)
 

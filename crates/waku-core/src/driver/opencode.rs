@@ -428,6 +428,25 @@ pub(super) struct OpenCodeDriver {
     computer_use: Option<Arc<OpenCodeComputerUse>>,
 }
 
+/// The workspace string OpenCode keys a session on: canonical, absolute, and
+/// never carrying a trailing slash.
+///
+/// The server stores this verbatim and filters by exact string equality, so a
+/// trailing slash silently lists zero sessions and an unresolvable directory
+/// answers HTTP 500 with an empty body. Kept as its own function so the shape
+/// is testable without a running service.
+fn canonical_workspace_directory(cwd: &std::path::Path) -> anyhow::Result<String> {
+    Ok(std::fs::canonicalize(cwd)
+        .with_context(|| {
+            format!(
+                "OpenCode needs a resolvable workspace directory, but {} could not be canonicalized",
+                cwd.display()
+            )
+        })?
+        .to_string_lossy()
+        .into_owned())
+}
+
 impl OpenCodeDriver {
     /// Runs on the daemon request thread. Blocking is allowed here, but every
     /// wait is bounded: discovery and the readiness probe live in
@@ -469,15 +488,7 @@ impl OpenCodeDriver {
         // trailing slash or a subdirectory silently yields zero sessions — and
         // a directory the service cannot resolve answers HTTP 500 with an
         // empty body rather than a readable error.
-        let directory = std::fs::canonicalize(&cwd)
-            .with_context(|| {
-                format!(
-                    "OpenCode needs a resolvable workspace directory, but {} could not be canonicalized",
-                    cwd.display()
-                )
-            })?
-            .to_string_lossy()
-            .into_owned();
+        let directory = canonical_workspace_directory(&cwd)?;
 
         let service = opencode_service::shared(&binary)?;
         let endpoint = service.endpoint();
@@ -4058,5 +4069,52 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// The workspace string is compared by exact equality on the service side,
+    /// so a trailing slash lists zero sessions without an error. This is the
+    /// only automated guard on that shape.
+    #[test]
+    fn workspace_directory_is_absolute_and_has_no_trailing_separator() {
+        let root = std::env::temp_dir().join(format!("waku-opencode-dir-{}", Uuid::new_v4()));
+        let nested = root.join("project");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let directory = canonical_workspace_directory(&nested).unwrap();
+        assert!(
+            std::path::Path::new(&directory).is_absolute(),
+            "{directory:?} should be absolute"
+        );
+        assert!(
+            !directory.ends_with(['/', '\\']),
+            "{directory:?} must not end with a separator"
+        );
+        // Canonicalization also resolves the parent, so the answer names the
+        // same directory the caller passed.
+        assert_eq!(
+            std::path::Path::new(&directory),
+            std::fs::canonicalize(&nested).unwrap()
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A missing workspace must fail with the message the driver surfaces,
+    /// rather than an opaque canonicalize error.
+    #[test]
+    fn a_missing_workspace_directory_reports_a_readable_error() {
+        let missing =
+            std::env::temp_dir().join(format!("waku-opencode-missing-{}", Uuid::new_v4()));
+
+        let error = canonical_workspace_directory(&missing).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("OpenCode needs a resolvable workspace directory"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "{message}"
+        );
     }
 }

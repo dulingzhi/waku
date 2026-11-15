@@ -982,6 +982,55 @@ mod tests {
         assert_eq!(models[1].id, "deepseek/deepseek-v4-flash-vision-exp");
     }
 
+    /// A model's variants ARE the effort ladder the picker offers, so the
+    /// catalogue has to forward them; dropping that wiring leaves the control
+    /// empty for every OpenCode model while the models themselves still list.
+    #[test]
+    fn catalog_models_forward_their_variants_as_reasoning_efforts() {
+        let models: Vec<ModelInfo> = serde_json::from_value(json!([
+            {
+                "id": "big-pickle",
+                "modelID": "big-pickle",
+                "providerID": "opencode",
+                "name": "Big Pickle",
+                "status": "active",
+                "enabled": true,
+                "variants": [{"id": "low"}, {"id": "high"}, {"id": "max"}],
+                "limit": {"context": 200_000, "output": 32_000}
+            },
+            {
+                "id": "plain",
+                "modelID": "plain",
+                "providerID": "opencode",
+                "name": "Plain",
+                "status": "active",
+                "enabled": true,
+                "limit": {"context": 32_000, "output": 4_000}
+            }
+        ]))
+        .expect("the model catalogue should decode");
+
+        let models = catalog_models(&models);
+
+        assert_eq!(
+            models[0]
+                .reasoning_efforts
+                .iter()
+                .map(|effort| effort.id.as_str())
+                .collect::<Vec<_>>(),
+            ["low", "high", "max"],
+            "{:#?}",
+            models[0]
+        );
+        // The strongest offered variant becomes the default, matching how the
+        // picker preselects a reasoning model.
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("max"));
+        // A model that publishes no variants keeps its effort control absent
+        // rather than reporting an empty ladder.
+        assert!(models[1].reasoning_efforts.is_empty(), "{:#?}", models[1]);
+        assert!(models[1].default_reasoning_effort.is_none());
+    }
+
     #[test]
     fn agent_presets_keep_only_startable_primaries() {
         let agents: Vec<AgentInfo> = serde_json::from_value(json!([
