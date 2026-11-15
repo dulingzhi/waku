@@ -61,6 +61,32 @@ impl DaemonIdentity {
         self.ed25519.verifying_key()
     }
 
+    /// Base64 of the X25519 public key, the form published in `DaemonReady`.
+    pub fn x25519_public_base64(&self) -> String {
+        base64::engine::general_purpose::STANDARD.encode(self.x25519_public().to_bytes())
+    }
+
+    /// Base64 of the Ed25519 public key, the form published in `DaemonReady`.
+    pub fn ed25519_public_base64(&self) -> String {
+        base64::engine::general_purpose::STANDARD.encode(self.ed25519_public().to_bytes())
+    }
+
+    /// A short, stable digest of the Ed25519 public key, for a log line and for
+    /// a user to compare against a pairing code.
+    ///
+    /// Sixteen lowercase hex characters from SHA-256 of the public key. Only a
+    /// hash is ever emitted, so a log file cannot be used to reconstruct or
+    /// confirm a key beyond checking it.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest as _, Sha256};
+
+        let digest = Sha256::digest(self.ed25519_public().to_bytes());
+        digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     /// The key-agreement secret. Used once per connection against a client's
     /// ephemeral public key; the result is a session key, not this value.
     pub fn x25519_secret(&self) -> &StaticSecret {
@@ -544,5 +570,92 @@ mod tests {
             first_bytes,
             "a failed claim must leave the original file byte-for-byte intact"
         );
+    }
+
+    /// The daemon aborts startup when this call fails, so the failure has to be
+    /// a real error rather than a silently minted replacement — and it must
+    /// leave no new key on disk. If it generated one, the next start would
+    /// succeed with an identity no paired client knows, which is the failure
+    /// mode the daemon's startup check exists to prevent.
+    #[test]
+    fn a_failed_load_leaves_no_identity_behind_for_the_next_start() {
+        let dir = TempDir::new("no-mint-on-failure");
+        let path = dir.join("identity.key");
+        std::fs::write(&path, b"not an identity").unwrap();
+
+        for _ in 0..2 {
+            // Twice, because a first failure that "recovers" on the second
+            // attempt would look fine in a manual run and fail in the field.
+            assert!(
+                DaemonIdentity::load_or_generate(&path).is_err(),
+                "a corrupt file must fail every time, not heal on a retry"
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                b"not an identity",
+                "the unreadable file must be preserved for recovery"
+            );
+        }
+    }
+
+    /// The published base64 is the same 32 bytes the accessor returns, and a
+    /// client decoding it must land on the key it will verify against. A
+    /// mismatched encoding here would make every pairing fail with no clue why.
+    #[test]
+    fn published_public_keys_are_the_accessor_bytes_in_base64() {
+        let identity = DaemonIdentity::generate();
+
+        let x25519 = base64::engine::general_purpose::STANDARD
+            .decode(identity.x25519_public_base64())
+            .expect("the published X25519 key is base64");
+        assert_eq!(x25519, identity.x25519_public().to_bytes());
+
+        let ed25519 = base64::engine::general_purpose::STANDARD
+            .decode(identity.ed25519_public_base64())
+            .expect("the published Ed25519 key is base64");
+        assert_eq!(ed25519, identity.ed25519_public().to_bytes());
+        assert_eq!(ed25519.len(), 32, "an Ed25519 public key is 32 bytes");
+    }
+
+    /// The log fingerprint is a short hex label: stable for one identity,
+    /// different across identities, and never a prefix of the key itself.
+    #[test]
+    fn the_fingerprint_is_short_stable_hex_and_does_not_echo_the_key() {
+        let identity = DaemonIdentity::generate();
+        let fingerprint = identity.fingerprint();
+
+        assert_eq!(fingerprint.len(), 16, "8 bytes as hex");
+        assert!(
+            fingerprint
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+            "the label is lowercase hex: {fingerprint}"
+        );
+        assert_eq!(fingerprint, identity.fingerprint(), "stable per identity");
+
+        let other = DaemonIdentity::generate();
+        assert_ne!(fingerprint, other.fingerprint());
+
+        // The label must not be the key in disguise: a truncated raw prefix is
+        // recoverable evidence of the key, while a hash is not.
+        let key_hex = identity
+            .ed25519_public()
+            .to_bytes()
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_ne!(
+            fingerprint, key_hex,
+            "the fingerprint must hash the key, not slice it"
+        );
+
+        // And it survives a round-trip through disk, since the log line is
+        // compared against what the file produced.
+        let dir = TempDir::new("fingerprint");
+        let path = dir.join("identity.key");
+        identity.store_new(&path).unwrap();
+        let reloaded = DaemonIdentity::load(&path).unwrap();
+        assert_eq!(reloaded.fingerprint(), fingerprint);
     }
 }

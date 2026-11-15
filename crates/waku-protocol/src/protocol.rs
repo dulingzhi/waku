@@ -25,12 +25,24 @@ pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
 pub const APP_EXECUTABLE_ENV: &str = "WAKU_APP_EXECUTABLE";
 
+/// The single line the daemon prints on stdout once it is accepting
+/// connections, which is how a client learns where to connect and whether the
+/// build is compatible.
+///
+/// The two public keys are the daemon's long-lived identity
+/// (`waku_core::daemon_identity`). They are published here so a client can pin
+/// them on first contact and verify later connections. They are public keys
+/// only: the secrets never leave the daemon process.
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonReady {
     pub address: String,
     pub protocol_version: u32,
     pub pid: u32,
+    /// Base64 of the 32-byte X25519 public key, used for key agreement.
+    pub x25519_public: String,
+    /// Base64 of the 32-byte Ed25519 public key, used to verify signatures.
+    pub ed25519_public: String,
 }
 
 // Versioned wire type: variants differ in size by design, and boxing one would
@@ -631,5 +643,62 @@ mod tests {
             project_id.to_string()
         );
         assert_eq!(json["changes"][0]["draft"]["text"], "unfinished");
+    }
+
+    /// The daemon publishes its identity on the readiness line, so these field
+    /// names are part of what a client pins. They are camelCase on the wire and
+    /// the two keys are plain base64 strings.
+    #[test]
+    fn the_readiness_line_carries_the_daemon_public_keys() {
+        let ready = DaemonReady {
+            address: "127.0.0.1:4567".into(),
+            protocol_version: PROTOCOL_VERSION,
+            pid: 4242,
+            x25519_public: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into(),
+            ed25519_public: "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=".into(),
+        };
+        let json = serde_json::to_value(&ready).unwrap();
+
+        assert_eq!(json["address"], "127.0.0.1:4567");
+        assert_eq!(json["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(json["pid"], 4242);
+        assert_eq!(
+            json["x25519Public"],
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+        );
+        assert_eq!(
+            json["ed25519Public"],
+            "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8="
+        );
+        // No snake_case escape: the wire shape is the camelCase one only.
+        assert!(json.get("x25519_public").is_none());
+        assert!(json.get("ed25519_public").is_none());
+
+        // Both fields are required of a daemon that speaks this build: a
+        // readiness line without them is rejected here, not silently accepted
+        // with empty keys.
+        let incomplete = serde_json::json!({
+            "address": "127.0.0.1:4567",
+            "protocolVersion": PROTOCOL_VERSION,
+            "pid": 4242,
+        });
+        assert!(
+            serde_json::from_value::<DaemonReady>(incomplete).is_err(),
+            "a readiness line without the keys is not a complete DaemonReady"
+        );
+
+        // The reverse direction — a newer daemon read by an older client — is
+        // what the added fields have to survive, and it does: `DaemonReady` has
+        // no `deny_unknown_fields`, so the extra keys are ignored. That is the
+        // whole compatibility argument for not bumping `PROTOCOL_VERSION`.
+        let with_extra = serde_json::json!({
+            "address": "127.0.0.1:4567",
+            "protocolVersion": PROTOCOL_VERSION,
+            "pid": 4242,
+            "x25519Public": "AA==",
+            "ed25519Public": "AA==",
+            "futureField": 1,
+        });
+        assert!(serde_json::from_value::<DaemonReady>(with_extra).is_ok());
     }
 }

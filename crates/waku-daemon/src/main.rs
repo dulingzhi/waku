@@ -19,10 +19,27 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("could not bind Waku daemon to {}", arguments.bind))?;
     let address = listener.local_addr()?;
     ensure_bind_allowed(address, arguments.allow_non_loopback)?;
+
+    // The identity is loaded before readiness is announced, and a failure here
+    // aborts startup. A daemon that ran on a broken identity would accept
+    // connections it can never prove itself on, which shows up as a client that
+    // cannot connect with no reason given. Failing now puts the real error in
+    // the log of the process that was actually misconfigured.
+    let identity_path = waku_core::daemon_identity::default_path();
+    let identity = waku_core::daemon_identity::DaemonIdentity::load_or_generate(&identity_path)
+        .with_context(|| {
+            format!(
+                "could not load the daemon identity at {}",
+                identity_path.display()
+            )
+        })?;
+
     let ready = DaemonReady {
         address: address.to_string(),
         protocol_version: PROTOCOL_VERSION,
         pid: std::process::id(),
+        x25519_public: identity.x25519_public_base64(),
+        ed25519_public: identity.ed25519_public_base64(),
     };
     println!("{}", serde_json::to_string(&ready)?);
     std::io::stdout().flush()?;
@@ -31,6 +48,13 @@ fn main() -> anyhow::Result<()> {
     waku_protocol::diagnostics::log(format!(
         "waku-daemon started pid={} address={address} protocol={PROTOCOL_VERSION}",
         std::process::id()
+    ));
+    // Only the fingerprint is logged: it is what a user compares against a
+    // pairing code, and it is short enough to scan. Neither public key in full
+    // nor any secret belongs in a log file that survives the process.
+    waku_protocol::diagnostics::log(format!(
+        "waku-daemon identity ready fingerprint={}",
+        identity.fingerprint()
     ));
     if let Some(parent_pid) = arguments.parent_pid {
         let monitor_shutdown = shutdown.clone();
