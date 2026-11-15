@@ -104,9 +104,12 @@ bun install
 bun run dev
 ```
 
-The embedded browser and experimental computer-use integration currently
-remain macOS-only. Agent sessions, projects, transcripts, skills, usage,
-diffs, file editing, and the terminal run natively on Linux and Windows.
+The embedded browser runs on macOS and Windows; on Linux the Browser surface
+reports that the platform is unavailable. The experimental computer-use
+integration runs on all three platforms, but only in Debug builds — release
+builds hide its settings page and refuse to start the helper. Agent sessions,
+projects, transcripts, skills, usage, diffs, file editing, and the terminal run
+natively on Linux and Windows.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow and checks.
 Release maintainers should also read [RELEASING.md](RELEASING.md).

@@ -115,7 +115,8 @@ WAKU_BUNDLE_PATH=target/release/waku-<version>-<target>.tar.gz \
 
 ## Computer Use
 
-Debug builds expose Computer Use through the bundled Cua Driver SDK. X11 and
+Debug builds expose Computer Use through the bundled Cua Driver SDK; release
+builds hide its settings page and refuse to start the helper. X11 and
 AT-SPI use the current desktop session; native Wayland support is experimental
 and depends on compositor integrations. See [Computer Use](computer-use.md)
 for capability checks, packaged helper files, and limitations.

@@ -40,9 +40,12 @@ and relaunch the app normally. Keep that watcher running while you work. Do
 not start a second watcher or manually relaunch the debug app. Press `Ctrl-C`,
 or quit the app, to stop it.
 
-The embedded browser and experimental computer-use integration are currently
-macOS-only. On Linux and Windows the browser reports that it is unavailable,
-while the computer-use UI and runtime stay disabled.
+The embedded browser is implemented on macOS and Windows. On Linux the panel
+opens but reports that the platform is unavailable: wry's WebKitGTK backend
+needs a GTK main loop and an Xlib parent, which GPUI's Linux backend cannot
+provide. The experimental computer-use integration exists on all three
+platforms, but only Debug builds expose it — release builds hide its settings
+page and refuse to start the helper.
 
 Windows needs the MSVC toolchain (Visual Studio Build Tools with the C++
 workload and the Windows SDK) so Cargo can link and so the resource compiler
@@ -114,12 +117,47 @@ before opening a pull request:
 
 ```sh
 cargo fmt --package waku --package waku-protocol --package waku-client --package waku-core --package waku-daemon -- --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo check
 cargo test
 bun run protocol:check
 bun run --filter @waku/client check
 bun run --filter @waku/client test
+bun run --filter @waku/i18n check
+bun run --filter @waku/i18n test
+bun run i18n:check
+bun run --filter @waku/mobile typecheck
+bun run --filter @waku/mobile test
+bun run --filter @waku/web typecheck
+bun run --filter @waku/web test
 ```
+
+Everything in that block must be green before a pull request merges. The CI
+baseline is [.github/workflows/test.yml](.github/workflows/test.yml): the Rust
+commands run on macOS, Ubuntu, and Windows, while the formatting, lint, and
+JavaScript checks run on Ubuntu only. Clippy is `-D warnings`, so a new warning
+fails the build rather than being tolerated.
+
+**Test count baseline.** These are static counts of test attributes and
+`test(` / `it(` call sites in the tree — a snapshot for spotting a suite that
+silently stopped being collected, not a result of running anything:
+
+| Suite | Files with tests | Tests |
+| --- | --- | --- |
+| `waku` (src) | 48 | 400 `#[test]` + 31 `#[gpui::test]` |
+| `crates/waku-core` | 46 | 502 |
+| `crates/waku-protocol` | 6 | 72 |
+| `crates/waku-client` | 5 | 21 |
+| `crates/waku-daemon` | 1 | 3 |
+| `crates/waku-computer-use` | 1 | 2 |
+| `apps/web` | 24 | 134 |
+| `apps/mobile` | 21 | 161 |
+| `packages/waku-client` | 2 | 23 |
+| `packages/waku-i18n` | 1 | 8 |
+
+30 Rust tests are `#[ignore]`d because they need an installed, authenticated
+provider CLI or a running OpenCode service. CI does not run them, so they are
+outside this baseline and remain a manual step when changing a driver.
 
 When a Rust wire type changes, run `bun run protocol:generate` and commit the
 updated files under `packages/waku-client/src/generated`.
@@ -127,6 +165,22 @@ updated files under `packages/waku-client/src/generated`.
 For user-visible changes, wait for the watcher to report a successful rebuild
 and validate the freshly relaunched app. Include screenshots or a short
 recording in the pull request when they make the result easier to review.
+
+## Release gate
+
+A release is not published from an untested tree. Release
+[.github/workflows/release.yml](.github/workflows/release.yml) defines a
+`test` job that mirrors the Rust half of the CI baseline, and every build job
+lists it in `needs` alongside `version`
+([release.yml:169](.github/workflows/release.yml#L169)); a red suite stops the
+run before the signed builds. `draft-release` also requires it
+([release.yml:473](.github/workflows/release.yml#L473)), so no draft release is
+created unless the tests passed.
+
+That gate currently runs only `cargo test` and the Cua lifecycle check plus
+the protocol, client, locale, and mobile checks. It does not run `cargo fmt`,
+`cargo clippy`, or the web suite — those are part of the pre-merge baseline
+above, and a release still depends on them having passed on the pull request.
 
 ## Pull requests
 

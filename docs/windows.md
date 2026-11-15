@@ -93,8 +93,9 @@ Ctrl+Shift+V copy and paste so Ctrl+C stays available to the shell.
 ## Browser
 
 The right panel's Browser tab runs on WebView2, which is in-box on Windows 11
-and evergreen-installed on Windows 10. Navigation, devtools, downloads, and
-pop-up handling behave as they do on macOS.
+and evergreen-installed on Windows 10. Navigation and pop-up handling behave as
+they do on macOS: pop-ups and `target="_blank"` links navigate in place rather
+than opening a second window.
 
 Waku hosts it in *visual* mode rather than as a child window: the page renders
 into a DirectComposition visual that GPUI hands out between its own content
@@ -106,6 +107,9 @@ Differences worth knowing:
 
 - **No load progress in the toolbar.** WebView2 reports no equivalent of
   WebKit's `estimatedProgress`, so the bar stays empty while a page loads.
+- **Downloads are not handled by Waku.** The download handlers are compiled for
+  macOS only, so the Windows browser does not save into the Downloads folder or
+  reveal the file there.
 - **Devtools open but do not toggle.** WebView2 offers no way to ask whether
   its devtools window is open, or to close it, so the shortcut only opens and
   refocuses it.
@@ -118,7 +122,8 @@ Differences worth knowing:
 ## Computer Use
 
 Debug builds expose Computer Use for supported providers through the bundled
-Cua Driver SDK. It operates within the current interactive Windows desktop;
+Cua Driver SDK; release builds hide its settings page and refuse to start the
+helper. It operates within the current interactive Windows desktop;
 elevated apps and secure desktops retain Windows restrictions. See
 [Computer Use](computer-use.md) for the runtime, packaging, and validation.
 

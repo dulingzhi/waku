@@ -162,15 +162,34 @@ stops a turn, and the short-lived server that backs a Grok fork.
 | Reasoning stream | yes | yes | yes | yes | yes | yes | yes | yes | yes | yes |
 | Interactive approvals | yes | no | no (has them; Waku runs `--yolo`) | yes | no | yes | yes | yes | yes | yes |
 | Mid-turn steering | yes | yes | yes | yes | yes | yes | **no** | yes | yes | yes (transport) |
-| Model discovery | yes | yes | yes | no (fixed) | no (modes) | yes | yes | yes | yes | yes |
+| Model discovery | yes | yes | yes | yes | no (modes) | yes | yes | yes | yes | yes |
 | Computer Use | yes | yes | no (ships its own) | no | no | no | no | yes | yes | no |
 | Restricted to Full access | no | yes | yes | no | yes | no | no | no | no | no |
 | Rewind and branch at a turn | yes | yes | yes | yes | yes | yes | **no** | yes | yes | **no** |
 
 Kimi Code's steering is the transport's, not a probed policy: the ACP driver
-sends the second `session/prompt` for every agent it drives, but Kimi's
+sends the second `session/prompt` for every agent it drives
+([driver/acp.rs:201](../crates/waku-core/src/driver/acp.rs#L201)), but Kimi's
 superseded-prompt behaviour has not been observed against a live turn the way
-Cursor's and Grok's were.
+Cursor's and Grok's were. Treat that cell as **unverified**, not as a
+demonstrated capability.
+
+Two columns are read from code rather than from a live run:
+`Rewind and branch at a turn` is
+[`ProviderKind::supports_conversation_rollback`](../crates/waku-protocol/src/model.rs#L117)
+and [`supports_conversation_fork`](../crates/waku-protocol/src/model.rs#L132),
+and `Model discovery` is
+[`supports_model_discovery`](../crates/waku-protocol/src/model.rs#L147) plus the
+per-provider discovery in [model_catalog.rs](../crates/waku-core/src/model_catalog.rs#L124).
+`Computer Use` is the narrowest of the three: Codex
+([driver/codex.rs:236](../crates/waku-core/src/driver/codex.rs#L236)), Pi but
+not Oh My Pi ([driver/pi.rs:117](../crates/waku-core/src/driver/pi.rs#L117)),
+OpenCode ([driver/opencode.rs:544](../crates/waku-core/src/driver/opencode.rs#L544)),
+and Grok alone among the ACP agents
+([driver/acp.rs:145](../crates/waku-core/src/driver/acp.rs#L145)). Claude, Amp,
+Cursor, Fx, and Kimi discard the flag, so those cells are definitive rather
+than untested. The feature is development-only
+([computer-use.md](computer-use.md)).
 
 Every provider now holds a session across turns. That was not true when this
 document was first written: five of the seven spawned a process per prompt, and
