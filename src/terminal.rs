@@ -17,8 +17,10 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty::{self, Shell};
+use alacritty_terminal::vte;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use anyhow::{Context as _, Result};
+use base64::Engine as _;
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Focusable, FontFallbacks,
@@ -29,6 +31,7 @@ use gpui::{
     UnderlineStyle, Window, canvas, div, font, px, rgb,
 };
 use parking_lot::Mutex;
+use uuid::Uuid;
 
 use crate::persistence::DEFAULT_RIGHT_PANEL_WIDTH;
 use crate::theme::{Theme, sp};
@@ -148,6 +151,227 @@ impl EventListener for TerminalEventProxy {
     }
 }
 
+/// The reader thread's half of a daemon terminal.
+///
+/// It outlives the view on purpose: the daemon keeps streaming until it sees
+/// `closeTerminal`, and dropping the view only stops rendering. Keeping the
+/// two halves apart means the subscription can be torn down without holding a
+/// handle that closes the shell.
+struct RemoteFeed {
+    shared: Arc<RemoteShared>,
+    ui_events: Sender<TerminalUiEvent>,
+}
+
+impl RemoteFeed {
+    /// Dispatch one wire event. Errors surface in the view rather than being
+    /// swallowed, because a daemon that refuses a terminal would otherwise
+    /// leave the panel saying "starting" forever.
+    fn dispatch(&self, kind: &str, payload: &serde_json::Value) {
+        match kind {
+            "terminalOutput" => {
+                let Some(encoded) = payload.get("data").and_then(serde_json::Value::as_str) else {
+                    return;
+                };
+                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+                    let _ = self
+                        .ui_events
+                        .send(TerminalUiEvent::Title(tr!("terminal.transport_failed")));
+                    return;
+                };
+                self.shared.feed(bytes);
+            }
+            "terminalExited" => {
+                let _ = self.ui_events.send(TerminalUiEvent::Exited);
+            }
+            "terminalError" => {
+                let message = payload
+                    .as_str()
+                    .map_or_else(|| tr!("terminal.transport_failed"), str::to_owned);
+                let _ = self.ui_events.send(TerminalUiEvent::Title(message));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Subscribe to the daemon's terminal stream and pump it into `feed`.
+///
+/// The daemon's client hands out a blocking `Receiver`, so this runs on its own
+/// thread and never touches the UI: the grid is written under its own lock and
+/// the view learns about it through the shared dirty flag.
+fn spawn_remote_reader(feed: RemoteFeed, events: Receiver<waku_protocol::SequencedEvent>) {
+    std::thread::Builder::new()
+        .name("waku-remote-terminal".into())
+        .spawn(move || {
+            for event in events {
+                feed.dispatch(&event.event.kind, &event.event.payload);
+                if feed.shared.closed.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+        })
+        .ok();
+}
+
+/// Where a terminal's bytes come from and go to.
+///
+/// The grid, the render path, selection, links and the scrollbar all live on
+/// this side and never learn which transport is in use: [`Term`] is fed by
+/// whoever owns the bytes, so a daemon-hosted shell renders through exactly
+/// the same code as a local one.
+trait TerminalTransport: Send + 'static {
+    /// Hand typed or pasted bytes to the shell.
+    fn write(&self, bytes: Vec<u8>);
+    /// Tell the shell its grid changed. Must never block: the render path
+    /// reaches this on every frame that resizes.
+    fn resize(&self, size: WindowSize);
+}
+
+/// The local PTY: an Alacritty event loop owns the shell and feeds the grid.
+struct LocalTransport {
+    sender: EventLoopSender,
+}
+
+impl TerminalTransport for LocalTransport {
+    fn write(&self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            let _ = self.sender.send(Msg::Input(bytes.into()));
+        }
+    }
+
+    fn resize(&self, size: WindowSize) {
+        let _ = self.sender.send(Msg::Resize(size));
+    }
+}
+
+impl Drop for LocalTransport {
+    fn drop(&mut self) {
+        let _ = self.sender.send(Msg::Shutdown);
+    }
+}
+
+/// The stream half of a daemon terminal: everything the reader thread and the
+/// view both touch. The connection lives on [`RemoteTransport`] instead, so
+/// this can be exercised without a daemon.
+struct RemoteShared {
+    session_id: Uuid,
+    runtime_id: Uuid,
+    /// Output that arrived between `openTerminal` and the grid's creation.
+    pending: Mutex<Vec<Vec<u8>>>,
+    /// Set once the grid exists; afterwards output is written straight to it.
+    sink: Mutex<Option<Arc<FairMutex<Term<TerminalEventProxy>>>>>,
+    dirty: Arc<AtomicBool>,
+    closed: AtomicBool,
+}
+
+impl RemoteShared {
+    /// Feed one decoded chunk into the grid, or hold it until there is one.
+    ///
+    /// The parser mirrors Alacritty's own event loop: `advance` drives the
+    /// `Term` handler, which is the same path a local PTY takes.
+    fn feed(&self, bytes: Vec<u8>) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        // Hold the sink across the pending check so a chunk cannot slip
+        // between "no grid yet" and `attach` draining the queue.
+        let sink = self.sink.lock();
+        let Some(term) = sink.as_ref() else {
+            self.pending.lock().push(bytes);
+            return;
+        };
+        let mut parser = vte::ansi::Processor::<vte::ansi::StdSyncHandler>::new();
+        let mut term = term.lock();
+        parser.advance(&mut *term, &bytes);
+        drop(term);
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    /// Attach the grid and drain whatever arrived before it existed.
+    fn attach(&self, term: Arc<FairMutex<Term<TerminalEventProxy>>>) {
+        let mut sink = self.sink.lock();
+        let pending = std::mem::take(&mut *self.pending.lock());
+        *sink = Some(term.clone());
+        if pending.is_empty() {
+            return;
+        }
+        let mut parser = vte::ansi::Processor::<vte::ansi::StdSyncHandler>::new();
+        let mut term = term.lock();
+        for bytes in pending {
+            parser.advance(&mut *term, &bytes);
+        }
+        drop(term);
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    fn exit(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+}
+
+/// The view's half of a daemon terminal: the stream state plus the connection
+/// it speaks over. Dropping it tells the daemon to close the shell; the reader
+/// thread holds only [`RemoteShared`], so a stream that outlives the tab
+/// cannot keep a terminal alive.
+struct RemoteTransport {
+    client: waku_client::DaemonClient,
+    shared: Arc<RemoteShared>,
+}
+
+impl RemoteTransport {
+    fn shared(&self) -> &RemoteShared {
+        &self.shared
+    }
+}
+
+impl TerminalTransport for RemoteTransport {
+    fn write(&self, bytes: Vec<u8>) {
+        if bytes.is_empty() || self.shared.closed.load(Ordering::Acquire) {
+            return;
+        }
+        // TODO(backpressure): the daemon's `terminalOutput` chunks arrive on
+        // `DaemonClient::subscribe`'s unbounded channel
+        // (`crates/waku-client/src/client.rs:127`), and PTY output the view
+        // cannot draw fast enough accumulates there for the life of the
+        // stream. A bound plus a drop policy is its own piece of work: chunk
+        // boundaries do not line up with ANSI sequences, so the discard has to
+        // be at a parser-safe point. Not observed in practice yet — there is
+        // no remote terminal to measure it against.
+        let _ = self.client.notify(
+            self.shared.session_id,
+            self.shared.runtime_id,
+            waku_client::Command::WriteTerminal { data: bytes },
+        );
+    }
+
+    /// Fire and forget: the daemon's mailbox applies the resize in order with
+    /// the input that follows it, and the frame never waits on a round trip.
+    fn resize(&self, size: WindowSize) {
+        if self.shared.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.client.notify(
+            self.shared.session_id,
+            self.shared.runtime_id,
+            waku_client::Command::ResizeTerminal {
+                cols: size.num_cols,
+                rows: size.num_lines,
+            },
+        );
+    }
+}
+
+impl Drop for RemoteTransport {
+    fn drop(&mut self) {
+        self.shared.exit();
+        let _ = self.client.notify(
+            self.shared.session_id,
+            self.shared.runtime_id,
+            waku_client::Command::CloseTerminal,
+        );
+    }
+}
+
 struct TerminalDimensions {
     columns: usize,
     rows: usize,
@@ -169,13 +393,23 @@ impl Dimensions for TerminalDimensions {
 
 struct TerminalSession {
     term: Arc<FairMutex<Term<TerminalEventProxy>>>,
-    sender: EventLoopSender,
+    transport: Box<dyn TerminalTransport>,
     dirty: Arc<AtomicBool>,
     ui_events: Receiver<TerminalUiEvent>,
     window_size: Arc<Mutex<WindowSize>>,
     grid_size: (usize, usize),
     dark_theme: Arc<AtomicBool>,
     url_regex: RegexSearch,
+}
+
+/// Everything a daemon-backed session needs to exist.
+struct RemoteSessionParts {
+    transport: RemoteTransport,
+    grid_event_tx: Sender<TerminalUiEvent>,
+    ui_events: Receiver<TerminalUiEvent>,
+    dirty: Arc<AtomicBool>,
+    dark_theme: Arc<AtomicBool>,
+    window_size: WindowSize,
 }
 
 impl TerminalSession {
@@ -209,7 +443,7 @@ impl TerminalSession {
         };
         let dimensions = TerminalDimensions { columns, rows };
         let term = Arc::new(FairMutex::new(Term::new(
-            config,
+            config.clone(),
             &dimensions,
             proxy.clone(),
         )));
@@ -242,7 +476,7 @@ impl TerminalSession {
 
         Ok(Self {
             term,
-            sender,
+            transport: Box::new(LocalTransport { sender }),
             dirty,
             ui_events,
             window_size: shared_window_size,
@@ -252,11 +486,63 @@ impl TerminalSession {
         })
     }
 
+    /// A terminal whose shell runs on the daemon host.
+    ///
+    /// The grid is built here, exactly as for a local PTY — only the byte
+    /// source differs. `openTerminal` is sent by the caller, which owns the
+    /// runtime id; this constructor wires the subscription that feeds it.
+    fn remote(columns: usize, rows: usize, parts: RemoteSessionParts) -> Result<Self> {
+        let RemoteSessionParts {
+            transport,
+            grid_event_tx,
+            ui_events,
+            dirty,
+            dark_theme,
+            window_size,
+        } = parts;
+        let columns = columns.max(TERMINAL_MIN_COLUMNS);
+        let rows = rows.max(TERMINAL_MIN_ROWS);
+        let url_regex = RegexSearch::new(TERMINAL_LINK_REGEX)
+            .map_err(|error| anyhow::anyhow!("compile terminal link regex: {error}"))?;
+        let config = Config {
+            scrolling_history: TERMINAL_SCROLLBACK_LINES,
+            ..Default::default()
+        };
+        let dimensions = TerminalDimensions { columns, rows };
+        let term = Arc::new(FairMutex::new(Term::new(
+            config,
+            &dimensions,
+            TerminalEventProxy {
+                dirty: dirty.clone(),
+                // No event loop owns this grid, so `PtyWrite` replies have
+                // nowhere to go; the daemon's own PTY answers those.
+                sender: Arc::new(OnceLock::new()),
+                ui_events: grid_event_tx,
+                window_size: Arc::new(Mutex::new(window_size)),
+                dark_theme: dark_theme.clone(),
+            },
+        )));
+        // The grid now exists, so anything the daemon sent while it was being
+        // built can be replayed instead of dropped.
+        transport.shared().attach(term.clone());
+        Ok(Self {
+            term,
+            transport: Box::new(transport),
+            dirty,
+            ui_events,
+            window_size: Arc::new(Mutex::new(window_size)),
+            grid_size: (columns, rows),
+            dark_theme,
+            url_regex,
+        })
+    }
+
     fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
         let bytes = bytes.into();
-        if !bytes.is_empty() {
-            let _ = self.sender.send(Msg::Input(bytes));
+        if bytes.is_empty() {
+            return;
         }
+        self.transport.write(bytes.into_owned());
     }
 
     fn resize(&mut self, columns: usize, rows: usize, cell_width: f32) {
@@ -276,7 +562,7 @@ impl TerminalSession {
             cell_height: TERMINAL_CELL_HEIGHT.round() as u16,
         };
         *self.window_size.lock() = size;
-        let _ = self.sender.send(Msg::Resize(size));
+        self.transport.resize(size);
         self.dirty.store(true, Ordering::Release);
     }
 
@@ -421,12 +707,6 @@ impl TerminalSession {
             rows: rendered_rows,
             outline_cursor,
         }
-    }
-}
-
-impl Drop for TerminalSession {
-    fn drop(&mut self) {
-        let _ = self.sender.send(Msg::Shutdown);
     }
 }
 
@@ -622,6 +902,9 @@ impl TerminalCursorBlink {
 
 pub struct TerminalView {
     session: Option<TerminalSession>,
+    /// Events from the daemon stream (exit, transport errors). Local terminals
+    /// have no such source and leave this `None`.
+    remote_events: Option<Receiver<TerminalUiEvent>>,
     error: Option<String>,
     focus_handle: FocusHandle,
     working_directory: PathBuf,
@@ -686,6 +969,137 @@ impl TerminalView {
 
         Self {
             session: None,
+            remote_events: None,
+            error: None,
+            focus_handle: cx.focus_handle(),
+            title: tr!("right_panel.terminal"),
+            working_directory,
+            exited: false,
+            scroll_accumulator: 0.0,
+            panel_width: DEFAULT_RIGHT_PANEL_WIDTH,
+            measured_cell_width: None,
+            scrollbar_state: ScrollbarState::new(),
+            grid_bounds: Rc::new(Cell::new(None)),
+            selecting: false,
+            hovered_link: None,
+            cursor_blink,
+            cursor_focus_tracking_started: false,
+            context_menu,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// A terminal whose shell is a daemon-hosted one.
+    ///
+    /// The daemon owns the PTY and its cwd, so nothing here interprets a path:
+    /// this side opens the stream and renders whatever arrives. Both requests
+    /// that reach the daemon run on the background executor, because
+    /// [`DaemonClient::request`] blocks until the daemon answers and a frame
+    /// must never do that.
+    ///
+    /// [`DaemonClient::request`]: waku_client::DaemonClient::request
+    pub fn remote(
+        working_directory: PathBuf,
+        daemon: waku_client::DaemonClient,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Terminal events are addressed to a (session, runtime) pair. A
+        // daemon terminal is its own runtime, so one id serves as both — the
+        // same choice the web client makes.
+        let terminal_id = Uuid::new_v4();
+        let dirty = Arc::new(AtomicBool::new(true));
+        let dark_theme = Arc::new(AtomicBool::new(true));
+        // The reader thread owns its own event channel; the grid's proxy writes
+        // into a second one. `TerminalView::poll` drains both.
+        let (remote_event_tx, remote_events) = unbounded();
+        // The grid's proxy only ever writes into this channel; the receiving
+        // half lives on the session, which does not exist until the shell
+        // opens. Nothing is lost: the proxy produces nothing before then.
+        let (grid_event_tx, grid_events) = unbounded();
+        let window_size = WindowSize {
+            num_lines: 36,
+            num_cols: 52,
+            cell_width: TERMINAL_CELL_WIDTH.round() as u16,
+            cell_height: TERMINAL_CELL_HEIGHT.round() as u16,
+        };
+        let shared = Arc::new(RemoteShared {
+            session_id: terminal_id,
+            runtime_id: terminal_id,
+            pending: Mutex::new(Vec::new()),
+            sink: Mutex::new(None),
+            dirty: dirty.clone(),
+            closed: AtomicBool::new(false),
+        });
+        let shell_directory = working_directory.clone();
+
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn({
+                    let daemon = daemon.clone();
+                    async move {
+                        daemon.request(
+                            terminal_id,
+                            terminal_id,
+                            waku_client::Command::OpenTerminal {
+                                cwd: shell_directory,
+                                cols: 52,
+                                rows: 36,
+                            },
+                        )
+                    }
+                })
+                .await;
+            if let Err(error) = opened {
+                let _ = this.update(cx, |this, cx| {
+                    this.error = Some(error.to_string());
+                    cx.notify();
+                });
+                return;
+            }
+            // Subscribe only after the shell exists, and hold the feed for the
+            // reader thread's lifetime. The daemon replays nothing, so the
+            // subscription has to be live before the first prompt is typed —
+            // this is the first moment that is guaranteed.
+            let events = daemon.subscribe(terminal_id, terminal_id);
+            let feed = RemoteFeed {
+                shared: shared.clone(),
+                ui_events: remote_event_tx,
+            };
+            spawn_remote_reader(feed, events);
+
+            let session = TerminalSession::remote(
+                52,
+                36,
+                RemoteSessionParts {
+                    transport: RemoteTransport {
+                        client: daemon.clone(),
+                        shared: shared.clone(),
+                    },
+                    grid_event_tx,
+                    ui_events: grid_events,
+                    dirty: dirty.clone(),
+                    dark_theme: dark_theme.clone(),
+                    window_size,
+                },
+            );
+            let _ = this.update(cx, |this, cx| {
+                match session {
+                    Ok(session) => this.session = Some(session),
+                    Err(error) => this.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+
+        let context_menu = ContextMenuHandle::new(cx);
+        let cursor_blink = cx.new(|_| TerminalCursorBlink::new());
+        let subscriptions = vec![cx.observe(&cursor_blink, |_, _, cx| cx.notify())];
+
+        Self {
+            session: None,
+            remote_events: Some(remote_events),
             error: None,
             focus_handle: cx.focus_handle(),
             title: tr!("right_panel.terminal"),
@@ -721,10 +1135,27 @@ impl TerminalView {
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) -> bool {
+        // Remote events arrive before the grid exists (an open failure, or an
+        // exit racing the first chunk), so they are drained whether or not
+        // there is a session.
+        let mut changed = false;
+        if let Some(events) = &self.remote_events {
+            while let Ok(event) = events.try_recv() {
+                changed = true;
+                match event {
+                    TerminalUiEvent::Exited => self.exited = true,
+                    TerminalUiEvent::Title(message) => self.error = Some(message),
+                    // The reader thread never produces these.
+                    TerminalUiEvent::ResetTitle
+                    | TerminalUiEvent::ClipboardStore(_)
+                    | TerminalUiEvent::ClipboardLoad(_) => {}
+                }
+            }
+        }
         let Some(session) = &self.session else {
-            return false;
+            return changed;
         };
-        let mut changed = session.take_dirty();
+        changed |= session.take_dirty();
         while let Ok(event) = session.ui_events.try_recv() {
             changed = true;
             match event {
@@ -1798,6 +2229,105 @@ mod tests {
     fn plain_link_value(term: &Term<VoidListener>, point: TerminalPoint) -> Option<String> {
         let mut regex = RegexSearch::new(TERMINAL_LINK_REGEX).unwrap();
         plain_link_at(term, &mut regex, point).map(|(value, _)| value)
+    }
+
+    /// A daemon terminal's stream state with no connection behind it: the
+    /// tests drive `feed`/`attach` directly and never speak to a daemon.
+    fn detached_shared() -> Arc<RemoteShared> {
+        Arc::new(RemoteShared {
+            session_id: Uuid::nil(),
+            runtime_id: Uuid::nil(),
+            pending: Mutex::new(Vec::new()),
+            sink: Mutex::new(None),
+            dirty: Arc::new(AtomicBool::new(false)),
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    fn remote_term(config: Config) -> Arc<FairMutex<Term<TerminalEventProxy>>> {
+        let dimensions = TerminalDimensions {
+            columns: 40,
+            rows: 3,
+        };
+        let dirty = Arc::new(AtomicBool::new(false));
+        let (events, _) = unbounded();
+        Arc::new(FairMutex::new(Term::new(
+            config,
+            &dimensions,
+            TerminalEventProxy {
+                dirty: dirty.clone(),
+                sender: Arc::new(OnceLock::new()),
+                ui_events: events,
+                window_size: Arc::new(Mutex::new(WindowSize {
+                    num_lines: 3,
+                    num_cols: 40,
+                    cell_width: 8,
+                    cell_height: 16,
+                })),
+                dark_theme: Arc::new(AtomicBool::new(true)),
+            },
+        )))
+    }
+
+    #[test]
+    fn remote_output_before_the_grid_exists_is_replayed_not_dropped() {
+        let shared = detached_shared();
+        // The daemon can answer faster than the grid is built, so the first
+        // chunks land while there is nowhere to put them.
+        shared.feed(b"before ".to_vec());
+        shared.feed(b"grid".to_vec());
+        assert_eq!(shared.pending.lock().len(), 2);
+
+        let term = remote_term(Config::default());
+        shared.attach(term.clone());
+
+        let binding = term.lock();
+        let content = binding.renderable_content();
+        let row: String = content
+            .display_iter
+            .take(40)
+            .map(|indexed| indexed.cell.c)
+            .collect();
+        drop(binding);
+        assert!(
+            row.starts_with("before grid"),
+            "the queued chunks should have been parsed in order, got {row:?}"
+        );
+        assert!(shared.pending.lock().is_empty());
+    }
+
+    #[test]
+    fn remote_output_after_attach_marks_the_grid_dirty() {
+        let shared = detached_shared();
+        let term = remote_term(Config::default());
+        shared.attach(term.clone());
+        assert!(!shared.dirty.load(Ordering::Acquire));
+
+        shared.feed(b"typed".to_vec());
+        assert!(shared.dirty.load(Ordering::Acquire));
+        assert!(shared.pending.lock().is_empty());
+    }
+
+    #[test]
+    fn a_closed_remote_terminal_stops_accepting_output() {
+        let shared = detached_shared();
+        let term = remote_term(Config::default());
+        shared.attach(term.clone());
+        shared.exit();
+
+        shared.feed(b"ignored".to_vec());
+        let binding = term.lock();
+        let content = binding.renderable_content();
+        let row: String = content
+            .display_iter
+            .take(40)
+            .map(|indexed| indexed.cell.c)
+            .collect();
+        drop(binding);
+        assert!(
+            row.trim().is_empty(),
+            "a closed stream must not reach the grid, got {row:?}"
+        );
     }
 
     #[test]

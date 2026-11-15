@@ -2318,13 +2318,6 @@ impl Waku {
     }
 
     fn ensure_right_panel_terminal(&mut self, terminal_id: Uuid, cx: &mut Context<Self>) {
-        if self.daemon.is_remote() {
-            // A desktop PTY would interpret the daemon's cwd on the wrong
-            // machine. Keep the surface unavailable until the protocol grows
-            // a daemon-owned streaming terminal.
-            self.right_panel_terminals.remove(&terminal_id);
-            return;
-        }
         let Some(working_directory) = self
             .selected_workspace_path()
             .map(std::path::Path::to_path_buf)
@@ -2337,10 +2330,16 @@ impl Waku {
             .get(&terminal_id)
             .is_some_and(|terminal| terminal.read(cx).working_directory() == working_directory);
         if !matches_project {
-            self.right_panel_terminals.insert(
-                terminal_id,
-                cx.new(|cx| TerminalView::new(working_directory.clone(), cx)),
-            );
+            // A remote daemon owns the shell: its cwd is a path on that host,
+            // so the desktop must not spawn a local PTY for it. The daemon
+            // terminal renders through the same view either way.
+            let terminal = if self.daemon.is_remote() {
+                let daemon = self.daemon.client();
+                cx.new(|cx| TerminalView::remote(working_directory.clone(), daemon, cx))
+            } else {
+                cx.new(|cx| TerminalView::new(working_directory.clone(), cx))
+            };
+            self.right_panel_terminals.insert(terminal_id, terminal);
         }
     }
 
