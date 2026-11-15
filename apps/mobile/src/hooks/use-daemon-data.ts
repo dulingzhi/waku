@@ -11,6 +11,7 @@ import {
   hydrateSession,
   listSessionTurnRefs,
   loadDaemonSettings,
+  loadSkills,
   loadTaskState,
   probeProvider,
   type TaskState,
@@ -193,6 +194,27 @@ export function useSessionTurnRefs(
     queryFn: () => listSessionTurnRefs(requireClient(client), cwd!, sessionId!),
     enabled: phase === 'connected' && Boolean(activeProfile && client && cwd && sessionId),
     staleTime: 5_000,
+  });
+}
+
+/**
+ * The daemon's skill catalogue. Scanned on the daemon host, so the projects
+ * passed in are the ones whose project-scoped skill roots should be included —
+ * user-scoped skills appear regardless.
+ *
+ * The key is per profile, not per project set: the catalogue describes what
+ * the daemon has, and folding the project list into the key would strand a
+ * cache entry for every combination a user happens to create. The cost is
+ * that adding a project does not immediately surface its project-scoped
+ * skills — they arrive on the next scan (a mutation, a refetch, or the
+ * screen's staleTime expiring). That is deliberate, not a bug.
+ */
+export function useSkills(projects: Parameters<typeof loadSkills>[1]) {
+  const { activeProfile, client, phase } = useDaemon();
+  return useQuery({
+    queryKey: daemonKeys.skills(activeProfile?.id ?? 'disconnected'),
+    queryFn: () => loadSkills(requireClient(client), projects),
+    enabled: phase === 'connected' && Boolean(activeProfile && client),
   });
 }
 

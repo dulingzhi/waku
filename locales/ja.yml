@@ -549,6 +549,8 @@ skills.no_description: 説明なし
 skills.disabled_badge: 無効
 skills.file_count_one: 補助ファイル 1 件
 skills.file_count_many: "補助ファイル %{count} 件"
+skills.install_count_one: 1 か所
+skills.install_count_many: "%{count} か所"
 skills.updated_just_now: たった今
 skills.updated_minutes: "%{count} 分前"
 skills.updated_hours: "%{count} 時間前"

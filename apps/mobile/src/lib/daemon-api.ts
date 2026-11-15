@@ -12,6 +12,8 @@ import type {
   ReviewDiffData,
   ReviewDiffSource,
   ResponsePayload,
+  SkillEntry,
+  SkillsCatalog,
   SlashCommand,
   WakuClient,
   WorkingTreeEntry,
@@ -91,6 +93,10 @@ export const daemonKeys = {
     root,
     sessionId,
   ] as const,
+  /** The whole skills catalogue for one daemon. Keyed per profile only: the
+   * command scans the daemon's own skill roots plus every project it is given,
+   * so a catalogue is a property of the daemon, not of a project set. */
+  skills: (profileId: string) => ['daemon', profileId, 'skills'] as const,
 };
 
 export async function loadTaskState(client: WakuClient): Promise<TaskState> {
@@ -287,6 +293,32 @@ export async function applyComposerDraftChanges(
     await client.request({ type: 'applyComposerDraftChanges', changes }),
     'ack',
   );
+}
+
+export async function loadSkills(
+  client: WakuClient,
+  projects: Project[],
+): Promise<SkillsCatalog> {
+  const response = expectResponse(
+    await client.request({
+      type: 'loadSkills',
+      projects: projects.map((project) => [project.name, project.path]),
+    }),
+    'skillsCatalog',
+  );
+  return response.catalog;
+}
+
+export async function setSkillsEnabled(
+  client: WakuClient,
+  dirs: string[],
+  enabled: boolean,
+): Promise<void> {
+  expectResponse(await client.request({ type: 'setSkillsEnabled', dirs, enabled }), 'ack');
+}
+
+export async function trashSkills(client: WakuClient, dirs: string[]): Promise<void> {
+  expectResponse(await client.request({ type: 'trashSkills', dirs }), 'ack');
 }
 
 export async function listSessionTurnRefs(

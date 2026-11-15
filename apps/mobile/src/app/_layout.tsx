@@ -157,6 +157,14 @@ function AppNavigator() {
             title: t("task.title"),
           }}
         />
+        <Stack.Screen
+          name="skills"
+          options={{ title: t("skills.library") }}
+        />
+        <Stack.Screen
+          name="skills/[key]"
+          options={{ title: t("skills.details") }}
+        />
       </Stack.Protected>
       <Stack.Screen
         name="daemon-editor"

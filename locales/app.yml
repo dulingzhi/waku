@@ -1067,6 +1067,10 @@ skills.file_count_one:
   en: 1 supporting file
 skills.file_count_many:
   en: "%{count} supporting files"
+skills.install_count_one:
+  en: 1 location
+skills.install_count_many:
+  en: "%{count} locations"
 skills.updated_just_now:
   en: Just now
 skills.updated_minutes:

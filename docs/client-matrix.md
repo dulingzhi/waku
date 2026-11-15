@@ -25,7 +25,7 @@ point, which the roadmap lists first, is that a reader can tell the two apart.
 | Permission approvals | yes | yes | yes |
 | User input questions | yes | yes | yes |
 | Goals | yes | yes | yes |
-| Skills | yes | yes | no |
+| Skills | yes | yes | yes |
 | Usage and cost | yes | yes | no |
 | Attachments | yes | yes | yes |
 | Resume / fork / rewind | yes | yes | resume, fork and rewind |
@@ -100,9 +100,36 @@ machine (including `reconcileProcesses` / `reconcileLive`) lives inside
 Porting it means moving that module to the shared package first, which touches
 the web client — a change that needs its own authorisation and verification.
 
-**Mobile, Skills and Usage.** No hits for the skills commands anywhere under
-`apps/mobile`, and no settings route for usage. The i18n catalogue still carries
-the strings, which is what an unfinished surface looks like.
+**Mobile, Skills.** Closed. `apps/mobile/src/app/skills.tsx` is the library,
+`skills/[key].tsx` the detail pane, and `lib/skills-presentation.ts` the
+grouping, search, labelling and route-key logic.
+
+`crates/waku-core/src/skills.rs` hashes each install's directory **and its
+`enabled` flag** into `row_key`, so a skill's key changes the moment it is
+toggled. Any client that stores that key — a route parameter, a saved selection
+— would lose its target on the next toggle. The desktop uses it only to build
+element ids, which are rebuilt each frame, so it does not notice. Mobile routes
+on `(project, name)` instead, which is the daemon's own grouping identity and
+does not move.
+
+Toggle and delete take every install location at once, because the list
+aggregates one skill installed into several ecosystems into a single row, and
+that is what the user means. The detail pane prints at most three paths and
+counts the rest; the delete button states how many locations go. Toggling
+writes through the catalogue cache immediately (the desktop answers the switch
+before the rescan too) and then refetches. That refetch reorders the list,
+because `rowKey` changes with the flag — expected, not a defect.
+
+**Delete confirmation is a two-step button on all three clients, and that is
+deliberately not how rewind works.** Rewind on mobile uses an `Alert` because
+the desktop and web confirm it by opening an edit bubble mobile does not have
+yet. Delete needs no bubble, so all three keep the same armed-button idiom
+(`skills_delete_arming` / `deleteArmed`). Do not unify the two without first
+giving mobile a message-edit bubble.
+
+**Mobile, Usage.** Still absent: no hits for the usage commands anywhere under
+`apps/mobile`, and no settings route for it. The i18n catalogue carries the
+strings, which is what an unfinished surface looks like.
 
 **Web, Computer Use.** `apps/web/src/lib/runtime-context.tsx` passes
 `computerUseEnabled: false` at both session-start call sites. Whether that is a
@@ -124,8 +151,8 @@ the point. Before closing one, decide which kind it is:
 
 1. **Deliberate** — a browser surface on a phone, or a native path prompt for a
    remote machine. Write the reason down and leave the cell alone.
-2. **Unfinished** — the code exists and nothing calls it (mobile Skills and
-   Usage). Cheap to close, and the cheapest wins available.
+2. **Unfinished** — the code exists and nothing calls it (mobile Usage). Cheap
+   to close, and the cheapest wins available.
 3. **Not yet wired** — the protocol and one other client already do it (the
    desktop remote terminal). The work is a client change, not a protocol one.
 

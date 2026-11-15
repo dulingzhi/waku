@@ -339,6 +339,25 @@ function TaskDrawerContent({
             {daemon.phase === 'connected' && (
               <GlassSurface interactive style={styles.composeButton}>
                 <Pressable
+                  accessibilityLabel={t('skills.library')}
+                  accessibilityRole="button"
+                  hitSlop={6}
+                  onPress={() => {
+                    onClose();
+                    router.push('/skills');
+                  }}
+                  style={({ pressed }) => [styles.roundInner, { opacity: pressed ? 0.5 : 1 }]}>
+                  <AppSymbol
+                    name={{ ios: 'shippingbox', android: 'inventory_2', web: 'inventory_2' }}
+                    size={19}
+                    tintColor={theme.text}
+                  />
+                </Pressable>
+              </GlassSurface>
+            )}
+            {daemon.phase === 'connected' && (
+              <GlassSurface interactive style={styles.composeButton}>
+                <Pressable
                   accessibilityLabel={t('session.new_task')}
                   accessibilityRole="button"
                   hitSlop={6}
