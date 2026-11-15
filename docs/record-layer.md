@@ -89,10 +89,27 @@ nonce (12) || ciphertext (n) || tag (16)
 - **associated data**: `protocol_version (4, big endian) || plaintext_length (4,
   big endian)`
 
-The associated data is authenticated but not encrypted. Version binding means a
-record cannot be replayed into a connection speaking a different version, and
-the length binding means a truncated record fails rather than decrypting to a
-prefix.
+The associated data is authenticated but not encrypted.
+
+**What each field actually carries.** A first draft of this section credited the
+length field with making truncation fail. That is wrong, and worth correcting
+rather than leaving flattering: truncation fails because ChaCha20-Poly1305
+authenticates the whole ciphertext, so removing a byte breaks the tag whatever
+the associated data says. The length field is defence in depth, and it would
+only carry weight if records could be concatenated — a case the counter rule
+already forbids.
+
+**The version binding is load-bearing**, because it stops a record from one
+protocol version being accepted by a connection speaking another.
+
+**The direction prefix in the nonce is also a second line.** Directions already
+use different keys, so a record cannot be reflected across them regardless of
+what the nonce says. The prefix costs four bytes and keeps the nonce spaces
+explicitly separate, which matters if a future change tries to share one sealer
+between directions; it is not what makes reflection fail.
+
+None of the three is removed. Each is cheap, and two of them cover a change that
+would otherwise be silent.
 
 **Replay and reordering.** The counter is part of the nonce, so a replayed
 record reuses a nonce the receiver has already seen and the AEAD rejects it. The
