@@ -4,13 +4,13 @@
 //! stream and send input/resize controls, so a browser can operate against a
 //! daemon on another machine without interpreting any daemon-side paths.
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use std::path::Path;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use anyhow::bail;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use crate::EventSink;
 
 #[cfg(unix)]
@@ -246,10 +246,20 @@ mod platform {
 #[cfg(unix)]
 pub use platform::DaemonTerminal;
 
-#[cfg(not(unix))]
+/// The Windows backend lives in its own file so the unix implementation above
+/// stays byte-for-byte unchanged: the two share only `DaemonTerminal`'s three
+/// public methods, which `daemon.rs` dispatches through.
+#[cfg(windows)]
+#[path = "terminal_windows.rs"]
+mod platform_windows;
+
+#[cfg(windows)]
+pub use platform_windows::DaemonTerminal;
+
+#[cfg(not(any(unix, windows)))]
 pub struct DaemonTerminal;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl DaemonTerminal {
     pub fn open(_cwd: &Path, _cols: u16, _rows: u16, _events: EventSink) -> anyhow::Result<Self> {
         bail!("daemon terminals are not supported on this platform")

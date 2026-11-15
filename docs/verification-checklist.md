@@ -36,6 +36,22 @@
 
 - [ ] 一切和原来一样（这条最容易漏，因为重构动了 `TerminalTransport`）
 
+### 3b. Windows daemon 终端（ConPTY）
+
+只能在一台真的 Windows 机器上跑 `waku-daemon` 并连上终端。这次改动**没有一行经过运行验证**，全部是读上游源码后的推断。
+
+- [ ] `openTerminal` 不报错，shell 真的起来了（不是卡在「启动中」）
+- [ ] 提示符能出现，敲 `dir`、`cd`、`cls` 有正确输出
+- [ ] **输出不是「每次 4ms 一跳」的卡顿观感**——`UnblockedReader` 无数据时返回 `Ok(0)` 而非阻塞，读循环靠 4ms 让出，这是最可能被感知为卡的地方
+- [ ] 敲 `exit` 后客户端显示「进程已退出」，不是永远停在启动中
+- [ ] **关掉终端标签后，`powershell.exe` 仍在任务管理器里**——这是设计取舍（不主动杀进程），不是 bug。数一下数量是否只增不减
+- [ ] 然后退出 daemon，确认那些残留进程一并消失，且 daemon 退出本身不卡死（`Conpty::drop` 的 `ClosePseudoConsole` 会等 conout 抽干）
+- [ ] 拖拽面板宽度，远端 shell 的换行跟随 resize
+- [ ] 同时开三个终端标签，事件不串
+- [ ] 中文输出/中文路径不乱码（ConPTY 代码页）
+
+**坏了最可能是哪里**：读取循环。`Ok(0)` 在这个后端不等于 EOF，如果看到「刚起来就报已退出」，就是这里被当成了 EOF。
+
 ## 二、mobile 端
 
 前置：起一个 daemon，mobile 连上。
