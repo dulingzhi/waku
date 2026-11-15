@@ -7,6 +7,8 @@ mod claude;
 mod codex;
 mod computer_use;
 mod deepseek;
+#[cfg(test)]
+mod fixture;
 mod opencode;
 mod opencode_computer_use;
 mod pi;

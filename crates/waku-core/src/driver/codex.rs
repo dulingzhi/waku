@@ -3820,4 +3820,202 @@ mod tests {
         assert!(codex_plan_usage(Some(&json!({"planType": "plus"}))).is_none());
         assert!(codex_plan_usage(None).is_none());
     }
+
+    /// The whole recorded conversation, replayed through the real parser.
+    ///
+    /// This is the point of the fixture: the messages are the provider's own
+    /// shape, so a Codex release that renames a method or moves a field breaks
+    /// this test rather than a user's task.
+    #[test]
+    fn a_recorded_codex_scenario_replays_into_the_driver_event_stream() {
+        use super::super::fixture::{Fixture, Replayer};
+
+        let fixture = Fixture::load(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/driver/fixtures/codex/fork-preserves-history.json"),
+        )
+        .expect("the committed fixture parses");
+        let mut replayer = Replayer::new(fixture).expect("the fixture is valid");
+
+        let thread_id = Mutex::new(None);
+        let turn_id = Mutex::new(None);
+        let turn_ids = Mutex::new(Vec::new());
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        let goal_rpcs = Mutex::new(GoalRpcState::default());
+        let (commands, _command_rx) = unbounded();
+        let (events, received) = crate::driver::test_event_channel();
+        let mut stream_state = CodexStreamState::default();
+        let mut deliver = |value| {
+            handle_codex_message(
+                value,
+                &thread_id,
+                &turn_id,
+                &turn_ids,
+                &pending_rollbacks,
+                &pending_steers,
+                &background_rpcs,
+                &goal_rpcs,
+                &commands,
+                &events,
+                &mut stream_state,
+            );
+        };
+
+        // The handshake: initialize, the initialized notification, then the
+        // resumed thread. Every reply the driver gets comes from the recording.
+        for request in [
+            json!({"method": "initialize", "id": 0}),
+            json!({"method": "initialized"}),
+            json!({"method": "thread/resume", "id": 1}),
+        ] {
+            if request.get("id").is_none() {
+                continue;
+            }
+            for reply in replayer.respond(&request) {
+                deliver(reply);
+            }
+        }
+
+        // The goal probe Codex's own writer makes after a resume. The writer
+        // registers the pending request before sending it, and the recording
+        // answers "method not found" — which must classify goals as
+        // unsupported instead of surfacing an error.
+        goal_rpcs
+            .lock()
+            .pending
+            .insert(10, PendingGoalRpc::Get { quiet: true });
+        for reply in replayer.respond_to("thread/goal/get", 10) {
+            deliver(reply);
+        }
+
+        // The resume reply carries a provider title, so the driver reports that
+        // title before it reports the connection.
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            DriverEvent::AutoTitleUpdated(Some(title)) if title == "Forked conversation"
+        ));
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            DriverEvent::Connected {
+                provider_cursor: Some(ProviderResumeCursor::Codex { thread_id })
+            } if thread_id == "th_1"
+        ));
+
+        let mut text = String::new();
+        for reply in replayer.respond_to("turn/start", 11) {
+            deliver(reply);
+        }
+        loop {
+            match received
+                .try_recv()
+                .expect("the recorded turn produces events")
+            {
+                DriverEvent::TurnStarted => {}
+                DriverEvent::TextDelta(delta) => text.push_str(&delta),
+                DriverEvent::TurnFinished { success, summary } => {
+                    assert!(success, "recorded turn failed: {summary:?}");
+                    break;
+                }
+                DriverEvent::Error(error) => panic!("replaying the fixture errored: {error}"),
+                _ => {}
+            }
+        }
+
+        assert_eq!(text, "OK");
+        assert!(
+            replayer.unmatched().is_empty(),
+            "the driver asked for {:?}, which the recording does not answer",
+            replayer.unmatched()
+        );
+        replayer.assert_complete();
+    }
+
+    /// A recorded rejection reaches the user as an error, not as silence.
+    ///
+    /// This is the case the fixture format calls the most valuable one to keep:
+    /// the turn settles exactly as a successful one does, and the only evidence
+    /// of what went wrong is the provider's own error notification.
+    #[test]
+    fn a_recorded_codex_rejection_surfaces_as_a_driver_error() {
+        use super::super::fixture::{Fixture, Replayer};
+
+        let rejection = r#"
+        {
+          "provider": "codex",
+          "scenario": "turn-rejected",
+          "recorded_with": "synthetic, not a real recording",
+          "exchanges": [
+            { "on_request": "thread/resume",
+              "reply": { "id": 1, "result": { "thread": { "id": "th_1", "turns": [] } } } },
+            { "on_request": "turn/start",
+              "reply": { "id": 11, "result": { "turn": { "id": "turn_2" } } } }
+          ],
+          "events": [
+            { "method": "turn/started", "params": { "turn": { "id": "turn_2" } } },
+            { "method": "error",
+              "params": { "message": "You've hit your usage limit" } },
+            { "method": "turn/completed",
+              "params": { "turn": { "id": "turn_2", "status": "completed" } } }
+          ]
+        }
+        "#;
+        let mut replayer = Replayer::new(Fixture::from_json(rejection).unwrap()).unwrap();
+
+        let thread_id = Mutex::new(None);
+        let turn_id = Mutex::new(None);
+        let turn_ids = Mutex::new(Vec::new());
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        let goal_rpcs = Mutex::new(GoalRpcState::default());
+        let (commands, _command_rx) = unbounded();
+        let (events, received) = crate::driver::test_event_channel();
+        let mut stream_state = CodexStreamState::default();
+        let mut deliver = |value| {
+            handle_codex_message(
+                value,
+                &thread_id,
+                &turn_id,
+                &turn_ids,
+                &pending_rollbacks,
+                &pending_steers,
+                &background_rpcs,
+                &goal_rpcs,
+                &commands,
+                &events,
+                &mut stream_state,
+            );
+        };
+
+        for reply in replayer.respond_to("thread/resume", 1) {
+            deliver(reply);
+        }
+        // Connected is reported after the cursor; drain it so the assertions
+        // below can look only at the turn.
+        let _ = received.try_recv();
+        for reply in replayer.respond_to("turn/start", 11) {
+            deliver(reply);
+        }
+
+        let mut messages = Vec::new();
+        let mut finished = false;
+        while let Ok(event) = received.try_recv() {
+            match event {
+                DriverEvent::Error(message) => messages.push(message),
+                DriverEvent::TurnFinished { success, .. } => {
+                    // The recorded turn settles successfully on the wire; the
+                    // rejection is the provider's separate notification, which
+                    // is exactly why a fixture has to keep that notification.
+                    assert!(success);
+                    finished = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(finished, "the recorded turn must settle");
+        assert_eq!(messages, ["You've hit your usage limit"]);
+        replayer.assert_complete();
+    }
 }

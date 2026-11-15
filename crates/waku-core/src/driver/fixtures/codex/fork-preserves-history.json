@@ -1,0 +1,48 @@
+{
+  "provider": "codex",
+  "scenario": "fork-preserves-history",
+  "recorded_with": "codex 0.52.0 (synthetic, not a real recording)",
+  "recorded_at": "2026-11-15",
+  "transport": "codex-app-server",
+  "exchanges": [
+    { "on_request": "initialize", "reply": { "id": 0, "result": {} } },
+    {
+      "on_request": "thread/resume",
+      "reply": {
+        "id": 1,
+        "result": {
+          "thread": {
+            "id": "th_1",
+            "name": "Forked conversation",
+            "turns": [{ "id": "turn_1" }]
+          }
+        }
+      }
+    },
+    {
+      "on_request": "thread/goal/get",
+      "reply": { "id": 10, "error": { "code": -32601, "message": "method not found" } }
+    },
+    {
+      "on_request": "turn/start",
+      "reply": { "id": 11, "result": { "turn": { "id": "turn_2" } } }
+    }
+  ],
+  "events": [
+    {
+      "method": "turn/started",
+      "params": { "threadId": "th_1", "turn": { "id": "turn_2" } }
+    },
+    {
+      "method": "item/agentMessage/delta",
+      "params": { "threadId": "th_1", "delta": "OK" }
+    },
+    {
+      "method": "turn/completed",
+      "params": {
+        "threadId": "th_1",
+        "turn": { "id": "turn_2", "status": "completed" }
+      }
+    }
+  ]
+}
