@@ -15,21 +15,35 @@ Encryption lands before any relay exists.
 
 ## What is already in the dependency tree — and what that is worth
 
-Worth checking before proposing a new crypto crate: the tree carries these.
+Worth checking before proposing a new crypto crate — and worth checking
+properly, because a first pass got this wrong.
 
-| Crate | Version | Brought in by | Usable directly? |
+| Crate | In `Cargo.lock` | Actually compiled for this target | Usable directly? |
 | --- | --- | --- | --- |
-| `ring` | 0.17.14 | rustls, through `tungstenite` | **No** — transitive |
-| `chacha20` | 0.10.1 | RustCrypto stack | **No** — transitive |
-| `hkdf` | 0.12.4 | RustCrypto stack | **No** — transitive |
-| `sha2` | 0.10.9 | RustCrypto stack | **No** — transitive |
-| `ed25519-dalek` | 2.x | the release updater | Yes, but Linux and Windows only |
+| `ring` | 0.17.14 | **No** — `cargo tree -i ring` prints nothing | No |
+| `hkdf` | 0.12.4 | **No** — only parent is `oo7`, a Linux keyring crate we do not use | No |
+| `sha2` | 0.10.9 | Yes, through `ed25519-dalek` | No — transitive |
+| `chacha20` | 0.10.1 | Yes, but only as `rand`'s PRNG backend | **No — it is not an AEAD** |
+| `chacha20poly1305` | **absent** | — | — |
+| `curve25519-dalek` | 4.1.3 | Yes, through `ed25519-dalek` | No — transitive |
+| `ed25519-dalek` | 2.2.0 | Linux and Windows updater only | Yes, after promotion |
+| `subtle` | 2.6 | Yes, a `waku-core` dependency | Yes |
 
-A transitive crate cannot be named from our own code; each one added as a direct
-dependency is a real change even when the version already compiles. `ring` does
-cover X25519, ChaCha20-Poly1305 and HKDF, and `ed25519-dalek` is already a
-first-level dependency for update signatures — which makes it the natural
-identity key rather than a second signing crate.
+Being in the lockfile is not being available. `ring` and `hkdf` sit in the lock
+with no live dependency on this target, and `chacha20` is a stream cipher used
+as `rand`'s backend — it carries no Poly1305 and no AEAD construction, so it
+cannot stand in for `chacha20poly1305`, which is not in the tree at all.
+
+What that leaves is one genuinely reusable base: `ed25519-dalek` already drags
+in `curve25519-dalek`, `sha2`, `subtle` and `zeroize`. `x25519-dalek` is a thin
+layer over the same `curve25519-dalek`, so choosing the dalek family for key
+agreement adds no second curve implementation to audit.
+
+**The missing X25519 layer is not optional even though the primitive is there.**
+`curve25519-dalek` exposes `mul_clamped` but no `diffie_hellman` and no
+all-zero check, and RFC 7748 requires a contributory-behaviour check against
+low-order points. Reaching into the primitive to skip that is precisely the
+mistake `x25519-dalek` exists to prevent.
 
 **`snow` is the recommendation for Noise**, but it is not free: it brings
 `x25519-dalek`, `chacha20poly1305` and a hash, and it is one more cryptographic

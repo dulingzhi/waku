@@ -95,6 +95,37 @@ implementation to review, all to provide properties this shape already has.
 The pieces are smaller and easier to check: X25519, HKDF, ChaCha20-Poly1305, and
 one signature verification.
 
+## Dependencies, and what they are worth
+
+Three crates are added, plus three promoted from the tree. The dalek family
+supplies key agreement and signing; RustCrypto supplies the AEAD and the key
+derivation.
+
+| Crate | Purpose | Audit |
+| --- | --- | --- |
+| `x25519-dalek` 2 | key agreement, with `diffie_hellman` and the RFC 7748 all-zero check | No standalone audit; the underlying `curve25519-dalek` was audited by NCC Group in 2020 |
+| `ed25519-dalek` 2.2 | identity signing | Same lineage, same audit |
+| `chacha20poly1305` 0.10 | records | No published third-party audit |
+| `hkdf` 0.12 | session key derivation | No published audit; small enough to read |
+| `zeroize` | clearing key material from memory | No audit; a memory-hygiene crate, not a cryptographic one |
+| `getrandom` 0.3 | OS entropy | Not a cryptographic implementation; wraps the OS |
+
+**Two of these have no third-party audit report, and that is written down
+rather than glossed over.** It is the current state of the Rust ecosystem
+rather than a mark against these crates specifically — `ring`, which the first
+draft of this plan preferred, has no published audit either; its reputation
+comes from Google's internal use and BoringSSL's history.
+
+What follows from that: **the risk sits in how these are composed, not in which
+crate was picked.** A reviewed library used wrongly is worse than an unreviewed
+one used correctly, and the composition is small enough to be reviewed by hand
+— one key agreement, one derivation, one AEAD, one signature check.
+
+Deliberately not done: reaching for `curve25519-dalek`'s `mul_clamped` directly.
+The primitive is already compiled, but it has no `diffie_hellman` and no
+contributory check, and RFC 7748 requires rejecting an all-zero shared secret.
+Skipping the wrapper to avoid a dependency would skip the check with it.
+
 ## Cost
 
 | Piece | Where | Days |
