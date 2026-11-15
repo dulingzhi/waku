@@ -97,11 +97,13 @@ acceptable only if a reviewer signs off on the transcript binding.
 **Pairing.** The user's device and the daemon must agree on a key without the
 relay learning it.
 
-1. The daemon shows, in Settings → Daemon, a short-lived pairing code and a QR
-   code. Both encode the relay address, a session id, and the daemon's
-   ephemeral public key.
+1. The daemon shows, in Settings → Daemon, a short-lived pairing code. It
+   carries the relay address, a session id, and a pairing secret the relay
+   distributed to both sides. It does **not** carry an ephemeral key: a key
+   written down before a connection exists has stopped being ephemeral, and
+   forward secrecy depends on it being created per connection.
 2. The client connects to the relay, presents the session id, and completes the
-   key agreement with that public key.
+   key agreement, generating its ephemeral key at that moment.
 3. Both sides derive a session key and display a short authentication string.
    The user compares it once.
 4. Only then does the client present its daemon token — encrypted.
@@ -110,13 +112,44 @@ Step 4 matters: **the token becomes an application-layer credential rather than
 a transport credential.** The relay never sees it, and a successful handshake
 does not by itself grant control.
 
+**The authentication string.** This is a security boundary, not a display
+detail, and it must not be invented here. It is the first half of the Noise
+handshake hash — the value the protocol accumulates across every message of the
+handshake — rendered in a form a person can compare. Running a plain hash over
+the session key would be wrong twice over: an attacker can grind two different
+handshakes to the same short hash, and a value that does not cover the
+transcript lets an intermediary run one handshake per side and sit between them
+with both comparisons passing. Whatever implementation is chosen, it must expose
+the handshake hash, and the string comes from that.
+
+**No plaintext fallback.** The record layer is required, not offered. A layer
+that can be negotiated away is a layer an attacker strips before doing anything
+else, so the choice is made once in the WebSocket subprotocol: a client that
+does not get an encrypted record layer closes the connection instead of falling
+back. The protocol version does not change, because the negotiation lives below
+it.
+
 **Forward secrecy.** Ephemeral keys per connection, so a later compromise of a
 device does not decrypt recorded traffic.
 
 **Replay.** Every frame carries a monotonically increasing counter inside the
 authenticated payload; the receiver rejects a repeated or out-of-order frame.
-This also covers the `resume_from` replay-cursor path, which must be
-authenticated for the same reason.
+The `resume_from` replay cursor needs the same treatment, and it is not
+sufficient on its own: it authenticates messages within a connection, not a
+whole connection replayed later. The record layer therefore also binds an epoch
+that a fresh handshake changes, so a recorded connection cannot be replayed as
+a new one.
+
+**Threat model.** Three attackers, with different capabilities:
+
+| Attacker | Can do | Defeated by |
+| --- | --- | --- |
+| Passive relay | Read every byte | The record layer; it sees ciphertext |
+| Malicious relay | Read, drop, reorder, replay, or splice connections | Encryption for reading, counters for order, the handshake hash for splicing |
+| Relay plus a compromised endpoint | Everything the endpoint can do | Nothing here — see below |
+
+The third is out of scope on purpose. A design that claims to defend against a
+compromised endpoint is either lying or is asking the user for a second device.
 
 **What this does not protect.** A compromised endpoint, a hostile daemon host,
 or a user who hands out a pairing code. The design protects the path, and says
@@ -163,16 +196,40 @@ default, and a public one is a convenience, never a requirement.
 
 Each step is useful on its own, and each is judged before the next begins.
 
-**Step 1 — self-hosted relay, trusted.** The user runs the relay. Pairing works,
-the daemon dials out, the client connects. Encryption may be deferred here
-because the operator already controls both ends. Proves the transport shape.
+The order below is not the obvious one. Encryption comes **first**, before any
+relay exists, and the reason is that a plaintext relay mode cannot be shipped
+safely even as an interim step.
 
-**Step 2 — end-to-end encryption.** The record layer and pairing land. From
-here the relay operator is untrusted by construction, and step 1's relay
-becomes safe to hand to someone else.
+**Step 0 — decisions before code.** A threat model, the choice of Noise
+implementation, and the authentication string's derivation. Every one of these
+changes what gets written, and the last is a security boundary rather than a
+detail.
 
-**Step 3 — public relay.** Only after step 2. Adds abuse limits and the
-operational work a shared relay implies.
+**Step 1 — end-to-end encryption, no relay.** The record layer lands on the
+existing connections: loopback, a private network, or a TLS tunnel the user
+terminates. It is independently useful — `wss://` with an encrypted record
+layer is already better than a bearer token crossing a trusted link — and it can
+be exercised against real users of the feature that exists today.
+
+This step must not accept a plaintext fallback. A layer that can be negotiated
+away is a layer an intermediary can strip, so the negotiation belongs in the
+WebSocket subprotocol and a client that does not get it refuses the connection.
+
+**Step 2 — self-hosted relay.** The user runs the relay; the daemon dials out;
+the client supplies a session id. This is the first time a connection crosses a
+machine neither endpoint owns, which is why encryption precedes it rather than
+following it: a relay operator is assumed untrusted from the moment the relay
+exists, and no amount of "it is your own server" makes a UI that looks identical
+in both modes safe. Operators end up running relays they do not fully control —
+a VPS, a shared host, a friend's machine — and the client cannot tell.
+
+**Step 3 — public relay.** Adds abuse limits and the operational work a shared
+relay implies.
+
+**What is deliberately not a step: a plaintext relay.** It would prove the
+transport shape just as well, and it would put full-control tokens in an
+operator's hands while looking no different on screen. The transport shape is
+worth proving later, once the layer above it exists.
 
 Reversing this order, or shipping a public relay without step 2, would put
 users' full-control tokens in an operator's hands.

@@ -6,90 +6,69 @@ next begins.
 
 The design settles the security shape. This settles the order of work.
 
-## What is already in the dependency tree
+## The order is encryption first, and that is deliberate
 
-Worth checking before proposing a new crypto crate: the tree already carries
-the pieces.
+The obvious plan — build a relay, then secure it — is the wrong one, and
+`remote-access.md` records why: a plaintext relay mode looks identical on screen
+to an encrypted one, so users will run it against relays they do not control.
+Encryption lands before any relay exists.
 
-| Crate | Version | Brought in by |
-| --- | --- | --- |
-| `ring` | 0.17.14 | rustls, through `tungstenite` |
-| `chacha20` | 0.10.1 | the RustCrypto stack |
-| `hkdf` | 0.12.4 | the same |
-| `sha2` | 0.10.9 | the same |
-| `ed25519` | 2.x | the release-signing code |
+## What is already in the dependency tree — and what that is worth
 
-`ring` alone covers X25519 key agreement, ChaCha20-Poly1305 AEAD, HKDF-SHA256
-and a CSPRNG. So the encryption layer can be built from crates already being
-compiled, rather than adding a new cryptography dependency to a desktop app
-that has to ship on three platforms.
+Worth checking before proposing a new crypto crate: the tree carries these.
 
-That matters beyond build time. A new crypto crate is a new supply-chain
-surface and a new set of platform builds to trust, on a feature whose failure
-mode is "the user's machine is controlled by someone else".
+| Crate | Version | Brought in by | Usable directly? |
+| --- | --- | --- | --- |
+| `ring` | 0.17.14 | rustls, through `tungstenite` | **No** — transitive |
+| `chacha20` | 0.10.1 | RustCrypto stack | **No** — transitive |
+| `hkdf` | 0.12.4 | RustCrypto stack | **No** — transitive |
+| `sha2` | 0.10.9 | RustCrypto stack | **No** — transitive |
+| `ed25519-dalek` | 2.x | the release updater | Yes, but Linux and Windows only |
 
-## Step 1 — A relay, trusted operator
+A transitive crate cannot be named from our own code; each one added as a direct
+dependency is a real change even when the version already compiles. `ring` does
+cover X25519, ChaCha20-Poly1305 and HKDF, and `ed25519-dalek` is already a
+first-level dependency for update signatures — which makes it the natural
+identity key rather than a second signing crate.
 
-The smallest thing that proves the transport: a daemon behind NAT reaches a
-client through a hop neither endpoint controls.
+**`snow` is the recommendation for Noise**, but it is not free: it brings
+`x25519-dalek`, `chacha20poly1305` and a hash, and it is one more cryptographic
+surface in an app that ships on three platforms. That dependency review is
+step 0, not something to discover mid-implementation.
 
-Scope:
+## The relay client is a new code path on the daemon side
 
-- **A relay binary.** Its own crate, `crates/waku-relay`, speaking the same
-  WebSocket the daemon already serves. It pairs two sockets by session id and
-  copies bytes. It reads no frames.
-- **Daemon dials out.** A `--relay <url>` flag starts an outbound connection.
-  This is the point of the whole exercise: a machine behind a router never
-  accepts an inbound connection.
-- **A session id.** The daemon mints one and prints it, alongside the existing
-  token, in Settings → Daemon. A client supplies it to reach that daemon.
-- **Client connects through the relay.** `DaemonClient::connect` already
-  accepts a URL; the relay address plus a session id is still a URL.
+The daemon cannot currently make an outbound TLS connection at all:
+`crates/waku-core/Cargo.toml` enables `tungstenite` with `handshake` only, and
+`crates/waku-core/src/server.rs` only ever accepts. A daemon that dials out
+needs TLS client support and a reconnect loop — code that does not exist
+anywhere in the crate today. That is the largest single-line underestimate in
+the earlier plan.
 
-Deliberately not in scope: encryption, pairing codes, a public relay, and any
-change to the wire protocol. The daemon-to-client bytes are the same bytes they
-are today, carried over one more hop.
+## Steps
 
-**This step is only safe when both endpoints are the operator's own.** The
-token crosses the relay in the clear, exactly as it does over an
-operator-controlled TLS tunnel today. It is a step toward the goal, not a
-shippable public feature, and it must not be described as private.
+| Step | Content | Days | Depends on |
+| --- | --- | --- | --- |
+| 0 | Threat model, Noise implementation choice, authentication-string derivation, dependency review | 2-3 | — |
+| 1 | Record layer in `waku-protocol`, Rust client and daemon | 8-10 | 0 |
+| 2 | Record layer in the TypeScript clients | 6-8 | 1 |
+| 3 | Pairing UI (text code, no QR) and the daemon identity key | 5-6 | 1 |
+| 4 | `crates/waku-relay`, local loopback integration test | 5-6 | 1, 2 |
+| 5 | Daemon outbound connection and reconnect | 4-5 | 4 |
+| 6 | Address generation wired into three clients | 2-3 | 5 |
 
-Judged by: a daemon on one machine, a client on another, a relay on a third,
-and `ls` in the terminal returns that daemon host's directory listing.
+Steps 0 through 3 are 21-27 days and are the sensible first delivery: encrypted
+transport, usable today, with no relay in the picture.
 
-## Step 2 — End-to-end encryption
+## The one unknown that can double the estimate
 
-Now the relay becomes untrusted by construction.
+**The TypeScript clients need their own Noise implementation.** `snow` is Rust
+only; the browser and React Native cannot use it. Whether a mature JS or WASM
+implementation exists, and which one, is unverified — and if none is suitable,
+step 2 grows into writing and reviewing a handshake implementation in
+TypeScript, which is a different kind of work from the rest of this plan.
 
-The record layer goes **above** the WebSocket, so the relay never needs to know
-it exists:
-
-- X25519 ephemeral key agreement via `ring`
-- ChaCha20-Poly1305 records via `ring`, keyed by HKDF-SHA256
-- A monotonically increasing counter inside every authenticated record, so a
-  replayed or reordered frame is rejected
-
-Hand-rolling this is the risk. A reviewed construction is better, and `noise`
-implementations in Rust (`snow`) carry one — but `snow` would be a new crate
-that pulls its own primitives. The decision between "use `snow`" and "compose
-`ring` primitives in a documented, reviewable way" is the one thing in this
-plan that needs a second opinion before code is written.
-
-Whichever is chosen, the shape is the same: the existing `Hello` message keeps
-its fields and is simply carried inside the encrypted record. That is Option A
-from the design document, and it avoids regenerating the wire types three
-clients depend on.
-
-Judged by: the relay operator cannot read a task title out of the traffic, a
-record captured and replayed is rejected, and the existing test suite passes
-with every transport test running through the record layer.
-
-## Step 3 — A public relay
-
-Only after step 2. Adds what a shared relay needs and a self-hosted one does
-not: per-session byte and duration caps, a connection rate limit per source,
-and an abuse policy someone is accountable for.
+That question should be answered in step 0.
 
 ## What this plan does not promise
 
