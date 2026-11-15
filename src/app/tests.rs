@@ -1,6 +1,6 @@
 use super::composer::{
-    ComposerSubmitAction, composer_submit_action, dropped_file_mention, merged_submission,
-    next_picker_highlight, visible_branch_entries,
+    ComposerSubmitAction, attachment_upload_from_path, composer_submit_action,
+    dropped_file_mention, merged_submission, next_picker_highlight, visible_branch_entries,
 };
 use super::runtime::{merge_remote_session_catalog, session_has_active_provider_turn};
 use super::settings::visible_settings_pages;
@@ -2618,4 +2618,326 @@ fn only_a_busy_session_with_a_running_turn_accepts_output() {
             "{status:?} must keep its meaning"
         );
     }
+}
+
+// ── Attachment staging ────────────────────────────────────────────────────
+//
+// `attachment_upload_from_path` is live production code, not a test-only
+// helper: `stage_attachment_paths` (composer.rs:1939) calls it for every path
+// a user drops on the composer, before the daemon's ImportAttachment command
+// stores it. These tests construct real files on disk — no mocked filesystem —
+// because symlink identity, directory recursion and byte counts are exactly
+// the parts a mock would get wrong.
+
+/// A temporary directory that removes itself, so a failing assertion inside a
+/// test cannot leave debris in the system temp dir that a later run trips on.
+struct ScratchDir {
+    path: std::path::PathBuf,
+}
+
+impl ScratchDir {
+    fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("waku-test-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&path).expect("create scratch dir");
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn file(&self, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = self.path.join(name);
+        std::fs::write(&path, bytes).expect("write scratch file");
+        path
+    }
+
+    fn dir(&self, name: &str) -> std::path::PathBuf {
+        let path = self.path.join(name);
+        std::fs::create_dir_all(&path).expect("create scratch subdir");
+        path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn attachment_error(path: &std::path::Path) -> String {
+    attachment_upload_from_path(path)
+        .expect_err("this path must be rejected")
+        .to_string()
+}
+
+/// A plain file becomes one base64 upload carrying the file name.
+///
+/// Also pins that the *unmodified* bytes are what get encoded: the payload is
+/// what the daemon will store, so an encoding slip here corrupts the
+/// attachment silently.
+#[test]
+fn a_dropped_file_becomes_one_base64_upload() {
+    let scratch = ScratchDir::new("file");
+    let path = scratch.file("notes.txt", b"hello attachment");
+
+    let (name, upload, image_bytes) =
+        attachment_upload_from_path(&path).expect("a regular file is accepted");
+    assert_eq!(name, "notes.txt");
+    assert!(image_bytes.is_none(), "a text file has no preview bytes");
+    let waku_client::attachments::AttachmentUpload::File { data_base64 } = upload else {
+        panic!("a regular file must produce a File upload");
+    };
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&data_base64)
+            .expect("the payload is valid base64"),
+        b"hello attachment"
+    );
+}
+
+/// An image is the same upload plus the bytes again for the in-app preview.
+/// The preview is only ever built from the bytes, so it must not be some
+/// re-encoded form of them.
+#[test]
+fn an_image_keeps_its_bytes_for_the_preview() {
+    let scratch = ScratchDir::new("image");
+    let bytes = b"\x89PNG\r\n\x1a\nfake-but-nonempty";
+    let path = scratch.file("shot.PNG", bytes);
+
+    let (name, upload, image_bytes) =
+        attachment_upload_from_path(&path).expect("an image is accepted");
+    assert_eq!(name, "shot.PNG");
+    assert_eq!(
+        image_bytes.as_deref(),
+        Some(bytes.as_slice()),
+        "the preview must receive the file's own bytes"
+    );
+    // The extension match is case-insensitive, which matters because the name
+    // is what reaches the daemon and the chip label.
+    assert!(matches!(
+        upload,
+        waku_client::attachments::AttachmentUpload::File { .. }
+    ));
+}
+
+/// A symlink is refused outright, and the refusal happens before reading.
+///
+/// Dropping a link would upload whatever it points at — a path outside the
+/// project, or one the user never meant to send. The check has to be on the
+/// link itself, which is why the function uses `symlink_metadata`.
+#[cfg(unix)]
+#[test]
+fn a_symlink_attachment_is_refused_without_following_it() {
+    let scratch = ScratchDir::new("symlink");
+    let target = scratch.file("real.txt", b"secret");
+    let link = scratch.path().join("link.txt");
+    std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+    let error = attachment_error(&link);
+    assert!(
+        error.contains("symbolic-link"),
+        "the refusal must name the reason: {error}"
+    );
+}
+
+/// A file over the 32 MB cap is refused by its metadata size, so the whole
+/// file is never read into memory first.
+///
+/// This is the limit that protects the process: `std::fs::read` on an
+/// unbounded pick would allocate the file's full length, and the base64 encode
+/// then adds another third on top.
+#[test]
+fn an_oversized_file_is_refused_at_the_32_mb_boundary() {
+    let scratch = ScratchDir::new("oversize");
+    // One byte past the limit is enough; the check is `>` on metadata.len().
+    // The file is sparse where the OS supports it, so the test stays cheap
+    // without the code under test reading it.
+    let path = scratch.path().join("huge.bin");
+    let limit = waku_client::attachments::MAX_ATTACHMENT_BYTES as u64;
+    let file = std::fs::File::create(&path).expect("create oversized file");
+    file.set_len(limit + 1).expect("extend the file");
+    drop(file);
+
+    let error = attachment_error(&path);
+    assert!(
+        error.contains("32 MB"),
+        "the refusal must name the limit: {error}"
+    );
+}
+
+/// The boundary is inclusive: exactly 32 MB is accepted, one byte more is not.
+///
+/// An off-by-one here would either reject a legitimate file at the documented
+/// cap or let one through that the daemon's own limit then refuses — the
+/// second is worse, because the failure surfaces after the expensive encode.
+#[test]
+fn the_32_mb_cap_is_exclusive_of_one_more_byte() {
+    let scratch = ScratchDir::new("boundary");
+    let limit = waku_client::attachments::MAX_ATTACHMENT_BYTES as u64;
+
+    let at_limit = scratch.path().join("at-limit.bin");
+    let file = std::fs::File::create(&at_limit).expect("create file");
+    file.set_len(limit).expect("extend the file");
+    drop(file);
+    let (_, upload, _) =
+        attachment_upload_from_path(&at_limit).expect("a file exactly at the limit is accepted");
+    let waku_client::attachments::AttachmentUpload::File { data_base64 } = upload else {
+        panic!("a regular file must produce a File upload");
+    };
+    // Base64 of 32 MB is ~44.7 MB; proving the full length was encoded is what
+    // shows the accepted file was read completely rather than truncated.
+    assert_eq!(
+        data_base64.len(),
+        limit.div_ceil(3) as usize * 4,
+        "the whole file must be encoded, not a truncated head"
+    );
+}
+
+/// A dropped directory becomes one Directory upload with every file, keyed by
+/// its path relative to the dropped root.
+///
+/// Relative paths are the contract the daemon resolves against, so an
+/// absolute or root-prefixed path would store the file somewhere the transcript
+/// cannot link to.
+#[test]
+fn a_dropped_directory_uploads_every_file_with_a_relative_path() {
+    let scratch = ScratchDir::new("dir");
+    let root = scratch.dir("bundle");
+    std::fs::write(root.join("top.txt"), b"top").expect("write nested file");
+    let nested = root.join("nested");
+    std::fs::create_dir_all(&nested).expect("create nested dir");
+    std::fs::write(nested.join("deep.txt"), b"deep").expect("write nested file");
+
+    let (name, upload, image_bytes) =
+        attachment_upload_from_path(&root).expect("a directory is accepted");
+    assert_eq!(name, "bundle");
+    assert!(
+        image_bytes.is_none(),
+        "a directory has no single preview image"
+    );
+    let waku_client::attachments::AttachmentUpload::Directory { entries } = upload else {
+        panic!("a directory must produce a Directory upload");
+    };
+
+    let mut relative = entries
+        .iter()
+        .map(|entry| entry.relative_path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    relative.sort();
+    assert_eq!(
+        relative,
+        ["nested/deep.txt", "top.txt"],
+        "every file is included, keyed relative to the dropped root"
+    );
+
+    use base64::Engine as _;
+    for entry in &entries {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&entry.data_base64)
+            .expect("each entry carries valid base64");
+        assert!(!decoded.is_empty(), "no entry may be empty");
+    }
+}
+
+/// Symlinks inside a dropped directory are skipped, not followed.
+///
+/// The recursion meets links routinely — a package tree is full of them — so
+/// this cannot be a hard error like a top-level link is. It must simply not
+/// descend, or the walk can leave the dropped tree or loop forever.
+#[cfg(unix)]
+#[test]
+fn a_symlink_inside_a_dropped_directory_is_skipped() {
+    let scratch = ScratchDir::new("dir-symlink");
+    let root = scratch.dir("tree");
+    std::fs::write(root.join("kept.txt"), b"kept").expect("write real file");
+    let outside = scratch.file("outside.txt", b"secret");
+    std::os::unix::fs::symlink(&outside, root.join("escape.txt")).expect("create symlink");
+
+    let (_, upload, _) = attachment_upload_from_path(&root).expect("the tree is accepted");
+    let waku_client::attachments::AttachmentUpload::Directory { entries } = upload else {
+        panic!("a directory must produce a Directory upload");
+    };
+    let names = entries
+        .iter()
+        .map(|entry| entry.relative_path.to_string_lossy().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["kept.txt"], "the link must not be uploaded");
+}
+
+/// A dropped directory is bounded two ways: a per-file byte budget across the
+/// whole tree, and a file-count cap.
+///
+/// Both protect the same conversion — every entry is read into memory and then
+/// base64-encoded, so an unbounded tree both exhausts memory and builds a
+/// payload the transport cannot carry.
+#[test]
+fn an_oversized_directory_is_refused_by_total_bytes_and_by_file_count() {
+    // Total bytes: several files that are individually small but together over
+    // the tree budget.
+    let scratch = ScratchDir::new("dir-bytes");
+    let root = scratch.dir("bulk");
+    let chunk = 8 * 1024 * 1024u64;
+    for index in 0..5 {
+        let path = root.join(format!("part-{index}.bin"));
+        let file = std::fs::File::create(&path).expect("create part");
+        file.set_len(chunk).expect("extend part");
+        drop(file);
+    }
+    let error = attachment_error(&root);
+    assert!(
+        error.contains("32 MB"),
+        "a tree over the byte budget must be refused: {error}"
+    );
+
+    // File count: one more file than the cap allows, each one tiny so the byte
+    // budget is nowhere near the trigger.
+    let scratch = ScratchDir::new("dir-count");
+    let many = scratch.dir("many");
+    for index in 0..=waku_client::attachments::MAX_ATTACHMENT_FILES {
+        std::fs::write(many.join(format!("f{index}.txt")), b"x").expect("write file");
+    }
+    let error = attachment_error(&many);
+    assert!(
+        error.contains(&waku_client::attachments::MAX_ATTACHMENT_FILES.to_string()),
+        "a tree over the file cap must be refused: {error}"
+    );
+}
+
+/// A path that exists but is neither a file nor a directory is refused rather
+/// than silently uploaded as empty.
+#[cfg(unix)]
+#[test]
+fn a_non_file_non_directory_attachment_is_refused() {
+    let scratch = ScratchDir::new("fifo");
+    let fifo = scratch.path().join("pipe");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo should be available");
+    if !status.success() {
+        // A platform without mkfifo is not a reason to fail the suite.
+        return;
+    }
+
+    let error = attachment_error(&fifo);
+    assert!(
+        error.contains("not a file or directory"),
+        "a fifo must be refused: {error}"
+    );
+}
+
+/// A missing path reports which path failed instead of a bare I/O error, since
+/// the message is shown to the user next to the composer.
+#[test]
+fn a_missing_attachment_names_the_path_it_could_not_read() {
+    let scratch = ScratchDir::new("missing");
+    let missing = scratch.path().join("not-there.txt");
+
+    let error = attachment_error(&missing);
+    assert!(
+        error.contains("not-there.txt"),
+        "the failure must name the path: {error}"
+    );
 }
