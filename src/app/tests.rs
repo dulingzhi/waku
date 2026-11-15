@@ -16,11 +16,11 @@ use super::{
     navigation_rail_height, navigation_rail_scale, paused_toast_duration, pop_stream_batch,
     push_transcript_activity, response_footer_message_index, response_row_turn_id,
     session_accepts_turn_output, session_is_reapable, should_refresh_branch_after_activity,
-    should_show_navigation_rail, should_show_scroll_to_bottom, task_id_from_notification_tag,
-    task_notification_tag, transcript_anchor_end_space, transcript_navigation_turns,
-    transcript_rests_at_tail, transcript_row_kinds, transcript_row_splice,
-    transcript_rows_fingerprint, widened_panel_width_for_file_editor,
-    widened_panel_width_for_review,
+    should_show_navigation_rail, should_show_scroll_to_bottom, stream_delta_kind,
+    stream_delta_text, task_id_from_notification_tag, task_notification_tag,
+    transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
+    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -1863,6 +1863,32 @@ fn model_picker_highlight_wraps_at_both_ends() {
 
     // An empty result list has nothing to land on.
     assert_eq!(next_picker_highlight(None, 0, "down"), None);
+
+    // A single row is its own neighbour in both directions. Written against
+    // the arithmetic rather than a clamp, because `min(index + 1, len - 1)`
+    // would also pass this and then break the wrap on longer lists.
+    assert_eq!(next_picker_highlight(None, 1, "down"), Some(0));
+    assert_eq!(next_picker_highlight(None, 1, "up"), Some(0));
+    assert_eq!(next_picker_highlight(Some(0), 1, "down"), Some(0));
+    assert_eq!(next_picker_highlight(Some(0), 1, "up"), Some(0));
+}
+
+/// Isolated so a sabotage of the single-row case cannot be masked by the
+/// longer-list assertions that precede it in the wrap test above.
+#[test]
+fn model_picker_highlight_stays_put_on_a_single_row() {
+    for key in ["down", "up"] {
+        assert_eq!(
+            next_picker_highlight(Some(0), 1, key),
+            Some(0),
+            "{key} on a one-row list must stay on the only row"
+        );
+        assert_eq!(
+            next_picker_highlight(None, 1, key),
+            Some(0),
+            "{key} on a one-row list must open on the only row"
+        );
+    }
 }
 
 #[test]
@@ -2153,4 +2179,443 @@ fn the_rail_draws_only_installed_providers_the_settings_left_on() {
         Some(ProviderKind::Claude),
         ProviderKind::Claude
     ));
+}
+
+// ── Streaming deltas ──────────────────────────────────────────────────────
+//
+// `stream_delta_kind` and `stream_delta_text` had no test at all. They are the
+// gate every incoming event passes through before it becomes visible text, so a
+// mistake here either swallows a provider's output or renders reasoning as
+// answer prose. `pop_stream_batch` is exercised elsewhere; these pin the pair
+// it is built on.
+
+#[test]
+fn stream_delta_kind_recognizes_exactly_the_two_streaming_events() {
+    assert_eq!(
+        stream_delta_kind(&DriverEvent::TextDelta("hi".into())),
+        Some(StreamDeltaKind::Text)
+    );
+    assert_eq!(
+        stream_delta_kind(&DriverEvent::ReasoningDelta("thinking".into())),
+        Some(StreamDeltaKind::Reasoning)
+    );
+
+    // Everything else is a boundary, not a delta: batch collection stops on
+    // these, and a `Some` here would let one batch swallow a whole turn.
+    for event in [
+        DriverEvent::TurnStarted,
+        DriverEvent::TurnParked,
+        DriverEvent::TurnFinished {
+            success: true,
+            summary: None,
+        },
+        DriverEvent::Error("boom".into()),
+        DriverEvent::ProcessExited,
+        DriverEvent::Connected {
+            provider_cursor: None,
+        },
+    ] {
+        assert_eq!(stream_delta_kind(&event), None, "{event:?}");
+    }
+}
+
+#[test]
+fn stream_delta_text_only_yields_the_matching_kind() {
+    let text = DriverEvent::TextDelta("answer".into());
+    let reasoning = DriverEvent::ReasoningDelta("thought".into());
+
+    assert_eq!(
+        stream_delta_text(&text, StreamDeltaKind::Text),
+        Some("answer")
+    );
+    assert_eq!(
+        stream_delta_text(&reasoning, StreamDeltaKind::Reasoning),
+        Some("thought")
+    );
+
+    // The mismatched pairing is the one that matters: it is what stops answer
+    // text from being committed into the reasoning block, and the reverse.
+    assert_eq!(stream_delta_text(&text, StreamDeltaKind::Reasoning), None);
+    assert_eq!(stream_delta_text(&reasoning, StreamDeltaKind::Text), None);
+    assert_eq!(
+        stream_delta_text(&DriverEvent::TurnStarted, StreamDeltaKind::Text),
+        None
+    );
+
+    // An empty delta still identifies itself; the emptiness is filtered later,
+    // so a `None` here would change when the batch may extend across one.
+    let empty = DriverEvent::TextDelta(String::new());
+    assert_eq!(stream_delta_text(&empty, StreamDeltaKind::Text), Some(""));
+}
+
+/// The fingerprint exists to answer "did the rows change?" without rebuilding
+/// them. A fingerprint that moves on identical input redraws forever; one that
+/// holds still on a real change leaves a stale transcript on screen. Both
+/// directions are pinned here — the existing mutation test only covers the
+/// second.
+#[test]
+fn the_row_fingerprint_is_deterministic_and_order_sensitive() {
+    let build = || {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        let turn_id = session.begin_turn("Build it");
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message: 1,
+            turn_id: Some(turn_id),
+            activities: vec![ActivityItem::new(
+                None,
+                ActivityKind::Command,
+                "Ran tests",
+                None,
+                true,
+            )],
+        });
+        session.push_message(MessageRole::Assistant, "Done.");
+        session.finish_active_turn(TurnStatus::Completed);
+        session
+    };
+    let fixed_id = Uuid::new_v4();
+    let with_id = || {
+        let mut session = build();
+        session.id = fixed_id;
+        for turn in &mut session.turns {
+            turn.id = Uuid::nil();
+        }
+        for message in &mut session.messages {
+            if message.turn_id.is_some() {
+                message.turn_id = Some(Uuid::nil());
+            }
+        }
+        for block in &mut session.transcript_blocks {
+            block.turn_id = Some(Uuid::nil());
+        }
+        session
+    };
+
+    // Determinism: the same session content must fingerprint identically on
+    // every call and across equal-but-distinct sessions. Ids are normalized
+    // because they are random per construction and are folded in on purpose.
+    let a = with_id();
+    let b = with_id();
+    assert_eq!(
+        transcript_rows_fingerprint(&a, &HashSet::new()),
+        transcript_rows_fingerprint(&a, &HashSet::new()),
+        "repeat calls on an unchanged session must agree"
+    );
+    assert_eq!(
+        transcript_rows_fingerprint(&a, &HashSet::new()),
+        transcript_rows_fingerprint(&b, &HashSet::new()),
+        "two sessions with equal content must agree"
+    );
+
+    // Order matters: the transcript is a sequence, so reordering two otherwise
+    // identical messages must move the fingerprint. Swapping roles keeps the
+    // multiset of folded values identical, which is what makes this a real
+    // order test rather than a content test.
+    let mut forward = with_id();
+    forward.messages[0].role = MessageRole::User;
+    forward.messages[1].role = MessageRole::Assistant;
+    let mut reversed = forward.clone();
+    reversed.messages[0].role = MessageRole::Assistant;
+    reversed.messages[1].role = MessageRole::User;
+    assert_ne!(
+        transcript_rows_fingerprint(&forward, &HashSet::new()),
+        transcript_rows_fingerprint(&reversed, &HashSet::new()),
+        "reordering two messages must change the fingerprint"
+    );
+
+    // Session identity is part of the fingerprint: two projects' sessions that
+    // happen to hold the same messages must not collide, or switching between
+    // them could reuse the other's cached rows.
+    let mut other_session = with_id();
+    other_session.id = Uuid::new_v4();
+    assert_ne!(
+        transcript_rows_fingerprint(&a, &HashSet::new()),
+        transcript_rows_fingerprint(&other_session, &HashSet::new()),
+        "a different session id must not share a fingerprint"
+    );
+}
+
+/// Collision probe: sessions whose rows genuinely differ must land on
+/// different fingerprints, and sessions whose rows are identical must not.
+///
+/// The mixing is a cheap FNV-shaped fold, not a cryptographic hash, so this is
+/// not a proof of collision freedom. What it does pin is that every field the
+/// fold reads is mixed in, in a way a single-field edit cannot cancel out. A
+/// collision would surface as "the transcript changed but the UI did not
+/// redraw" — the hardest kind of bug to see, because nothing looks broken.
+///
+/// The second half pins the deliberate *non*-distinction: the fold mixes
+/// `status.is_busy()` and nothing finer, so the four busy statuses share one
+/// fingerprint. That is the point of the optimisation — they render the same
+/// working indicator — and a future change to fold the status itself would
+/// false-invalidate the cached rows on every `Working` → `Waiting` pause.
+#[test]
+fn fingerprints_separate_what_renders_differently_and_share_what_does_not() {
+    // ── Must differ: each of these changes the rows themselves. ────────────
+    let mut distinct: Vec<(&str, AgentSession)> = Vec::new();
+    for count in 0..12 {
+        let mut session = AgentSession::new(Uuid::nil(), ProviderKind::Codex);
+        session.id = Uuid::nil();
+        let turn_id = session.begin_turn("prompt");
+        for index in 0..count {
+            session.push_message(
+                if index % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
+                format!("message {index}"),
+            );
+        }
+        session.transcript_blocks.push(TranscriptBlock {
+            after_message: count.min(session.messages.len()),
+            turn_id: Some(turn_id),
+            activities: vec![ActivityItem::new(
+                None,
+                ActivityKind::Command,
+                format!("command {count}"),
+                None,
+                true,
+            )],
+        });
+        session.finish_active_turn(TurnStatus::Completed);
+        distinct.push(("growing transcript", session));
+    }
+
+    // Turn status feeding the fold is a settled/running distinction: a settled
+    // turn folds its work away, a running one keeps every row. This starts
+    // from a live turn because `finish_active_turn` only moves a running one.
+    let mut live = AgentSession::new(Uuid::nil(), ProviderKind::Codex);
+    live.id = Uuid::nil();
+    live.begin_turn("prompt");
+    live.push_message(MessageRole::Assistant, "streaming answer");
+    live.status = SessionStatus::Working;
+    for status in [TurnStatus::Running, TurnStatus::Completed] {
+        let mut session = live.clone();
+        session.turns[0].status = status;
+        distinct.push(("turn status", session));
+    }
+
+    // Busy versus settled: the working indicator row appears and disappears
+    // without any turn or message changing. One settled status is enough here;
+    // `Idle` and `Failed` are asserted to agree further down, because the fold
+    // reads `is_busy()` and both render identically.
+    let mut settled = live.clone();
+    settled.status = SessionStatus::Idle;
+    distinct.push(("settled session", settled));
+
+    // The expansion set lives outside the session and the fold reads it.
+    let expanded_probe = {
+        let mut session = distinct[1].1.clone();
+        session.id = Uuid::nil();
+        session
+    };
+    let turn_id = expanded_probe.turns[0].id;
+    assert_ne!(
+        transcript_rows_fingerprint(&expanded_probe, &HashSet::new()),
+        transcript_rows_fingerprint(&expanded_probe, &HashSet::from([turn_id])),
+        "expanding a fold must move the fingerprint"
+    );
+
+    let mut seen = std::collections::HashMap::new();
+    for (label, session) in &distinct {
+        let fingerprint = transcript_rows_fingerprint(session, &HashSet::new());
+        if let Some(previous) = seen.insert(fingerprint, *label) {
+            panic!(
+                "two transcript states with different rows shared fingerprint \
+                 {fingerprint:x}: {previous} and {label}"
+            );
+        }
+    }
+    assert!(distinct.len() >= 14, "the probe must span enough states");
+
+    // ── Must agree: these render identically, so refolding is wasted work. ──
+    let busy_fingerprints = [
+        SessionStatus::Connecting,
+        SessionStatus::Working,
+        SessionStatus::Waiting,
+        SessionStatus::Background,
+    ]
+    .map(|status| {
+        let mut session = live.clone();
+        session.status = status;
+        (
+            status,
+            transcript_rows_fingerprint(&session, &HashSet::new()),
+        )
+    });
+    let baseline = busy_fingerprints[1].1;
+    for (status, fingerprint) in busy_fingerprints {
+        assert_eq!(
+            fingerprint, baseline,
+            "{status:?} renders the same working indicator, so it must not \
+             invalidate the cached rows"
+        );
+    }
+    // ...and a settled status is never mistaken for a busy one.
+    let mut idle = live.clone();
+    idle.status = SessionStatus::Idle;
+    let settled_fingerprint = transcript_rows_fingerprint(&idle, &HashSet::new());
+    assert_ne!(
+        settled_fingerprint, baseline,
+        "settling must move the fingerprint"
+    );
+    // `Failed` is settled too: the busy check exists precisely so a driver
+    // error can drop the working indicator while its turn is still Running, and
+    // both settled statuses render that same indicator-free transcript.
+    let mut failed = live.clone();
+    failed.status = SessionStatus::Failed;
+    assert_eq!(
+        transcript_rows_fingerprint(&failed, &HashSet::new()),
+        settled_fingerprint,
+        "Idle and Failed render identically, so they must share a fingerprint"
+    );
+}
+
+/// The navigation rail's prompt preview is grapheme-truncated on purpose, so a
+/// CJK prompt or an emoji prompt must never be split into broken bytes.
+#[test]
+fn navigation_preview_snippet_never_splits_a_grapheme_cluster() {
+    // Grapheme counting is the whole point: `chars().take()` and byte slicing
+    // both cut these apart, and the rail then shows a replacement glyph.
+    let emoji = "😀😀😀😀😀";
+    assert_eq!(navigation_preview_snippet(emoji, 3), "😀😀😀…");
+    assert_eq!(
+        navigation_preview_snippet("👨‍👩‍👧‍👦", 1),
+        "👨‍👩‍👧‍👦",
+        "a ZWJ family emoji is one grapheme and must survive whole"
+    );
+
+    // CJK is one grapheme per character: cutting at 5 keeps exactly 5.
+    assert_eq!(navigation_preview_snippet("中文测试内容", 5), "中文测试内…");
+    assert_eq!(
+        navigation_preview_snippet("中文测试内容", 6),
+        "中文测试内容"
+    );
+
+    // A combining mark rides with its base character.
+    assert_eq!(
+        navigation_preview_snippet("e\u{0301}e\u{0301}e\u{0301}", 2),
+        "e\u{0301}e\u{0301}…"
+    );
+
+    // Short text is returned as-is, and whitespace is collapsed first so the
+    // limit counts visible graphemes rather than formatting.
+    assert_eq!(navigation_preview_snippet("short", 20), "short");
+    assert_eq!(navigation_preview_snippet("a\n\tb   c", 20), "a b c");
+    assert_eq!(navigation_preview_snippet("", 5), "");
+
+    // The ellipsis is appended on truncation only, never when the text lands
+    // exactly on the limit.
+    assert_eq!(navigation_preview_snippet("abcde", 5), "abcde");
+    assert_eq!(navigation_preview_snippet("abcdef", 5), "abcde…");
+    // A zero limit still yields a marker rather than an empty label.
+    assert_eq!(navigation_preview_snippet("anything", 0), "…");
+}
+
+/// `compact_driver_error` is displayed verbatim, so truncation has to be
+/// character-safe: a mid-CJK cut would render a replacement glyph in the error
+/// banner, which reads as a second failure.
+#[test]
+fn compact_driver_error_truncates_on_character_boundaries() {
+    let long_cjk = "错".repeat(1_000);
+    let compact = compact_driver_error(&long_cjk);
+    assert_eq!(compact.chars().count(), 800);
+    assert!(compact.ends_with('…'));
+    assert!(compact.chars().all(|ch| ch == '错' || ch == '…'));
+    // The truncation must count characters, not bytes: 800 characters of CJK
+    // are 2400 bytes, so a byte-sliced implementation would panic or shorten.
+    assert!(compact.len() > 800);
+
+    // Multibyte content shorter than the budget is untouched.
+    let short_cjk = "第一行\n第二行";
+    assert_eq!(compact_driver_error(short_cjk), short_cjk);
+}
+
+// ── Remaining formatting boundaries ───────────────────────────────────────
+
+/// The existing duration tests stop at representative values; these pin the
+/// exact boundaries where the unit changes, because an off-by-one there shows
+/// "60 seconds" where "1 minute" belongs.
+#[test]
+fn duration_labels_change_units_exactly_at_their_boundaries() {
+    assert_eq!(format_worked_duration(0), "0 seconds");
+    assert_eq!(format_worked_duration(59), "59 seconds");
+    assert_eq!(format_worked_duration(3_599), "59 minutes 59 seconds");
+    assert_eq!(format_worked_duration(3_600), "1 hour");
+    assert_eq!(format_worked_duration(86_400), "24 hours");
+    // Singulars, which the pluralized cases never reach.
+    assert_eq!(format_worked_duration(1), "1 second");
+    assert_eq!(format_worked_duration(120), "2 minutes");
+
+    assert_eq!(format_working_elapsed(0), "0s");
+    assert_eq!(format_working_elapsed(59), "59s");
+    assert_eq!(format_working_elapsed(3_599), "59m 59s");
+    assert_eq!(format_working_elapsed(3_600), "1h");
+    assert_eq!(format_working_elapsed(86_400), "24h");
+}
+
+/// Whether foreground output may adopt the running turn. The existing test
+/// covers the `Connecting` recovery path only; the guard that rejects every
+/// non-busy or turnless session is what keeps stray output from opening one.
+#[test]
+fn only_a_busy_session_with_a_running_turn_accepts_output() {
+    let session = || {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+        session.begin_turn("go");
+        session
+    };
+
+    // No running turn: busy status alone is not enough.
+    let mut turnless = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    turnless.status = SessionStatus::Working;
+    assert!(turnless.active_turn_id().is_none());
+    assert!(!session_accepts_turn_output(&mut turnless));
+
+    // Every settled status refuses, and the refusal leaves no trace.
+    for status in [SessionStatus::Idle, SessionStatus::Failed] {
+        let mut candidate = session();
+        candidate.status = status;
+        assert!(
+            !session_accepts_turn_output(&mut candidate),
+            "{status:?} must not accept turn output"
+        );
+        assert_eq!(candidate.status, status, "a refusal must not retag status");
+        assert!(
+            !candidate.turns[0].provider_turn_started,
+            "a refusal must not claim the provider started"
+        );
+    }
+
+    // Every busy status accepts, keeps the turn id, and marks the provider as
+    // started so a later Cmd-Enter stops queueing.
+    for status in [
+        SessionStatus::Connecting,
+        SessionStatus::Working,
+        SessionStatus::Waiting,
+        SessionStatus::Background,
+    ] {
+        let mut candidate = session();
+        candidate.status = status;
+        let turn_id = candidate.active_turn_id();
+        assert!(
+            session_accepts_turn_output(&mut candidate),
+            "{status:?} must accept turn output"
+        );
+        assert_eq!(candidate.active_turn_id(), turn_id);
+        assert!(candidate.turns[0].provider_turn_started);
+        // Only `Connecting` is upgraded to `Working`; the other busy statuses
+        // are left alone because they say something `Working` does not —
+        // `Waiting` is a provider pause, `Background` is detached work. Turning
+        // either into `Working` would lose the pause the user is meant to see.
+        let expected = if status == SessionStatus::Connecting {
+            SessionStatus::Working
+        } else {
+            status
+        };
+        assert_eq!(
+            candidate.status, expected,
+            "{status:?} must keep its meaning"
+        );
+    }
 }
