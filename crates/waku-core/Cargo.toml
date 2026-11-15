@@ -14,7 +14,18 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
 dirs = "6.0"
+# The daemon's long-lived signing key, and the X25519 half of the relay's
+# key agreement. Both are dalek so the crate graph holds one curve25519
+# implementation rather than two; `ed25519-dalek` already pulls
+# `curve25519-dalek` in for the updater.
+# `rand_core` is what `SigningKey::generate` needs; `zeroize` (on by default)
+# wipes the seed on drop.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 nucleo-matcher = "0.3"
+# The `rand_core` both dalek crates are built against (0.6), so `OsRng` from it
+# is the type their `random_from_rng` signatures accept. A 0.9 `OsRng` is a
+# different type and will not compile against them.
+rand_core = { version = "0.6", features = ["getrandom"] }
 parking_lot = "0.12"
 rust-i18n = "4"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -29,6 +40,16 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 url = "2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 waku-protocol = { path = "../waku-protocol" }
+# `static_secrets` supplies `StaticSecret`, which a key that outlives one
+# connection needs; `zeroize` makes the private half wipe itself on drop;
+# `getrandom` is what `StaticSecret::random()` needs — it draws from
+# `rand_core::OsRng`, whose `getrandom` feature is off by default.
+x25519-dalek = { version = "2", default-features = false, features = [
+    "static_secrets",
+    "zeroize",
+    "getrandom",
+] }
+zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1971,6 +1971,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
  "subtle",
@@ -8680,10 +8681,12 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "dirs",
+ "ed25519-dalek",
  "libc",
  "nucleo-matcher",
  "objc2-foundation 0.3.2",
  "parking_lot",
+ "rand_core 0.6.4",
  "rusqlite",
  "rust-i18n",
  "serde",
@@ -8699,6 +8702,8 @@ dependencies = [
  "waku-client",
  "waku-protocol",
  "windows-sys 0.61.2",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -9921,6 +9926,17 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "x25519-dalek"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core 0.6.4",
+ "zeroize",
+]
 
 [[package]]
 name = "xattr"

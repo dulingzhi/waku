@@ -135,7 +135,55 @@
 - [ ] 震动反馈次数（已改成每个操作一次，确认没有多余）
 - [ ] Alert 与 native header menu 的层级遮挡
 
-## 记录方式
+## 五、daemon 身份密钥（relay 加密的基础）
+
+`crates/waku-core/src/daemon_identity.rs` 目前没有任何调用者——它只是被写出来并通过了单测，daemon 还没有生成或使用身份。
+
+### 5.1 Windows 上 `identity.key` 的访问控制
+
+密钥落在 `~/.waku/identity.key`。unix 上写文件时设成 `0600`；**Windows 上 `restrict_file_to_owner` 是空操作**，理由是「`~/.waku/` 继承的 profile ACL 已经限制到本人」。这个理由**没有验证过**，需要实测。
+
+用管理员 PowerShell 查实际 ACL：
+
+```powershell
+# 1. 先让 daemon 生成一次密钥（或手工建一个占位文件）
+Get-Acl "$env:USERPROFILE\.waku" | Format-List
+
+# 2. 看关键项：是否只有自己 + SYSTEM + Administrators
+(Get-Acl "$env:USERPROFILE\.waku").Access |
+  Select-Object IdentityReference, FileSystemRights, AccessControlType |
+  Format-Table -AutoSize
+
+# 3. 文件的 ACL（可能与目录不同）
+(Get-Acl "$env:USERPROFILE\.waku\identity.key").Access |
+  Select-Object IdentityReference, FileSystemRights |
+  Format-Table -AutoSize
+```
+
+判断标准：
+
+- [ ] 目录 ACL 里**没有** `BUILTIN\Users`（或 `Authenticated Users`）的读取项
+- [ ] 文件 ACL 同样只含 `用户名`、`SYSTEM`、`Administrators`
+- [ ] 用**另一个非管理员账户**尝试 `Get-Content $env:USERPROFILE\.waku\identity.key`，应当被拒绝
+
+如果第三项能读到内容，说明继承 ACL 比预期宽松，**必须改成显式设 ACL**（需要给 `windows-sys` 加 `Win32_Security` 特性并调用 `SetNamedSecurityInfo`）。
+
+### 5.2 密钥不被静默替换
+
+- [ ] 手工把 `identity.key` 改成一个无效的 JSON，重启 daemon，确认**报错而不是自动生成新密钥**
+- [ ] 确认原文件仍在原处（没有被删除或重命名）
+- [ ] 恢复正确内容后能正常启动
+
+**为什么重要**：静默重新生成会让所有已配对客户端验签失败，而且用户不会知道原因。
+
+### 5.3 unix 权限位
+
+CI 上 `the_identity_file_is_owner_only` 这条测试会跑：
+
+- [ ] macOS / Ubuntu CI 上该测试通过（`0600`）
+- [ ] 本地 Windows 上该测试被 `#[cfg(unix)]` 跳过（预期行为，不是缺失）
+
+**记录方式**
 
 每条打勾或记录现象。出问题时报给我：**哪个功能、什么现象、能否复现**。
 

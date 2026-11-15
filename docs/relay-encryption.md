@@ -95,6 +95,42 @@ implementation to review, all to provide properties this shape already has.
 The pieces are smaller and easier to check: X25519, HKDF, ChaCha20-Poly1305, and
 one signature verification.
 
+## Key storage
+
+The daemon's identity lives at `~/.waku/identity.key` as versioned JSON:
+
+```json
+{"version": 1, "x25519_secret": "<base64>", "ed25519_secret": "<base64>"}
+```
+
+Versioned rather than raw bytes so rotation can add fields later without a
+format break, and `deny_unknown_fields` so a newer format is refused rather than
+half-understood.
+
+**A missing file generates; an unreadable one is an error.** That distinction is
+the whole point of the module's error type: a corrupt identity file must never
+be silently replaced, because replacing it invalidates every client that ever
+paired with this daemon, and nothing on screen would explain why.
+
+The write path never stages a temporary file: the target is claimed with an
+exclusive create (`O_EXCL` on unix, `CREATE_NEW` on Windows) and the key is
+written straight into it, owner-only from the moment the inode exists rather
+than chmodded afterwards. A crash can therefore leave either the previous
+identity intact or a zero-length file that the next start rejects as corrupt —
+never a complete key at permissive modes, which is what a create-chmod-rename
+sequence invites.
+
+Concurrent first starts are the other case: two daemons generating at once once
+meant the later rename overwrote the earlier identity, silently invalidating
+every client the first one paired with. Because the create is exclusive, exactly
+one writer wins the name and the loser gets `AlreadyExists` and *loads* what
+won rather than replacing it — so both processes end up holding the same
+identity, and the key on disk is the one a client will pair against next.
+
+A `.tmp` file from the older build is still removed on load: that build could
+crash between create and rename, leaving a complete private key at whatever
+mode its umask allowed.
+
 ## Dependencies, and what they are worth
 
 Three crates are added, plus three promoted from the tree. The dalek family
