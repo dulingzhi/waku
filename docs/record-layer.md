@@ -23,8 +23,20 @@ before they reach the socket.
 
 **The socket carries binary from the first frame.** There is no negotiation
 phase in which JSON is acceptable, because a phase like that is a downgrade
-window. The choice is made in the WebSocket subprotocol header, before any frame
-is sent.
+window. The first frame is `client_hello` and every frame after it is a record;
+a text frame at any point ends the connection.
+
+An earlier draft of this section said the choice is made in a WebSocket
+subprotocol header. It is not, and the implementation never did: a header is
+negotiated by middleware that has already seen the request, and the frame type
+is what actually decides. A client that predates this protocol sends a text
+frame, and the daemon recognises it there rather than by anything in the
+handshake headers.
+
+That old client is not left guessing. The daemon answers its first text frame
+with one plaintext `Rejected` explaining that an encrypted connection is
+required, and closes. That frame is write-only and starts no session: it is an
+error message, not a fallback.
 
 ## The handshake
 
@@ -33,30 +45,53 @@ One round trip, no state machine.
 1. **The client** generates an ephemeral X25519 key pair, and sends:
 
    ```
-   client_hello = ephemeral_public (32 bytes)
+   client_hello = client_static_public (32) || client_ephemeral_public (32)
    ```
+
+   The client's **static** public key travels here. It is not an identity
+   credential — a client is never authenticated — but it is what makes the
+   session key depend on a secret only that client holds, and it is what lets
+   the daemon compute the `bound` agreement below. The client must persist this
+   key across connections; losing it only means re-pairing.
 
 2. **The daemon** generates its own ephemeral pair, computes the shared secrets,
    and replies:
 
    ```
-   server_hello = server_ephemeral_public (32) || signature (64)
+   server_hello = daemon_x25519_public (32) || daemon_ed25519_public (32)
+                  || server_ephemeral_public (32) || signature (64)
    ```
 
-   The signature covers a transcript hash: the protocol name as bytes, both
-   ephemeral public keys, the daemon's static X25519 public key, and a label
-   string. The label is what stops a signature from one context being replayed
-   into another.
+   Both of the daemon's public keys travel here: the client needs the X25519 one
+   to complete the agreements and hash the transcript, and the Ed25519 one to
+   verify the signature.
 
-3. **Both sides** derive the session key:
+   The signature covers a transcript hash: the protocol name as bytes, all four
+   public keys (client static and ephemeral, server ephemeral, daemon static),
+   and a label string. Binding all of them means a signature from one session
+   cannot be lifted into another.
+
+3. **Both sides** derive the session key from three agreements:
 
    ```
-   shared   = X25519(ephemeral, other_ephemeral)   // RFC 7748, all-zero rejected
-   bound    = X25519(static, other_ephemeral)      // proves the daemon's identity
-   key_seed = HKDF-SHA256(salt = transcript_hash, ikm = shared || bound)
+   ee = X25519(ephemeral_client, ephemeral_server)   // forward secrecy
+   se = X25519(static_client,    ephemeral_server)   // the client holds static_c
+   es = X25519(ephemeral_client, static_server)      // the daemon holds static_s
+   ikm      = ee || se || es                         // fixed order
+   key_seed = HKDF-SHA256(salt = transcript_hash, ikm = ikm)
    ```
 
-   Two directions, two keys:
+   **Why this exact set, and why no static-static `ss`.** `ss = X25519(static_c,
+   static_s)` is deliberately absent: including it would mean that a leak of
+   either static key decrypts every recorded session, destroying the forward
+   secrecy `ee` exists to provide. `ee` alone would give secrecy but no
+   authentication. `es` is what proves the peer holds the daemon's static key,
+   which is the authentication this scheme relies on; `se` adds the weaker
+   statement that the peer holds the client's static key.
+
+   All three are computable by both sides — Diffie-Hellman is symmetric, so
+   `X25519(a, B) == X25519(b, A)` — which is why the concatenation matches. Two
+   directions, two keys:
 
    ```
    client_to_server = HKDF(key_seed, info = "c2s")
@@ -67,9 +102,10 @@ One round trip, no state machine.
    attacker who can reorder frames reflect a peer's own record back at it, and
    it would decrypt.
 
-4. **A client that has paired before** verifies the signature against the
-   Ed25519 key it stored. One that has not has nothing to compare — see the
-   pairing code, which carries a fingerprint of that key.
+4. **A client that has paired before** checks `daemon_ed25519_public` against the
+   key it stored, and refuses before even verifying the signature if it differs.
+   One that has not has nothing to compare — see the pairing code, which carries
+   a fingerprint of that key.
 
 **Why both `shared` and `bound` go into the seed.** `shared` alone gives forward
 secrecy but no authentication: any relay could run its own ephemeral exchange
@@ -101,6 +137,17 @@ already forbids.
 
 **The version binding is load-bearing**, because it stops a record from one
 protocol version being accepted by a connection speaking another.
+
+The protocol version moved from 7 to 8 with this change, and that is the
+upgrade cost rather than a detail: a client built against 7 cannot connect to a
+daemon built against 8. It fails at the associated data, which means the
+symptom is "record authentication failed" rather than a version message, so the
+daemon also checks `Hello.protocol_version` after the handshake and rejects a
+mismatch there with something readable.
+
+The three clients have to ship together. `packages/waku-client` is shared by the
+web and mobile apps, so a desktop release that moved the daemon to 8 leaves both
+of them unable to connect until they ship the same version.
 
 **The direction prefix in the nonce is also a second line.** Directions already
 use different keys, so a record cannot be reflected across them regardless of

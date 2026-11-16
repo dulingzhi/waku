@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PROTOCOL_VERSION, WakuClient, type WebSocketLike } from "@waku/client";
+import { ed25519, x25519 } from "@noble/curves/ed25519.js";
+import { agreementBytes, Opener, Sealer, SessionKeys, transcriptHash, SERVER_HELLO_LEN } from "@waku/client/record";
 
 import { DaemonLink, type DaemonLinkOptions } from "./daemon-link";
 import { MOBILE_CATALOG } from "./i18n-catalog";
@@ -7,10 +9,19 @@ import { MOBILE_CATALOG } from "./i18n-catalog";
 /** Pin English: connection copy otherwise follows the machine language. */
 const englishCopy = (key: string) => MOBILE_CATALOG.en[key] ?? key;
 
+/**
+ * A daemon stand-in that runs the sealed handshake, so `sent` still holds
+ * plaintext protocol messages the assertions can read.
+ */
 class FakeSocket implements WebSocketLike {
   readyState = 0;
+  /** Decrypted client frames, in order. */
   sent: string[] = [];
   private listeners = new Map<string, Array<(...args: any[]) => void>>();
+  private sealer: Sealer | null = null;
+  private opener: Opener | null = null;
+  private readonly daemonX25519 = x25519.utils.randomSecretKey();
+  private readonly signingKey = ed25519.utils.randomSecretKey();
 
   addEventListener(type: "open", listener: () => void): void;
   addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
@@ -22,8 +33,14 @@ class FakeSocket implements WebSocketLike {
     this.listeners.set(type, listeners);
   }
 
-  send(data: string): void {
-    this.sent.push(data);
+  send(data: Uint8Array): void {
+    // The first frame is the client hello, in the clear; everything after it
+    // is a record this fake daemon can open.
+    if (!this.sealer) {
+      this.acceptHello(data);
+      return;
+    }
+    this.sent.push(new TextDecoder().decode(this.opener!.open(data)));
   }
 
   close(): void {
@@ -41,8 +58,12 @@ class FakeSocket implements WebSocketLike {
     this.emit("open");
   }
 
+  /** Deliver one protocol message, sealed. */
   receive(message: unknown): void {
-    this.emit("message", { data: JSON.stringify(message) });
+    if (!this.sealer) throw new Error("the daemon handshake has not run yet");
+    this.emit("message", {
+      data: this.sealer.seal(new TextEncoder().encode(JSON.stringify(message))),
+    });
   }
 
   /** Answers the most recent request with an ack. */
@@ -53,6 +74,34 @@ class FakeSocket implements WebSocketLike {
       requestId: request.requestId,
       outcome: { status: "ok", payload: { type: "ack" } },
     });
+  }
+
+  private acceptHello(clientHello: Uint8Array): void {
+    const clientStatic = clientHello.subarray(0, 32);
+    const clientEphemeral = clientHello.subarray(32, 64);
+    const daemonX25519Public = x25519.getPublicKey(this.daemonX25519);
+    const serverEphemeralSecret = x25519.utils.randomSecretKey();
+    const serverEphemeralPublic = x25519.getPublicKey(serverEphemeralSecret);
+    const transcript = transcriptHash(
+      clientStatic,
+      clientEphemeral,
+      serverEphemeralPublic,
+      daemonX25519Public,
+    );
+    const signature = ed25519.sign(transcript, this.signingKey);
+    const shared = x25519.getSharedSecret(serverEphemeralSecret, clientEphemeral);
+    const bound = x25519.getSharedSecret(serverEphemeralSecret, clientStatic);
+    const boundToDaemon = x25519.getSharedSecret(this.daemonX25519, clientEphemeral);
+    const keys = SessionKeys.derive(agreementBytes([shared, bound, boundToDaemon]), transcript);
+    this.sealer = keys.sealer("serverToClient");
+    this.opener = keys.opener("clientToServer");
+
+    const serverHello = new Uint8Array(SERVER_HELLO_LEN);
+    serverHello.set(daemonX25519Public, 0);
+    serverHello.set(ed25519.getPublicKey(this.signingKey), 32);
+    serverHello.set(serverEphemeralPublic, 64);
+    serverHello.set(signature, 96);
+    this.emit("message", { data: serverHello });
   }
 
   private emit(type: string, event?: unknown): void {
@@ -132,8 +181,15 @@ function fixture(options: Partial<DaemonLinkOptions> = {}) {
   return { clock, sockets, client, link, phases };
 }
 
-function handshake(socket: FakeSocket): void {
+/**
+ * Drive the sealed handshake to completion.
+ *
+ * Asynchronous because the client decodes incoming frames through a promise:
+ * the daemon's reply cannot be delivered in the same tick as `open()`.
+ */
+async function handshake(socket: FakeSocket): Promise<void> {
   socket.open();
+  await settle();
   socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
 }
 
@@ -141,7 +197,7 @@ describe("DaemonLink", () => {
   test("retries at once when a live connection drops, then backs off", async () => {
     const { clock, sockets, link, phases } = fixture();
     const opened = link.open();
-    handshake(sockets[0]!);
+    await handshake(sockets[0]!);
     expect(await opened).toBe(true);
     expect(link.state).toMatchObject({ phase: "connected", connections: 1, outage: null });
 
@@ -177,7 +233,7 @@ describe("DaemonLink", () => {
     await settle();
     expect(link.state.outage).toMatchObject({ attempts: 2, nextRetryAt: clock.now + 1_500 });
     await clock.advance(1_500);
-    handshake(sockets[3]!);
+    await handshake(sockets[3]!);
     await settle();
     expect(link.state).toMatchObject({ phase: "connected", connections: 2, outage: null });
     expect(phases).toEqual(["connecting", "connected", "reconnecting", "connected"]);
@@ -202,6 +258,8 @@ describe("DaemonLink", () => {
     const { clock, sockets, link } = fixture();
     const opened = link.open();
     sockets[0]!.open();
+    await settle();
+    // A rejection arrives through the sealed channel, after the handshake.
     sockets[0]!.receive({ type: "rejected", message: "authentication failed" });
     expect(await opened).toBe(false);
     expect(link.state.phase).toBe("error");
@@ -236,7 +294,7 @@ describe("DaemonLink", () => {
     const opened = link.open();
     const again = link.retryNow();
     expect(sockets).toHaveLength(1);
-    handshake(sockets[0]!);
+    await handshake(sockets[0]!);
     expect(await opened).toBe(true);
     expect(await again).toBe(true);
     expect(link.state.connections).toBe(1);
@@ -263,7 +321,7 @@ describe("DaemonLink", () => {
   test("a drop in the background waits for the foreground", async () => {
     const { clock, sockets, link } = fixture();
     const opened = link.open();
-    handshake(sockets[0]!);
+    await handshake(sockets[0]!);
     await opened;
     link.setActive(false);
     sockets[0]!.fail("Software caused connection abort");
@@ -277,7 +335,7 @@ describe("DaemonLink", () => {
   test("probes a quiet connection when the app returns and drops one that stays silent", async () => {
     const { clock, sockets, link } = fixture({ probeTimeoutMs: 5, freshnessMs: 5_000 });
     const opened = link.open();
-    handshake(sockets[0]!);
+    await handshake(sockets[0]!);
     await opened;
 
     link.setActive(false);
@@ -301,7 +359,7 @@ describe("DaemonLink", () => {
   test("a recent message makes the foreground probe unnecessary", async () => {
     const { clock, sockets, link } = fixture({ freshnessMs: 5_000 });
     const opened = link.open();
-    handshake(sockets[0]!);
+    await handshake(sockets[0]!);
     await opened;
     link.setActive(false);
     clock.now += 1_000;
@@ -313,7 +371,7 @@ describe("DaemonLink", () => {
   test("an answered probe keeps the connection", async () => {
     const { clock, sockets, link } = fixture({ probeTimeoutMs: 50, freshnessMs: 5_000 });
     const opened = link.open();
-    handshake(sockets[0]!);
+    await handshake(sockets[0]!);
     await opened;
     link.setActive(false);
     clock.now += 10_000;
@@ -327,7 +385,7 @@ describe("DaemonLink", () => {
   test("heartbeats only after the connection has been idle", async () => {
     const { clock, sockets, link } = fixture({ heartbeatIntervalMs: 1_000 });
     const opened = link.open();
-    handshake(sockets[0]!);
+    await handshake(sockets[0]!);
     await opened;
     expect(clock.pending).toEqual([1_000]);
 

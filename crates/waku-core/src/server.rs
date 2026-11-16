@@ -17,12 +17,14 @@ use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket, accept_hdr_with_config};
 use uuid::Uuid;
 
+use crate::daemon_identity::DaemonIdentity;
 use crate::model::{AgentSession, Project, ProviderKind, SessionStatus};
 use crate::protocol::MAX_WIRE_MESSAGE_BYTES;
 use crate::protocol::{
     ClientMessage, Command, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
     ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireDriverEvent,
 };
+use waku_protocol::sealed::{AcceptError, SealedConnection};
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -558,6 +560,7 @@ impl RequestDispatcher {
 pub fn serve(
     listener: TcpListener,
     token: String,
+    identity: Arc<DaemonIdentity>,
     backend: Arc<dyn Backend>,
     shutdown: Arc<AtomicBool>,
     options: ServerOptions,
@@ -582,6 +585,7 @@ pub fn serve(
                 }
                 let connection_permit = ConnectionPermit(active_connections.clone());
                 let token = token.clone();
+                let identity = identity.clone();
                 let dispatcher = dispatcher.clone();
                 let hub = hub.clone();
                 let shutdown = shutdown.clone();
@@ -590,9 +594,9 @@ pub fn serve(
                     .name("waku-daemon-connection".into())
                     .spawn(move || {
                         let _connection_permit = connection_permit;
-                        if let Err(error) =
-                            handle_connection(stream, &token, dispatcher, hub, shutdown, &options)
-                        {
+                        if let Err(error) = handle_connection(
+                            stream, &token, &identity, dispatcher, hub, shutdown, &options,
+                        ) {
                             eprintln!("waku-daemon connection ended: {error:#}");
                         }
                     })
@@ -615,6 +619,7 @@ pub fn serve(
 fn handle_connection(
     stream: TcpStream,
     expected_token: &str,
+    identity: &DaemonIdentity,
     dispatcher: Arc<RequestDispatcher>,
     hub: Arc<Hub>,
     shutdown: Arc<AtomicBool>,
@@ -629,7 +634,7 @@ fn handle_connection(
         .max_message_size(Some(MAX_HANDSHAKE_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_HANDSHAKE_MESSAGE_BYTES));
     let allowed_origins = options.allowed_origins.clone();
-    let mut socket = accept_hdr_with_config(
+    let socket = accept_hdr_with_config(
         stream,
         move |request: &HandshakeRequest, response: HandshakeResponse| {
             validate_handshake(request, response, &allowed_origins)
@@ -637,7 +642,41 @@ fn handle_connection(
         Some(config),
     )
     .context("WebSocket handshake failed")?;
-    let hello = read_client_message(&mut socket)?;
+    // From here on every frame is a record. A client that predates the sealed
+    // protocol sends plaintext JSON, which cannot be read as a record — so
+    // before refusing it, tell it why in the one plaintext frame this daemon
+    // will ever write. Write-only, no session, no data: an explanation, not a
+    // fallback.
+    let mut sealed = match SealedConnection::accept_as_daemon(
+        socket,
+        identity.x25519_secret(),
+        identity.ed25519_signing_key(),
+    ) {
+        Ok(sealed) => sealed,
+        Err(error) => match *error {
+            AcceptError::Plaintext(mut socket) => {
+                // Write-only, no session, no data: an explanation, not a
+                // fallback.
+                let notice = ServerMessage::Rejected {
+                    message: "this daemon requires an encrypted connection; update your client"
+                        .into(),
+                };
+                let _ = write_json(&mut socket, &notice);
+                let _ = socket.flush();
+                waku_protocol::diagnostics::log(
+                    "waku-daemon refused a plaintext client: encryption is required",
+                );
+                return Ok(());
+            }
+            AcceptError::Other(error) => {
+                return Err(error).context("sealed handshake failed");
+            }
+        },
+    };
+    let hello = match read_sealed_client_message(&mut sealed)? {
+        Some(hello) => hello,
+        None => return Ok(()),
+    };
     let resume_from = match hello {
         ClientMessage::Hello {
             protocol_version,
@@ -650,8 +689,8 @@ fn handle_connection(
         ClientMessage::Hello {
             protocol_version, ..
         } if protocol_version != PROTOCOL_VERSION => {
-            write_json(
-                &mut socket,
+            write_sealed(
+                &mut sealed,
                 &ServerMessage::Rejected {
                     message: format!(
                         "protocol {protocol_version} is unsupported; expected {PROTOCOL_VERSION}"
@@ -661,8 +700,8 @@ fn handle_connection(
             return Ok(());
         }
         ClientMessage::Hello { .. } => {
-            write_json(
-                &mut socket,
+            write_sealed(
+                &mut sealed,
                 &ServerMessage::Rejected {
                     message: "authentication failed".into(),
                 },
@@ -671,23 +710,25 @@ fn handle_connection(
         }
         _ => bail!("first daemon message was not a hello"),
     };
-    write_json(
-        &mut socket,
+    write_sealed(
+        &mut sealed,
         &ServerMessage::Hello {
             protocol_version: PROTOCOL_VERSION,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
         },
     )?;
-    socket.set_config(|config| {
+    sealed.socket_mut().set_config(|config| {
         config.max_message_size = Some(MAX_WIRE_MESSAGE_BYTES);
         config.max_frame_size = Some(MAX_WIRE_MESSAGE_BYTES);
     });
-    socket
+    sealed
+        .socket_mut()
         .get_mut()
         .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
     // A client that stops reading must not let its outgoing queue grow at the
     // daemon's event rate; a write stalled past this timeout drops it.
-    socket
+    sealed
+        .socket_mut()
         .get_mut()
         .set_write_timeout(Some(SOCKET_WRITE_STALL_TIMEOUT))?;
 
@@ -700,7 +741,7 @@ fn handle_connection(
             break;
         }
         while let Ok(message) = outgoing_rx.try_recv() {
-            if let Err(error) = write_json(&mut socket, &message) {
+            if let Err(error) = write_sealed(&mut sealed, &message) {
                 // Diagnostic: a stalled write ends the connection even when the
                 // peer is merely slow (a busy host reading late). Report whether
                 // the underlying error was one `retryable_io` would tolerate, so
@@ -713,19 +754,26 @@ fn handle_connection(
                 break 'connection;
             }
         }
-        match socket.read() {
-            Ok(Message::Text(text)) => match serde_json::from_str(text.as_ref()) {
+        // Every frame past the handshake is a record. A text frame never reaches
+        // here: `SealedConnection::read` refuses it with a named error instead of
+        // silently skipping, so a downgrade attempt fails loudly.
+        match sealed.read() {
+            Ok(None) => {
+                // A poll timeout is normal; a closed socket is caught below.
+                continue;
+            }
+            Ok(Some(plaintext)) => match serde_json::from_slice(&plaintext) {
                 Ok(ClientMessage::Request(request)) => {
                     dispatcher.dispatch(request, outgoing.clone(), subscriber_id);
                 }
                 Ok(ClientMessage::Shutdown) => {
                     if options.allow_shutdown {
-                        write_json(&mut socket, &ServerMessage::ShuttingDown)?;
+                        write_sealed(&mut sealed, &ServerMessage::ShuttingDown)?;
                         shutdown.store(true, Ordering::Release);
                         break;
                     }
-                    write_json(
-                        &mut socket,
+                    write_sealed(
+                        &mut sealed,
                         &ServerMessage::Rejected {
                             message: "daemon shutdown is managed by its service owner".into(),
                         },
@@ -733,31 +781,20 @@ fn handle_connection(
                 }
                 Ok(ClientMessage::Hello { .. }) => {}
                 Err(error) => {
-                    eprintln!("waku-daemon ignored invalid message: {error}");
+                    waku_protocol::diagnostics::log(format!(
+                        "waku-daemon connection {subscriber_id}: invalid message: {error}"
+                    ));
                 }
             },
-            Ok(Message::Close(_)) => {
-                waku_protocol::diagnostics::log(format!(
-                    "waku-daemon connection {subscriber_id}: client sent close"
-                ));
-                break;
-            }
-            Ok(Message::Ping(_)) => {
-                let _ = socket.flush();
-            }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error)) if retryable_io(&error) => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
-                waku_protocol::diagnostics::log(format!(
-                    "waku-daemon connection {subscriber_id}: socket already closed"
-                ));
-                break;
-            }
+            Err(error) if is_transport_timeout(&error) => {}
             Err(error) => {
+                // A record that fails authentication, arrives out of order, or
+                // arrives as a text frame all land here. The message never
+                // contains plaintext.
                 waku_protocol::diagnostics::log(format!(
-                    "waku-daemon connection {subscriber_id}: transport failed: {error:#}"
+                    "waku-daemon connection {subscriber_id}: sealed stream failed: {error:#}"
                 ));
-                return Err(error).context("Waku daemon WebSocket failed");
+                break 'connection;
             }
         }
     }
@@ -1073,10 +1110,6 @@ fn send_dispatch_error(
     });
 }
 
-fn retryable_io(error: &io::Error) -> bool {
-    retryable_error(error)
-}
-
 /// Whether a failed socket write was a stall (`TimedOut`/`WouldBlock`) rather
 /// than a broken connection. Diagnostic only: the write path drops the
 /// connection either way, but the distinction says whether the peer was slow
@@ -1103,15 +1136,39 @@ fn retryable_error(error: &(dyn std::error::Error + 'static)) -> bool {
     error.source().is_some_and(retryable_error)
 }
 
-fn read_client_message(socket: &mut WebSocket<TcpStream>) -> anyhow::Result<ClientMessage> {
-    loop {
-        match socket.read()? {
-            Message::Text(text) => return Ok(serde_json::from_str(text.as_ref())?),
-            Message::Ping(_) => socket.flush()?,
-            Message::Close(_) => bail!("client closed during daemon handshake"),
-            _ => {}
-        }
+/// Read one client message out of the sealed stream.
+///
+/// `Ok(None)` means the socket produced nothing this poll (a read timeout), not
+/// a disconnect: the connection loop treats them differently.
+fn read_sealed_client_message(
+    sealed: &mut SealedConnection<TcpStream>,
+) -> anyhow::Result<Option<ClientMessage>> {
+    match sealed.read()? {
+        Some(plaintext) => Ok(Some(serde_json::from_slice(&plaintext)?)),
+        None => Ok(None),
     }
+}
+
+/// Seal and write one server message.
+fn write_sealed<T: serde::Serialize>(
+    sealed: &mut SealedConnection<TcpStream>,
+    value: &T,
+) -> anyhow::Result<()> {
+    sealed.send(&serde_json::to_vec(value)?)
+}
+
+/// A read that timed out, as opposed to one that failed.
+fn is_transport_timeout(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+            )
+        })
+    })
 }
 
 fn write_json<S: io::Read + io::Write, T: serde::Serialize>(
@@ -1230,6 +1287,105 @@ mod tests {
         ));
     }
 
+    /// Every connection must run on its own keys.
+    ///
+    /// Two successful handshakes alone would not show that: a daemon that
+    /// reused one session key would also complete both. So each connection
+    /// fingerprints its own key and the test asserts the fingerprints differ,
+    /// which fails if either ephemeral side is reused.
+    #[test]
+    fn two_connections_do_not_share_a_session_key() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(DaemonIdentity::generate()),
+                Arc::new(TaskStateBackend::default()),
+                server_shutdown,
+                ServerOptions::default(),
+            )
+            .unwrap()
+        });
+
+        let mut fingerprints = Vec::new();
+        for attempt in 0..2 {
+            let client = DaemonClient::connect(&address.to_string(), "secret".into()).unwrap();
+            assert!(
+                matches!(
+                    client
+                        .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+                        .unwrap(),
+                    ResponsePayload::TaskState { .. }
+                ),
+                "connection {attempt} did not complete a round trip"
+            );
+            fingerprints.push(client.session_key_fingerprint());
+            client.shutdown();
+        }
+
+        assert_ne!(
+            fingerprints[0], fingerprints[1],
+            "both connections derived the same session key, so a key was reused"
+        );
+
+        shutdown.store(true, Ordering::Release);
+        let _ = server.join();
+    }
+
+    /// A client that speaks the pre-encryption protocol gets one plaintext
+    /// explanation and then a close — not a hang.
+    #[test]
+    fn a_plaintext_client_is_told_to_update_and_then_dropped() {
+        use tungstenite::Message;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve(
+                listener,
+                "secret".into(),
+                Arc::new(DaemonIdentity::generate()),
+                Arc::new(TaskStateBackend::default()),
+                server_shutdown,
+                ServerOptions::default(),
+            )
+            .unwrap()
+        });
+
+        let (mut socket, _) = tungstenite::client::connect(format!("ws://{address}/v1")).unwrap();
+        // `Message::text` rather than `Message::Text(....into())`: with `.into()`
+        // the type inference picks `Bytes`, which builds a **binary** frame. A
+        // binary frame is read as a 64-byte `client_hello`, so the daemon would
+        // report a low-order key instead of recognising a plaintext client.
+        socket
+            .send(Message::text(
+                r#"{"type":"hello","protocolVersion":8,"token":"secret","clientId":"00000000-0000-0000-0000-000000000000","resumeFrom":[]}"#,
+            ))
+            .unwrap();
+
+        // The reply arrives rather than the connection simply vanishing: the
+        // whole point is that an old client can explain itself to its user.
+        let reply = socket
+            .read()
+            .expect("a plaintext client should be told why it was refused");
+        let Message::Text(text) = reply else {
+            panic!("expected a text rejection, got {reply:?}");
+        };
+        assert!(
+            text.contains("requires an encrypted connection"),
+            "unexpected rejection text: {text}"
+        );
+
+        shutdown.store(true, Ordering::Release);
+        let _ = server.join();
+    }
+
     #[test]
     fn websocket_task_state_changes_reach_another_client() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1240,6 +1396,7 @@ mod tests {
             serve(
                 listener,
                 "secret".into(),
+                Arc::new(DaemonIdentity::generate()),
                 Arc::new(TaskStateBackend::default()),
                 server_shutdown,
                 ServerOptions {
@@ -1364,6 +1521,7 @@ mod tests {
             serve(
                 listener,
                 "secret".into(),
+                Arc::new(DaemonIdentity::generate()),
                 Arc::new(backend),
                 server_shutdown,
                 ServerOptions {
@@ -1431,6 +1589,7 @@ mod tests {
             serve(
                 listener,
                 "secret".into(),
+                Arc::new(DaemonIdentity::generate()),
                 Arc::new(TestBackend::default()),
                 server_shutdown,
                 ServerOptions {
@@ -1501,6 +1660,7 @@ mod tests {
             serve(
                 listener,
                 "secret".into(),
+                Arc::new(DaemonIdentity::generate()),
                 Arc::new(TestBackend::default()),
                 server_shutdown,
                 ServerOptions {
@@ -1619,6 +1779,7 @@ mod tests {
                 serve(
                     listener,
                     "secret".into(),
+                    Arc::new(DaemonIdentity::generate()),
                     backend,
                     shutdown,
                     ServerOptions::default(),
@@ -1665,6 +1826,7 @@ mod tests {
                 serve(
                     replacement_listener,
                     "secret".into(),
+                    Arc::new(DaemonIdentity::generate()),
                     backend,
                     shutdown,
                     ServerOptions::default(),
@@ -1756,6 +1918,7 @@ mod tests {
             serve(
                 listener,
                 "secret".into(),
+                Arc::new(DaemonIdentity::generate()),
                 Arc::new(backend),
                 server_shutdown,
                 ServerOptions {

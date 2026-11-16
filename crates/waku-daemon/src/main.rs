@@ -84,9 +84,23 @@ fn main() -> anyhow::Result<()> {
     )
     .context("could not load daemon settings")?;
     let task_store = waku_core::persistence::StateStore::daemon(task_path);
+    // The daemon's relay identity: created on first run, read on every later
+    // one. A corrupt file is an error, never a reason to mint a new key — doing
+    // so would silently invalidate every paired client.
+    let identity_path = waku_core::daemon_identity::default_path();
+    let identity = Arc::new(
+        waku_core::daemon_identity::DaemonIdentity::load_or_generate(&identity_path)
+            .context("could not load the daemon identity")?,
+    );
+    waku_protocol::diagnostics::log(format!(
+        "waku-daemon identity loaded from {}; relay fingerprint {}",
+        identity_path.display(),
+        hex_prefix(&identity.x25519_public().to_bytes())
+    ));
     waku_core::serve(
         listener,
         token,
+        identity,
         Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?),
         shutdown,
         waku_core::ServerOptions {
@@ -94,6 +108,16 @@ fn main() -> anyhow::Result<()> {
             allow_shutdown: arguments.parent_pid.is_some(),
         },
     )
+}
+
+/// The first bytes of a public key, for a log line that must never carry a
+/// secret. Public keys are not secret; the private halves never come here.
+fn hex_prefix(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn ensure_bind_allowed(address: SocketAddr, allow_non_loopback: bool) -> anyhow::Result<()> {

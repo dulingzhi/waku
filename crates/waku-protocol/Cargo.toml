@@ -24,6 +24,10 @@ serde_json = "1.0"
 # The transcript hash and the HKDF instantiation both name SHA-256.
 sha2 = "0.10"
 similar = "3"
+# The sealed connection frames records into WebSocket messages. This is the one
+# transport-shaped piece of the crate: the record format and the frames that
+# carry it are defined together so both ends cannot disagree about them.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # ts-rs warns on every serde attribute it does not model. The ones used here,
 # such as `alias`, only widen what deserializes and leave the TypeScript shape
 # unchanged.

@@ -21,6 +21,14 @@ tungstenite = { version = "0.30", default-features = false, features = [
 url = "2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 waku-protocol = { path = "../waku-protocol" }
+# The client generates a throwaway X25519 key per connection, and pins the
+# daemon's Ed25519 key after pairing.
+ed25519-dalek = "2"
+x25519-dalek = { version = "2", default-features = false, features = [
+    "static_secrets",
+    "zeroize",
+    "getrandom",
+] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

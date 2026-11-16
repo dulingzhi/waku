@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
+import { ed25519, x25519 } from "@noble/curves/ed25519.js";
+
 import {
   WakuClient,
   WakuConnectionError,
@@ -8,11 +10,36 @@ import {
   type WebSocketLike,
 } from "./client";
 import { PROTOCOL_VERSION } from "./generated";
+import {
+  agreementBytes,
+  Opener,
+  Sealer,
+  SessionKeys,
+  transcriptHash,
+  CLIENT_HELLO_LEN,
+  SERVER_HELLO_LEN,
+  type Direction,
+} from "./record";
 
+/**
+ * A daemon stand-in that actually runs the sealed handshake.
+ *
+ * The client is now a sealed-record peer, so a fake socket that passes strings
+ * would prove nothing: every test below goes through the real handshake,
+ * real key derivation and real AEAD framing, exactly as `sealed.rs` does on
+ * the Rust side. `sent` holds the *decrypted* frames so assertions still read
+ * like protocol assertions.
+ */
 class FakeSocket implements WebSocketLike {
   readyState = 0;
+  /** Decrypted client frames, in order. */
   sent: string[] = [];
   private listeners = new Map<string, Array<(...args: any[]) => void>>();
+  private sealer: Sealer | null = null;
+  private opener: Opener | null = null;
+  private readonly daemonX25519 = x25519.utils.randomSecretKey();
+  private readonly signingKey = ed25519.utils.randomSecretKey();
+  readonly daemonEd25519Public = ed25519.getPublicKey(this.signingKey);
 
   addEventListener(type: "open", listener: () => void): void;
   addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
@@ -24,8 +51,13 @@ class FakeSocket implements WebSocketLike {
     this.listeners.set(type, listeners);
   }
 
-  send(data: string): void {
-    this.sent.push(data);
+  send(data: Uint8Array): void {
+    // The first frame the client writes is the client hello, in the clear.
+    if (!this.sealer) {
+      this.acceptHello(data);
+      return;
+    }
+    this.sent.push(new TextDecoder().decode(this.opener!.open(data)));
   }
 
   close(): void {
@@ -48,8 +80,58 @@ class FakeSocket implements WebSocketLike {
     this.emit("open");
   }
 
-  receive(message: unknown): void {
-    this.emit("message", { data: JSON.stringify(message) });
+  /** Deliver one protocol message and let the client's async decode finish. */
+  async receive(message: unknown): Promise<void> {
+    this.deliver(message);
+    await flush();
+  }
+
+  /** Deliver a raw frame as the socket would, bypassing the sealer. */
+  receiveRaw(frame: Uint8Array | string): void {
+    this.emit("message", { data: frame });
+  }
+
+  /** The daemon's sealed half of the handshake. */
+  private acceptHello(clientHello: Uint8Array): void {
+    expect(clientHello.length).toBe(CLIENT_HELLO_LEN);
+    const clientStatic = clientHello.subarray(0, 32);
+    const clientEphemeral = clientHello.subarray(32, 64);
+    const daemonX25519Public = x25519.getPublicKey(this.daemonX25519);
+    const serverEphemeralSecret = x25519.utils.randomSecretKey();
+    const serverEphemeralPublic = x25519.getPublicKey(serverEphemeralSecret);
+
+    const transcript = transcriptHash(
+      clientStatic,
+      clientEphemeral,
+      serverEphemeralPublic,
+      daemonX25519Public,
+    );
+    const signature = ed25519.sign(transcript, this.signingKey);
+
+    const shared = x25519.getSharedSecret(serverEphemeralSecret, clientEphemeral);
+    const bound = x25519.getSharedSecret(serverEphemeralSecret, clientStatic);
+    const boundToDaemon = x25519.getSharedSecret(this.daemonX25519, clientEphemeral);
+    const keys = SessionKeys.derive(
+      agreementBytes([shared, bound, boundToDaemon]),
+      transcript,
+    );
+    this.sealer = keys.sealer("serverToClient");
+    this.opener = keys.opener("clientToServer");
+
+    const serverHello = new Uint8Array(SERVER_HELLO_LEN);
+    serverHello.set(daemonX25519Public, 0);
+    serverHello.set(this.daemonEd25519Public, 32);
+    serverHello.set(serverEphemeralPublic, 64);
+    serverHello.set(signature, 96);
+    this.emit("message", { data: serverHello });
+  }
+
+  /** Seal one message to the client. */
+  deliver(message: unknown): void {
+    if (!this.sealer) throw new Error("the daemon handshake has not run yet");
+    this.emit("message", {
+      data: this.sealer.seal(new TextEncoder().encode(JSON.stringify(message))),
+    });
   }
 
   private emit(type: string, event?: unknown): void {
@@ -73,13 +155,25 @@ function fixture() {
   return { client, sockets };
 }
 
+/**
+ * Open the socket and drive the sealed handshake to completion.
+ *
+ * The handshake is asynchronous on the client (it awaits the frame to bytes),
+ * so the daemon's reply cannot be delivered in the same tick as `open()`.
+ */
 async function connect(client: WakuClient, sockets: FakeSocket[]): Promise<FakeSocket> {
   const connected = client.connect();
   const socket = sockets.at(-1)!;
   socket.open();
-  socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+  await flush();
+  await socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
   await connected;
   return socket;
+}
+
+/** Let the client's asynchronous frame decoding settle. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe("WakuClient", () => {
@@ -91,7 +185,8 @@ describe("WakuClient", () => {
     const connected = client.connect();
     const socket = sockets[0]!;
     socket.open();
-    socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await flush();
+    await socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await connected;
     socket.close();
     socket.emitClose();
@@ -105,6 +200,11 @@ describe("WakuClient", () => {
     const connected = client.connect();
     const socket = sockets[0]!;
     socket.open();
+    await flush();
+    // The client hello is a bare frame no sealer touched: by the time the
+    // sealed channel exists the socket records only decrypted client frames.
+    await socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await connected;
     expect(JSON.parse(socket.sent[0]!)).toEqual({
       type: "hello",
       protocolVersion: PROTOCOL_VERSION,
@@ -112,12 +212,10 @@ describe("WakuClient", () => {
       clientId: "00000000-0000-4000-8000-000000000001",
       resumeFrom: [],
     });
-    socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
-    await connected;
 
     const response = client.request({ type: "getSettings" });
     const request = JSON.parse(socket.sent[1]!);
-    socket.receive({
+    await socket.receive({
       type: "response",
       requestId: request.requestId,
       outcome: { status: "ok", payload: { type: "ack" } },
@@ -127,30 +225,25 @@ describe("WakuClient", () => {
 
   test("surfaces daemon errors", async () => {
     const { client, sockets } = fixture();
-    const socket = sockets[0] ?? new FakeSocket();
-    const connected = client.connect();
-    const active = sockets[0] ?? socket;
-    active.open();
-    active.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
-    await connected;
+    const active = await connect(client, sockets);
 
     const response = client.request({ type: "getSettings" });
+    // Attach the rejection handler before the error is delivered: an
+    // unawaited rejecting promise is reported as an unhandled rejection even
+    // when the test asserts on it afterwards.
+    const settled = response.catch((cause: unknown) => cause);
     const request = JSON.parse(active.sent[1]!);
-    active.receive({
+    await active.receive({
       type: "response",
       requestId: request.requestId,
       outcome: { status: "error", error: { message: "nope" } },
     });
-    await expect(response).rejects.toBeInstanceOf(WakuRpcError);
+    expect(await settled).toBeInstanceOf(WakuRpcError);
   });
 
   test("deduplicates events and resumes from the last sequence", async () => {
     const { client, sockets } = fixture();
-    const firstConnection = client.connect();
-    const first = sockets[0]!;
-    first.open();
-    first.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
-    await firstConnection;
+    const first = await connect(client, sockets);
 
     const received: number[] = [];
     client.subscribe("session", "runtime", (event) => received.push(event.sequence));
@@ -162,19 +255,20 @@ describe("WakuClient", () => {
       sequence: 4,
       event: { kind: "textDelta", payload: { text: "hi" } },
     };
-    first.receive(event);
-    first.receive(event);
+    await first.receive(event);
+    await first.receive(event);
     expect(received).toEqual([4]);
 
     client.disconnect();
     const secondConnection = client.connect();
     const second = sockets[1]!;
     second.open();
+    await flush();
+    await second.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await secondConnection;
     expect(JSON.parse(second.sent[0]!).resumeFrom).toEqual([
       { sessionId: "session", runtimeId: "runtime", epoch: "epoch-one", sequence: 4 },
     ]);
-    second.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
-    await secondConnection;
   });
 
   test("disconnect rejects an in-flight handshake and permits reconnecting", async () => {
@@ -186,7 +280,8 @@ describe("WakuClient", () => {
     const secondConnection = client.connect();
     const second = sockets[1]!;
     second.open();
-    second.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await flush();
+    await second.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await expect(secondConnection).resolves.toBeUndefined();
   });
 
@@ -207,7 +302,7 @@ describe("WakuClient", () => {
       received.push([event.epoch, event.sequence]);
     });
 
-    socket.receive({
+    await socket.receive({
       type: "event",
       sessionId: "session",
       runtimeId: "runtime",
@@ -215,7 +310,7 @@ describe("WakuClient", () => {
       sequence: 9,
       event: { kind: "textDelta", payload: null },
     });
-    socket.receive({
+    await socket.receive({
       type: "event",
       sessionId: "session",
       runtimeId: "runtime",
@@ -234,7 +329,7 @@ describe("WakuClient", () => {
     const { client, sockets } = fixture();
     const socket = await connect(client, sockets);
 
-    socket.receive({
+    await socket.receive({
       type: "event",
       sessionId: "session",
       runtimeId: "runtime",
@@ -242,7 +337,7 @@ describe("WakuClient", () => {
       sequence: 1,
       event: { kind: "textDelta", payload: "before attach" },
     });
-    socket.receive({
+    await socket.receive({
       type: "event",
       sessionId: "session",
       runtimeId: "runtime",
@@ -262,7 +357,7 @@ describe("WakuClient", () => {
     const revisions: number[] = [];
     client.subscribeTaskState((revision) => revisions.push(revision));
 
-    socket.receive({ type: "taskStateChanged", revision: 7 });
+    await socket.receive({ type: "taskStateChanged", revision: 7 });
     expect(revisions).toEqual([7]);
   });
 
@@ -303,41 +398,156 @@ test("daemonUrl pins the versioned endpoint", () => {
   expect(daemonUrl("wss://waku.example.test")).toBe("wss://waku.example.test/v1");
 });
 
-describe("WakuClient connection failures", () => {
-  async function failure(setup: (socket: FakeSocket) => void): Promise<WakuConnectionError> {
+describe("sealed transport", () => {
+  test("a plaintext text frame is refused, not skipped", async () => {
     const { client, sockets } = fixture();
     const connected = client.connect();
-    setup(sockets[0]!);
-    const error = await connected.catch((cause: unknown) => cause);
+    const socket = sockets[0]!;
+    socket.open();
+    await flush();
+    socket.receiveRaw(JSON.stringify({ type: "hello", protocolVersion: PROTOCOL_VERSION }));
+    const error = (await connected.catch((cause: unknown) => cause)) as WakuConnectionError;
+    expect(error.kind).toBe("handshake");
+    expect(error.message).toContain("expected record, got text frame");
+    expect(error.retryable).toBe(false);
+  });
+
+  test("a text frame after the handshake ends the connection", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    const closed: string[] = [];
+    client.subscribeConnectionState((state) => closed.push(state));
+
+    socket.receiveRaw("{\"type\":\"taskStateChanged\"}");
+    await flush();
+
+    expect(closed.at(-1)).toBe("disconnected");
+  });
+
+  test("every client frame after the handshake is a sealed record", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    const raw: Uint8Array[] = [];
+    // Observe the wire by wrapping the socket the fixture produced.
+    const originalSend = socket.send.bind(socket);
+    socket.send = (data: Uint8Array) => {
+      raw.push(data);
+      originalSend(data);
+    };
+
+    await client.notify({ type: "refreshBackgroundWork" });
+    expect(raw.length).toBe(1);
+    // A record is a counter, a tag and a ciphertext — never printable JSON.
+    expect(raw[0]!.length).toBeGreaterThan(8 + 16);
+    expect(new TextDecoder().decode(raw[0]!)).not.toContain("refreshBackgroundWork");
+  });
+
+  test("accepts ArrayBuffer frames, as React Native delivers them", async () => {
+    const { client, sockets } = fixture();
+    const connected = client.connect();
+    const socket = sockets[0]!;
+    socket.open();
+    await flush();
+    socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await connected;
+    expect(client.connected).toBe(true);
+  });
+
+  test("a tampered record ends the connection instead of being skipped", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    const states: string[] = [];
+    client.subscribeConnectionState((state) => states.push(state));
+
+    // A well-formed frame for the next counter, with one ciphertext byte
+    // flipped: the opener authenticates the whole record, so this cannot
+    // dispatch anything and must end the connection.
+    const tampered = new Uint8Array(8 + 4 + 16);
+    tampered[7] = 2;          // the next counter after the client's hello
+    tampered[10] = 0xff;
+    socket.receiveRaw(tampered);
+    await flush();
+
+    expect(states.at(-1)).toBe("disconnected");
+  });
+
+  test("rejects a second hello once the protocol handshake completed", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    // A replayed/duplicate hello after establishment is just another message:
+    // dispatch ignores it rather than re-running the handshake.
+    await socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "again" });
+    expect(client.connected).toBe(true);
+  });
+});
+
+describe("WakuClient connection failures", () => {
+  /**
+   * Run one connection attempt and return the failure it produced.
+   *
+   * A resolved attempt fails this helper loudly rather than returning
+   * undefined, so a test that stopped triggering its failure cannot pass by
+   * accident.
+   */
+  async function failure(
+    setup: (socket: FakeSocket) => Promise<void> | void,
+  ): Promise<WakuConnectionError> {
+    const { client, sockets } = fixture();
+    let resolved = false;
+    const connected = client.connect().then(
+      () => {
+        resolved = true;
+      },
+      (error: unknown) => error,
+    );
+    await setup(sockets[0]!);
+    const error = await connected;
+    if (resolved) throw new Error("the connection attempt was expected to fail");
     expect(error).toBeInstanceOf(WakuConnectionError);
     return error as WakuConnectionError;
   }
 
   test("types handshake failures so callers can tell what needs a person", async () => {
-    const rejected = await failure((socket) => {
+    const rejected = await failure(async (socket) => {
       socket.open();
-      socket.receive({ type: "rejected", message: "authentication failed" });
+      await flush();
+      await socket.receive({ type: "rejected", message: "authentication failed" });
     });
     expect(rejected.kind).toBe("rejected");
     expect(rejected.retryable).toBe(false);
     expect(rejected.message).toBe("daemon rejected connection: authentication failed");
 
-    const unsupported = await failure((socket) => {
+    const unsupported = await failure(async (socket) => {
       socket.open();
-      socket.receive({ type: "rejected", message: "protocol 3 is unsupported; expected 7" });
+      await flush();
+      await socket.receive({ type: "rejected", message: "protocol 3 is unsupported; expected 7" });
     });
     expect(unsupported.kind).toBe("protocol");
 
-    const mismatch = await failure((socket) => {
+    const mismatch = await failure(async (socket) => {
       socket.open();
-      socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION + 1, daemonVersion: "x" });
+      await flush();
+      await socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION + 1, daemonVersion: "x" });
     });
     expect(mismatch.kind).toBe("protocol");
     expect(mismatch.retryable).toBe(false);
 
-    const garbage = await failure((socket) => {
+    // A text frame is the pre-encryption protocol: a refusal, not a fallback.
+    const plaintext = await failure(async (socket) => {
       socket.open();
-      socket.receive({ type: "event", sessionId: "x" });
+      await flush();
+      socket.receiveRaw(JSON.stringify({ type: "hello", protocolVersion: PROTOCOL_VERSION }));
+    });
+    expect(plaintext.kind).toBe("handshake");
+    expect(plaintext.message).toContain("expected record, got text frame");
+
+    // A well-formed record whose payload is not a `hello` (nor a `rejected`)
+    // must not be skipped: the sealed channel is up, but the protocol answer
+    // is wrong.
+    const garbage = await failure(async (socket) => {
+      socket.open();
+      await flush();
+      await socket.receive({ type: "event", sessionId: "x" });
     });
     expect(garbage.kind).toBe("handshake");
 
@@ -371,7 +581,8 @@ describe("WakuClient connection failures", () => {
     const again = client.connect();
     expect(sockets).toHaveLength(2);
     sockets[1]!.open();
-    sockets[1]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await flush();
+    await sockets[1]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await again;
     expect(client.connected).toBe(true);
   });
@@ -400,13 +611,14 @@ describe("WakuClient connection failures", () => {
     expect(sockets).toHaveLength(2);
 
     sockets[1]!.open();
-    sockets[1]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await flush();
+    await sockets[1]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await reconnected!;
     expect(client.connected).toBe(true);
     const next = client.request({ type: "getSettings" });
     expect(sockets[1]!.sent).toHaveLength(2);
     const sent = JSON.parse(sockets[1]!.sent[1]!) as { requestId: string };
-    sockets[1]!.receive({
+    await sockets[1]!.receive({
       type: "response",
       requestId: sent.requestId,
       outcome: { status: "ok", payload: { type: "ack" } },
@@ -432,11 +644,12 @@ describe("WakuClient connection failures", () => {
     const connected = client.connect();
     now = 42;
     sockets[0]!.open();
-    sockets[0]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await flush();
+    await sockets[0]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
     await connected;
     expect(client.lastMessageAt).toBe(42);
     now = 43;
-    sockets[0]!.receive({ type: "taskStateChanged", revision: 1 });
+    await sockets[0]!.receive({ type: "taskStateChanged", revision: 1 });
     expect(client.lastMessageAt).toBe(43);
   });
 });

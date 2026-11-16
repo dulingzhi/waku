@@ -127,6 +127,22 @@ impl SessionKeys {
     pub fn opener(&self, incoming: Direction) -> Opener {
         Opener::new(*self.key_for(incoming), incoming)
     }
+
+    /// Seal outgoing and open incoming for **the client**.
+    pub fn client_side(&self) -> (Sealer, Opener) {
+        (
+            self.sealer(Direction::ClientToServer),
+            self.opener(Direction::ServerToClient),
+        )
+    }
+
+    /// Seal outgoing and open incoming for **the daemon**.
+    pub fn daemon_side(&self) -> (Sealer, Opener) {
+        (
+            self.sealer(Direction::ServerToClient),
+            self.opener(Direction::ClientToServer),
+        )
+    }
 }
 
 impl Drop for SessionKeys {
@@ -331,14 +347,75 @@ pub mod handshake {
     /// relay substituting its own.
     pub const SERVER_HELLO_LEN: usize = 32 + 32 + 32 + 64;
 
+    /// A type that implements nothing, so any `#[derive]` on a struct holding
+    /// it fails to compile.
+    ///
+    /// `#[derive(Clone)]` requires every field to be `Clone`; this field is not,
+    /// so the derive is rejected with `NoClone: Clone` unsatisfied. The same
+    /// trick covers `Copy`, `Debug` and `Serialize`, which is broader than a
+    /// test-only assertion crate could reach, and it costs no dependency and no
+    /// test run.
+    ///
+    /// A hand-written `impl Clone for EphemeralKey { … }` still compiles. That
+    /// is a deliberate act someone has to type out, unlike a one-word derive.
+    struct NoClone;
+
+    /// A per-connection key that must never be copied.
+    ///
+    /// `x25519_dalek::EphemeralSecret` makes "used at most once" a compile-time
+    /// guarantee, but it cannot be used here: the ephemeral key has to make
+    /// **two** agreements (against the peer's ephemeral key and against its
+    /// static key), and `EphemeralSecret::diffie_hellman(self, …)` consumes
+    /// itself on the first.
+    ///
+    /// **The compile-time guarantee, verified.** Stable Rust cannot assert a
+    /// negative trait bound, so the guard is structural: the `NoClone` field
+    /// makes `#[derive(Clone)]`, `#[derive(Copy)]`, `#[derive(Debug)]` and
+    /// `#[derive(Serialize)]` all fail to build. Verified by sabotage: adding
+    /// `#[derive(Clone)]` produces `the trait bound `NoClone: Clone` is not
+    /// satisfied` and the crate does not compile.
+    ///
+    /// What a hand-written `impl Clone` could still do is called out in
+    /// [`NoClone`]: it is deliberate, typed-out code, not a passing derive.
+    ///
+    /// Beyond the guard, the shape keeps the key out of reach: no accessor
+    /// returns the inner `StaticSecret`, [`Self::generate`] is the only
+    /// constructor, and every use goes through `diffie_hellman(&self, …)`.
+    pub struct EphemeralKey {
+        secret: StaticSecret,
+        _not_clone: NoClone,
+    }
+
+    impl EphemeralKey {
+        /// Draw a fresh key. The only constructor: there is deliberately no
+        /// `from_bytes`, because a key this type holds must originate here and
+        /// live exactly one connection.
+        pub fn generate() -> Self {
+            Self {
+                secret: StaticSecret::random(),
+                _not_clone: NoClone,
+            }
+        }
+
+        /// The public half, for sending in a hello frame.
+        pub fn public(&self) -> [u8; 32] {
+            PublicKey::from(&self.secret).to_bytes()
+        }
+
+        fn diffie_hellman(&self, their_public: &PublicKey) -> SharedSecret {
+            self.secret.diffie_hellman(their_public)
+        }
+    }
+
     /// A client's half of a handshake in progress.
     ///
     /// The static secret is supplied by the caller, which owns its storage: it
     /// outlives one connection, unlike the ephemeral one. Neither is ever
-    /// serialized.
+    /// serialized, and this struct is deliberately not `Clone` either — cloning
+    /// it would clone the ephemeral key inside.
     pub struct ClientHandshake {
         static_secret: StaticSecret,
-        ephemeral_secret: StaticSecret,
+        ephemeral_secret: EphemeralKey,
         client_static_public: [u8; 32],
         client_ephemeral_public: [u8; 32],
     }
@@ -346,17 +423,9 @@ pub mod handshake {
     impl ClientHandshake {
         /// Begin a handshake, returning the bytes to send as `client_hello`.
         pub fn start(static_secret: StaticSecret) -> (Self, Vec<u8>) {
-            // The ephemeral key is a `StaticSecret` rather than
-            // `EphemeralSecret` because it has to be used **twice**: once
-            // against the server's ephemeral key and once against the server's
-            // static key. `EphemeralSecret::diffie_hellman` consumes itself, so
-            // it can only ever make one agreement. Regenerating it per
-            // connection and never persisting it gives the same forward
-            // secrecy; the type's extra capability (serialization) is simply
-            // unused.
-            let ephemeral_secret = StaticSecret::random();
+            let ephemeral_secret = EphemeralKey::generate();
             let client_static_public = PublicKey::from(&static_secret).to_bytes();
-            let client_ephemeral_public = PublicKey::from(&ephemeral_secret).to_bytes();
+            let client_ephemeral_public = ephemeral_secret.public();
 
             let mut hello = Vec::with_capacity(CLIENT_HELLO_LEN);
             hello.extend_from_slice(&client_static_public);
@@ -460,8 +529,8 @@ pub mod handshake {
         let client_static_public = PublicKey::from(client_static);
         let client_ephemeral_public = PublicKey::from(client_ephemeral);
 
-        let ephemeral_secret = StaticSecret::random();
-        let server_ephemeral_public = PublicKey::from(&ephemeral_secret).to_bytes();
+        let ephemeral_secret = EphemeralKey::generate();
+        let server_ephemeral_public = ephemeral_secret.public();
         let daemon_x25519_public = PublicKey::from(daemon_x25519_secret).to_bytes();
         let daemon_ed25519_public = daemon_signing_key.verifying_key().to_bytes();
 
@@ -976,5 +1045,43 @@ mod tests {
         // Ed25519 identity: a client is not authenticated.
         assert!(daemon_keys.peer_key().is_some());
         assert_ne!(peer, [0_u8; 32]);
+    }
+
+    /// Documents the invariant that `EphemeralKey` and `ClientHandshake` are
+    /// deliberately **not** `Clone` — and, honestly, that nothing enforces it.
+    ///
+    /// Stable Rust cannot assert a negative trait bound, and adding a helper
+    /// crate for one assertion is not worth a new dependency. Verified by
+    /// sabotage: adding `#[derive(Clone)]` to `EphemeralKey` leaves every test
+    /// in this file passing. So the guarantee here is the code shape —
+    /// `generate()` is the only constructor, no accessor returns the inner
+    /// secret, and every use is `diffie_hellman(&self, …)` — plus review.
+    ///
+    /// What *is* tested is the property a clone would threaten: two handshakes
+    /// must not share key material.
+    #[test]
+    fn the_ephemeral_key_is_used_once_per_handshake() {
+        // Two handshakes must not share key material, which is the property
+        // `Clone` would let a future edit break.
+        let (first, first_hello) =
+            handshake::ClientHandshake::start(x25519_dalek::StaticSecret::random());
+        let (second, second_hello) =
+            handshake::ClientHandshake::start(x25519_dalek::StaticSecret::random());
+
+        assert_ne!(
+            first_hello[32..],
+            second_hello[32..],
+            "each handshake must draw its own ephemeral key"
+        );
+
+        // Both complete independently, on the same daemon identity.
+        let daemon_static = x25519_dalek::StaticSecret::random();
+        let daemon_signing = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let (server_first, _) =
+            handshake::accept(&daemon_static, &daemon_signing, &first_hello).unwrap();
+        let (server_second, _) =
+            handshake::accept(&daemon_static, &daemon_signing, &second_hello).unwrap();
+        first.finish(&server_first, None).unwrap();
+        second.finish(&server_second, None).unwrap();
     }
 }

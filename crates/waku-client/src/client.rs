@@ -8,9 +8,9 @@ use std::time::Duration;
 use anyhow::{Context as _, anyhow, bail};
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use parking_lot::Mutex;
+use tungstenite::WebSocket;
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{Message, WebSocket};
 use uuid::Uuid;
 
 use waku_protocol::MAX_WIRE_MESSAGE_BYTES;
@@ -38,6 +38,11 @@ struct ClientInner {
     task_state_subscribers: Mutex<Vec<Sender<u64>>>,
     last_sequences: Mutex<HashMap<(Uuid, Uuid), LastSequence>>,
     disconnected: AtomicBool,
+    /// What the handshake proved about the daemon, for a caller to pin.
+    daemon_signing_key: [u8; 32],
+    /// A fingerprint of this connection's session key, so a caller can tell
+    /// two connections apart without ever touching the key itself.
+    session_key_fingerprint: [u8; 32],
 }
 
 #[derive(Clone, Copy)]
@@ -53,13 +58,36 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     pub fn connect(address: &str, token: String) -> anyhow::Result<Self> {
-        Self::connect_with_resume(address, token, Vec::new())
+        Self::connect_with_identity(address, token, None)
+    }
+
+    /// Connect to a daemon, optionally pinning the signing key seen at pairing.
+    ///
+    /// `expected_ed25519` is the key a previous connection recorded. `None` is
+    /// the first-pairing case, where the pairing code's fingerprint is the check
+    /// instead; the caller can then pin whatever
+    /// [`DaemonClient::daemon_signing_key`] reports.
+    pub fn connect_with_identity(
+        address: &str,
+        token: String,
+        expected_ed25519: Option<&ed25519_dalek::VerifyingKey>,
+    ) -> anyhow::Result<Self> {
+        Self::connect_with_resume_and_identity(address, token, Vec::new(), expected_ed25519)
     }
 
     pub fn connect_with_resume(
         address: &str,
         token: String,
         resume_from: Vec<ReplayCursor>,
+    ) -> anyhow::Result<Self> {
+        Self::connect_with_resume_and_identity(address, token, resume_from, None)
+    }
+
+    pub fn connect_with_resume_and_identity(
+        address: &str,
+        token: String,
+        resume_from: Vec<ReplayCursor>,
+        expected_ed25519: Option<&ed25519_dalek::VerifyingKey>,
     ) -> anyhow::Result<Self> {
         let last_sequences = resume_from
             .iter()
@@ -81,8 +109,21 @@ impl DaemonClient {
             tungstenite::client::connect_with_config(url.as_str(), Some(config), 3)
                 .context("could not connect to Waku daemon")?;
         set_client_read_timeout(&mut socket, Some(Duration::from_secs(5)))?;
-        write_json(
-            &mut socket,
+        // The client's static key is generated per connection and never
+        // persisted: the daemon does not store or compare it, so there is
+        // nothing to lose by not keeping it, and no long-lived key to steal.
+        let mut sealed = waku_protocol::sealed::SealedConnection::connect_as_client(
+            socket,
+            x25519_dalek::StaticSecret::random(),
+            expected_ed25519,
+        )
+        .context("could not complete the sealed handshake")?;
+        let daemon_signing_key = sealed
+            .keys()
+            .peer_key()
+            .context("the handshake did not report the daemon's signing key")?;
+        write_sealed(
+            &mut sealed,
             &ClientMessage::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 token,
@@ -90,7 +131,7 @@ impl DaemonClient {
                 resume_from,
             },
         )?;
-        let hello = read_server_message(&mut socket)?;
+        let hello = read_sealed_server_message(&mut sealed)?;
         match hello {
             ServerMessage::Hello {
                 protocol_version, ..
@@ -103,8 +144,9 @@ impl DaemonClient {
             ServerMessage::Rejected { message } => bail!("daemon rejected connection: {message}"),
             other => bail!("daemon sent an invalid handshake response: {other:?}"),
         }
-        set_client_read_timeout(&mut socket, Some(READ_POLL_INTERVAL))?;
+        set_client_read_timeout(sealed.socket_mut(), Some(READ_POLL_INTERVAL))?;
 
+        let session_key_fingerprint = sealed.outgoing_key_fingerprint();
         let (outgoing, outgoing_rx) = unbounded();
         let inner = Arc::new(ClientInner {
             outgoing,
@@ -114,13 +156,23 @@ impl DaemonClient {
             task_state_subscribers: Mutex::new(Vec::new()),
             last_sequences: Mutex::new(last_sequences),
             disconnected: AtomicBool::new(false),
+            daemon_signing_key,
+            session_key_fingerprint,
         });
         let thread_inner = inner.clone();
         std::thread::Builder::new()
             .name("waku-daemon-client".into())
-            .spawn(move || run_client(socket, outgoing_rx, thread_inner))
+            .spawn(move || run_client(sealed, outgoing_rx, thread_inner))
             .context("could not start Waku daemon client thread")?;
         Ok(Self { inner })
+    }
+
+    /// The daemon's Ed25519 signing key, as proved by the handshake.
+    ///
+    /// A first-pairing caller pins this; every later connection passes it back
+    /// as `expected_ed25519` so a relay cannot substitute its own key.
+    pub fn daemon_signing_key(&self) -> [u8; 32] {
+        self.inner.daemon_signing_key
     }
 
     pub fn subscribe(&self, session_id: Uuid, runtime_id: Uuid) -> Receiver<SequencedEvent> {
@@ -150,6 +202,15 @@ impl DaemonClient {
 
     pub fn is_disconnected(&self) -> bool {
         self.inner.disconnected.load(Ordering::Acquire)
+    }
+
+    /// A fingerprint of this connection's session key.
+    ///
+    /// Two connections to the same daemon return different values, which is how
+    /// a test can show no key was reused. It is a sealed probe, not the key:
+    /// see [`waku_protocol::sealed::SealedConnection::outgoing_key_fingerprint`].
+    pub fn session_key_fingerprint(&self) -> [u8; 32] {
+        self.inner.session_key_fingerprint
     }
 
     pub fn unsubscribe(&self, session_id: Uuid, runtime_id: Uuid) {
@@ -257,7 +318,7 @@ fn daemon_url(address: &str) -> anyhow::Result<String> {
 }
 
 fn run_client(
-    mut socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    mut sealed: waku_protocol::sealed::SealedConnection<MaybeTlsStream<TcpStream>>,
     outgoing: Receiver<Outgoing>,
     inner: Arc<ClientInner>,
 ) {
@@ -265,21 +326,20 @@ fn run_client(
         while let Ok(message) = outgoing.try_recv() {
             match message {
                 Outgoing::Message(message) => {
-                    if write_json(&mut socket, &message).is_err() {
+                    if write_sealed(&mut sealed, &message).is_err() {
                         break 'connection;
                     }
                 }
                 Outgoing::Shutdown => {
-                    let _ = write_json(&mut socket, &ClientMessage::Shutdown);
-                    let _ = socket.flush();
+                    let _ = write_sealed(&mut sealed, &ClientMessage::Shutdown);
                     break 'connection;
                 }
             }
         }
 
-        match socket.read() {
-            Ok(Message::Text(text)) => {
-                let Ok(message) = serde_json::from_str::<ServerMessage>(text.as_ref()) else {
+        match sealed.read() {
+            Ok(Some(plaintext)) => {
+                let Ok(message) = serde_json::from_slice::<ServerMessage>(&plaintext) else {
                     continue;
                 };
                 match message {
@@ -338,14 +398,16 @@ fn run_client(
                     ServerMessage::Hello { .. } | ServerMessage::Rejected { .. } => {}
                 }
             }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Ping(_)) => {
-                let _ = socket.flush();
+            // A read timeout: the daemon has nothing to say yet. Not a
+            // disconnect.
+            Ok(None) => {}
+            // A failed record — tampered, replayed, reordered, or a text frame
+            // where a record was required — ends the connection. The error names
+            // the reason so the desktop can report something actionable.
+            Err(error) => {
+                let _ = &error;
+                break;
             }
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error)) if retryable_io(&error) => {}
-            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
-            Err(_) => break,
         }
     }
 
@@ -377,47 +439,21 @@ fn set_client_read_timeout(
     }
 }
 
-fn retryable_io(error: &io::Error) -> bool {
-    retryable_error(error)
-}
-
-fn retryable_error(error: &(dyn std::error::Error + 'static)) -> bool {
-    if let Some(error) = error.downcast_ref::<io::Error>() {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-        ) {
-            return true;
-        }
-        #[cfg(unix)]
-        if error.raw_os_error() == Some(libc::EAGAIN)
-            || error.raw_os_error() == Some(libc::EWOULDBLOCK)
-        {
-            return true;
-        }
-    }
-    error.source().is_some_and(retryable_error)
-}
-
-fn write_json<S: io::Read + io::Write, T: serde::Serialize>(
-    socket: &mut WebSocket<S>,
+/// Seal and write one client message.
+fn write_sealed<S: io::Read + io::Write, T: serde::Serialize>(
+    sealed: &mut waku_protocol::sealed::SealedConnection<S>,
     value: &T,
 ) -> anyhow::Result<()> {
-    let payload = serde_json::to_string(value)?;
-    socket.send(Message::Text(payload.into()))?;
-    Ok(())
+    sealed.send(&serde_json::to_vec(value)?)
 }
 
-fn read_server_message(
-    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+/// Read one server message during the handshake.
+fn read_sealed_server_message<S: io::Read + io::Write>(
+    sealed: &mut waku_protocol::sealed::SealedConnection<S>,
 ) -> anyhow::Result<ServerMessage> {
-    loop {
-        match socket.read()? {
-            Message::Text(text) => return Ok(serde_json::from_str(text.as_ref())?),
-            Message::Ping(_) => socket.flush()?,
-            Message::Close(_) => bail!("Waku daemon closed during handshake"),
-            _ => {}
-        }
+    match sealed.read()? {
+        Some(plaintext) => Ok(serde_json::from_slice(&plaintext)?),
+        None => bail!("Waku daemon closed during handshake"),
     }
 }
 

@@ -11,10 +11,16 @@
     "./composer-autocomplete": "./src/composer-autocomplete.ts",
     "./fuzzy-search": "./src/fuzzy-search.ts",
     "./provider-probe-cache": "./src/provider-probe-cache.ts",
+    "./record": "./src/record.ts",
     "./protocol": "./src/generated/index.ts"
   },
   "scripts": {
     "check": "tsc --noEmit -p tsconfig.json",
     "test": "bun test"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
   }
 }
