@@ -7,7 +7,8 @@ use super::settings::visible_settings_pages;
 use super::{
     ACTIVITY_PAYLOAD_PREVIEW_LINES, ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation,
     EscapeStopPress, EscapeStopTarget, NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT,
-    PendingUserInput, SessionNavigation, StreamDeltaKind, TranscriptRowKind::*,
+    PendingUserInput, SessionNavigation, StreamDeltaKind,
+    TranscriptRowKind::*,
     active_navigation_turn_index, activity_payload_preview, append_text_delta_to_session,
     assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
     compact_driver_error, disclosure_leading_space, fenced_code, fitted_file_tree_width,
@@ -17,10 +18,11 @@ use super::{
     navigation_rail_height, navigation_rail_scale, paused_toast_duration, pop_stream_batch,
     push_transcript_activity, response_footer_message_index, response_row_turn_id,
     session_accepts_turn_output, session_is_reapable, should_inline_diff,
-    should_refresh_branch_after_activity, should_show_navigation_rail, should_show_scroll_to_bottom,
-    stream_delta_kind, stream_delta_text, task_id_from_notification_tag, task_notification_tag,
-    transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
-    transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    should_refresh_branch_after_activity, should_show_navigation_rail,
+    should_show_scroll_to_bottom, stream_delta_kind, stream_delta_text,
+    task_id_from_notification_tag, task_notification_tag, transcript_anchor_end_space,
+    transcript_navigation_turns, transcript_rests_at_tail, transcript_row_kinds,
+    transcript_row_splice, transcript_rows_fingerprint,
     transcript_view::{ACTIVITY_DIFF_CACHE_LIMIT, cached_activity_diff},
     turn_activity_count, turn_changed_file_count, turn_summary_label, turn_worked_seconds,
     widened_panel_width_for_file_editor, widened_panel_width_for_review,
@@ -1156,12 +1158,7 @@ fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
-        vec![
-            Message(0),
-            TurnBlock(0),
-            Message(1),
-            ChangedFiles(turn_id),
-        ],
+        vec![Message(0), TurnBlock(0), Message(1), ChangedFiles(turn_id),],
         "an interrupted turn with no answer keeps its work visible by default"
     );
     assert_eq!(
@@ -1430,9 +1427,7 @@ fn nothing_is_hidden_by_default() {
         "with no turn collapsed, folding must hide nothing"
     );
     assert!(
-        !by_default
-            .iter()
-            .any(|row| matches!(row, TurnCollapsed(_))),
+        !by_default.iter().any(|row| matches!(row, TurnCollapsed(_))),
         "no turn may be collapsed unless the reader asked"
     );
     // Every reasoning and activity row the turn produced is present.
@@ -1469,9 +1464,7 @@ fn an_answerless_turn_still_shows_its_work() {
     let by_default = folded_transcript_row_kinds(&session, &HashSet::new());
     assert_eq!(by_default, vec![Message(0), TurnBlock(0), Message(1)]);
     assert!(
-        !by_default
-            .iter()
-            .any(|row| matches!(row, TurnCollapsed(_))),
+        !by_default.iter().any(|row| matches!(row, TurnCollapsed(_))),
         "a failed turn must show what it did: {by_default:?}"
     );
 }
@@ -1543,7 +1536,7 @@ fn navigation_anchors_are_exactly_the_user_prompts() {
     });
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
-    let second = session.begin_turn("One more thing");
+    let _second = session.begin_turn("One more thing");
     session.push_message(MessageRole::Assistant, "Also done.");
     session.finish_active_turn(TurnStatus::Completed);
 
@@ -1587,7 +1580,10 @@ fn a_failed_turn_is_labelled_as_failed() {
         !label.contains("Worked"),
         "a failed turn must not report its duration as work done: {label}"
     );
-    assert!(!label.contains("second"), "no duration in a failure label: {label}");
+    assert!(
+        !label.contains("second"),
+        "no duration in a failure label: {label}"
+    );
 
     // A completed turn still reports time, so the two outcomes stay distinct.
     let mut completed = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
@@ -1618,8 +1614,16 @@ fn a_turns_footer_counts_its_steps_and_files() {
     attach_changed_files(
         &mut session,
         vec![
-            CheckpointFile { path: "src/app.rs".into(), additions: 4, deletions: 1 },
-            CheckpointFile { path: "src/lib.rs".into(), additions: 2, deletions: 0 },
+            CheckpointFile {
+                path: "src/app.rs".into(),
+                additions: 4,
+                deletions: 1,
+            },
+            CheckpointFile {
+                path: "src/lib.rs".into(),
+                additions: 2,
+                deletions: 0,
+            },
         ],
     );
 
@@ -1633,7 +1637,10 @@ fn a_turns_footer_counts_its_steps_and_files() {
 /// the tail is all there is.
 #[test]
 fn a_command_preview_shows_its_tail_and_counts_the_rest() {
-    let output = (1..=200).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
+    let output = (1..=200)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut activity = ActivityItem::new(None, ActivityKind::Command, "Ran npm test", None, true);
     activity.output = Some(output);
     activity.complete = true;
@@ -1687,8 +1694,7 @@ fn only_a_small_two_sided_single_file_edit_opens_its_diff() {
         }
     };
     let edit = |changes: Vec<ActivityFileChange>| {
-        let mut activity =
-            ActivityItem::new(None, ActivityKind::FileChange, "Edited", None, true);
+        let mut activity = ActivityItem::new(None, ActivityKind::FileChange, "Edited", None, true);
         activity.complete = true;
         activity.file_changes = changes;
         activity
@@ -1845,7 +1851,12 @@ fn the_activity_diff_cache_is_bounded_and_cleared_per_session() {
     for switch in 0..3 {
         cache.clear();
         order.clear();
-        println!("session switch {}: cache = {}, order = {}", switch + 1, cache.len(), order.len());
+        println!(
+            "session switch {}: cache = {}, order = {}",
+            switch + 1,
+            cache.len(),
+            order.len()
+        );
         assert!(cache.is_empty(), "a session switch must release its diffs");
         assert!(order.is_empty(), "the order log must go with the cache");
     }
@@ -1872,7 +1883,11 @@ fn a_turn_states_its_stats_without_being_hovered() {
     session.finish_active_turn(TurnStatus::Completed);
     attach_changed_files(
         &mut session,
-        vec![CheckpointFile { path: "src/app.rs".into(), additions: 3, deletions: 1 }],
+        vec![CheckpointFile {
+            path: "src/app.rs".into(),
+            additions: 3,
+            deletions: 1,
+        }],
     );
 
     // Everything the always-visible stats row prints is available with no
@@ -1894,7 +1909,13 @@ fn a_failed_turn_summary_never_reports_success() {
     session.transcript_blocks.push(TranscriptBlock {
         after_message: 1,
         turn_id: Some(turn_id),
-        activities: vec![ActivityItem::new(None, ActivityKind::Command, "Ran tests", None, true)],
+        activities: vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )],
     });
     session.push_message(MessageRole::Assistant, "Partial.");
     session.finish_active_turn(TurnStatus::Failed);
@@ -1902,7 +1923,15 @@ fn a_failed_turn_summary_never_reports_success() {
     assert_eq!(turn_summary_label(&session, turn_id), "This turn failed");
     // A failed turn still shows what it did, by default.
     let rows = folded_transcript_row_kinds(&session, &HashSet::new());
-    assert_eq!(rows, vec![Message(0), TurnBlock(0), Message(1), ResponseFooter(turn_id, 1)]);
+    assert_eq!(
+        rows,
+        vec![
+            Message(0),
+            TurnBlock(0),
+            Message(1),
+            ResponseFooter(turn_id, 1)
+        ]
+    );
 }
 
 #[test]

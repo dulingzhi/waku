@@ -871,7 +871,12 @@ impl Waku {
     /// Deliberately not "show the row": every row is on screen already. The
     /// payload shows a preview (the tail of a command, its subject otherwise),
     /// and this is the reader asking for all of it.
-    pub(super) fn toggle_activity_payload(&mut self, id: Uuid, current: bool, cx: &mut Context<Self>) {
+    pub(super) fn toggle_activity_payload(
+        &mut self,
+        id: Uuid,
+        current: bool,
+        cx: &mut Context<Self>,
+    ) {
         let block_index = self
             .selected_transcript_blocks()
             .iter()
@@ -1507,11 +1512,13 @@ impl Waku {
         if turn.status == TurnStatus::Failed {
             parts.push(tr!("transcript.turn_failed").to_string());
         } else if turn.status == TurnStatus::Interrupted {
-            parts.push(tr!(
-                "transcript.you_stopped_after",
-                duration = format_worked_duration(turn_worked_seconds(turn))
-            )
-            .to_string());
+            parts.push(
+                tr!(
+                    "transcript.you_stopped_after",
+                    duration = format_worked_duration(turn_worked_seconds(turn))
+                )
+                .to_string(),
+            );
         } else {
             parts.push(
                 tr!(
@@ -1911,7 +1918,11 @@ impl Waku {
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(sp(12.5))
                             .line_height(sp(16.0))
-                            .text_color(if failed { theme.danger } else { theme.text_secondary })
+                            .text_color(if failed {
+                                theme.danger
+                            } else {
+                                theme.text_secondary
+                            })
                             .child(SharedString::from(label)),
                     )
                     .child(
@@ -2050,7 +2061,10 @@ impl Waku {
         // No group header and no disclosure: every activity row is on screen,
         // in the order it happened. The `live_group` flag survives only to let
         // a running block name what it is doing instead of summarising itself.
-        let _ = (live_group, activity_header_title(activities, live_group, live_reasoning_id));
+        let _ = (
+            live_group,
+            activity_header_title(activities, live_group, live_reasoning_id),
+        );
         let mut items = div()
             .w_full()
             .min_w_0()
@@ -2149,9 +2163,7 @@ impl Waku {
             let payload_open = self.expanded_payloads.contains(&id) || reasoning_live;
             // A small single-file edit opens its diff on sight: hiding a
             // one-line change behind a click is the complaint, not the fix.
-            let inline_diff = !payload_open
-                && reasoning.is_none()
-                && should_inline_diff(activity);
+            let inline_diff = !payload_open && reasoning.is_none() && should_inline_diff(activity);
             let failed_row = activity.failed;
             let item_focus = self.transcript_control_focus(format!("activity-item-{id}"), cx);
             // A bare row, not a card. Five tools used to cost five bordered
@@ -2690,7 +2702,7 @@ impl Waku {
             .text_color(theme.text_secondary);
         // A tail preview's held-back lines are above it, so the note leads.
         if preview.from_tail {
-            element = element.children(more.clone().map(&more_label));
+            element = element.children(more.clone().map(more_label));
         }
         element = element.child(
             div()
@@ -2700,7 +2712,7 @@ impl Waku {
                 .child(SharedString::from(preview.text.clone())),
         );
         if !preview.from_tail {
-            element = element.children(more.map(&more_label));
+            element = element.children(more.map(more_label));
         }
         element
             .on_click(cx.listener(move |this, _, _, cx| {

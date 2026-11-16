@@ -1575,9 +1575,16 @@ pub(super) fn activity_payload_preview(activity: &ActivityItem) -> Option<Activi
             return None;
         }
         let lines = output.lines().collect::<Vec<_>>();
-        let shown = lines.iter().take(ACTIVITY_PAYLOAD_PREVIEW_LINES).collect::<Vec<_>>();
+        let shown = lines
+            .iter()
+            .take(ACTIVITY_PAYLOAD_PREVIEW_LINES)
+            .collect::<Vec<_>>();
         return Some(ActivityPayloadPreview {
-            text: shown.iter().map(|line| line.to_string()).collect::<Vec<_>>().join("\n"),
+            text: shown
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
             hidden_lines: lines.len().saturating_sub(shown.len()),
             from_tail: false,
         });
