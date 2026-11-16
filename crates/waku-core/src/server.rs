@@ -628,6 +628,19 @@ impl DaemonServer {
         self.clone_for_connection().serve_socket(socket, &shutdown)
     }
 
+    /// Accept connections on `listener` until `shutdown` is set.
+    ///
+    /// The same [`DaemonServer`] also serves dialed relay connections, so a
+    /// daemon can do both: one hub, one set of sessions, whichever side a
+    /// client arrives from.
+    pub fn serve(
+        self: &std::sync::Arc<Self>,
+        listener: std::net::TcpListener,
+        shutdown: Arc<AtomicBool>,
+    ) -> anyhow::Result<()> {
+        serve_listener(listener, self, &shutdown)
+    }
+
     fn clone_for_connection(&self) -> DaemonConnection {
         DaemonConnection {
             token: self.token.clone(),

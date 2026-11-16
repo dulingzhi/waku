@@ -84,40 +84,61 @@ fn main() -> anyhow::Result<()> {
     )
     .context("could not load daemon settings")?;
     let task_store = waku_core::persistence::StateStore::daemon(task_path);
-    // The daemon's relay identity: created on first run, read on every later
-    // one. A corrupt file is an error, never a reason to mint a new key — doing
-    // so would silently invalidate every paired client.
-    let identity_path = waku_core::daemon_identity::default_path();
-    let identity = Arc::new(
-        waku_core::daemon_identity::DaemonIdentity::load_or_generate(&identity_path)
-            .context("could not load the daemon identity")?,
-    );
-    waku_protocol::diagnostics::log(format!(
-        "waku-daemon identity loaded from {}; relay fingerprint {}",
-        identity_path.display(),
-        hex_prefix(&identity.x25519_public().to_bytes())
-    ));
-    waku_core::serve(
-        listener,
-        token,
-        identity,
+
+    // The identity is the one loaded above, before readiness was announced.
+    // Loading it a second time here used to be a separate call, which meant two
+    // `load_or_generate` calls racing on a first run: both could find the file
+    // missing and both could try to create it, and the `DaemonReady` line could
+    // publish keys from a different identity than the one the server ran on.
+    let identity = Arc::new(identity);
+
+    // Read the relay configuration before the store moves into the backend:
+    // this is the only place the daemon decides whether to dial, and it is a
+    // startup decision rather than something to re-read later.
+    let configured = settings.get();
+    let relay_url = configured.relay_url.clone();
+    let relay_keep_listening = configured.relay_keep_listening;
+
+    // One `DaemonServer` serves both modes, so a client that reaches the daemon
+    // through the relay sees the same sessions, subscriptions and replay cursors
+    // as one that connects directly. Two servers would mean two hubs.
+    let server = Arc::new(waku_core::DaemonServer::new(
+        token.clone(),
+        identity.clone(),
         Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?),
-        shutdown,
         waku_core::ServerOptions {
             allowed_origins: arguments.allowed_origins.into_iter().collect(),
             allow_shutdown: arguments.parent_pid.is_some(),
         },
-    )
-}
+    ));
 
-/// The first bytes of a public key, for a log line that must never carry a
-/// secret. Public keys are not secret; the private halves never come here.
-fn hex_prefix(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let Some(relay_url) = relay_url else {
+        // No relay configured: listen and nothing else, which is the default
+        // and the mode the desktop app expects.
+        return server.serve(listener, shutdown);
+    };
+
+    // A relay is configured. Dial out, and keep listening only if asked: a
+    // relayed daemon usually sits behind the very NAT that made the relay
+    // necessary, so an extra listener is surface without a user.
+    if relay_keep_listening {
+        let for_listener = server.clone();
+        let for_listener_shutdown = shutdown.clone();
+        std::thread::Builder::new()
+            .name("waku-daemon-listener".into())
+            .spawn(move || {
+                if let Err(error) = for_listener.serve(listener, for_listener_shutdown) {
+                    waku_protocol::diagnostics::log(format!(
+                        "waku-daemon listener stopped: {error:#}"
+                    ));
+                }
+            })
+            .context("could not start the Waku daemon listener")?;
+    } else {
+        drop(listener);
+    }
+
+    waku_core::relay::run_relay(relay_url, server, shutdown)
 }
 
 fn ensure_bind_allowed(address: SocketAddr, allow_non_loopback: bool) -> anyhow::Result<()> {
