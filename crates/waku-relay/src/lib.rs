@@ -328,22 +328,24 @@ impl Registry {
 
     /// Admit one new session from `source`, rate-limited.
     ///
-    /// The limit is per source address, over a one-second window. It exists so
-    /// one host cannot fill the session map. Only *new* sessions are counted: a
-    /// reconnect to a live session is not a new one, and rate-limiting it would
-    /// turn the limit into a denial of service against a reconnecting user.
+    /// The limit is per source address over a sliding one-second window. It
+    /// exists so one host cannot fill the session map. Only *new* sessions are
+    /// counted: a reconnect to a live session is not a new one, and
+    /// rate-limiting it would turn the limit into a denial of service against a
+    /// reconnecting user.
+    ///
+    /// The window is anchored at a source's first admission and ages out on its
+    /// own: a refused admission never refreshes it, so a source that keeps
+    /// knocking is not locked out permanently — it is admitted again once the
+    /// window it filled has passed.
     pub fn admit_source(&self, source: &str) -> Result<()> {
         let now = Instant::now();
         let mut started = self.started.lock().expect("started lock");
-        started.retain(|_, (at, _)| now.duration_since(*at) < RATE_WINDOW);
-        let for_source = started.get(source).map_or(0, |entry| entry.1);
-        if for_source >= self.limits.sessions_per_source_per_second {
+        started.retain(|_, (first, _)| now.duration_since(*first) < RATE_WINDOW);
+        let entry = started.entry(source.to_owned()).or_insert_with(|| (now, 0));
+        if entry.1 >= self.limits.sessions_per_source_per_second {
             bail!("too many new sessions from this source; retry shortly");
         }
-        // A source key is inserted once per admission; `retain` above keeps the
-        // map bounded to one window's worth.
-        let entry = started.entry(source.to_owned()).or_insert_with(|| (now, 0));
-        entry.0 = now;
         entry.1 += 1;
         Ok(())
     }
@@ -359,8 +361,8 @@ const RATE_WINDOW: Duration = Duration::from_secs(1);
 /// callback the bytes is one refactor away from handing them to a logger, a
 /// crash reporter, or a `Vec` that outlives the frame. A test that wants to
 /// prove the relay cannot read a session therefore cannot do it by asking this
-/// trait — it has to put known plaintext in and search the traffic on the wire,
-/// which is what `an_encrypted_record_reaches_the_client_unreadable` does.
+/// trait — it has to put known plaintext in and check what the other end
+/// received, which is what the round-trip test in `waku-core` does.
 pub trait Forwarded {
     /// One frame was forwarded in `direction`, `bytes` long.
     fn forwarded(&self, direction: Role, bytes: usize);
@@ -876,6 +878,32 @@ mod tests {
         assert!(registry.admit_source("10.0.0.1").is_err());
         // A different source is unaffected.
         registry.admit_source("10.0.0.2").unwrap();
+    }
+
+    /// The rate limit is a window, not a permanent ban.
+    ///
+    /// The test above proves the limit fires; it would also pass against a
+    /// limiter that never let the source back in, which is the failure that
+    /// matters for a daemon reconnecting on its own. This pins the other half:
+    /// once a source's window has passed, it is admitted again.
+    #[test]
+    fn a_source_recovers_after_the_window_passes() {
+        let registry = Arc::new(Registry::new(Limits {
+            sessions_per_source_per_second: 1,
+            ..Limits::default()
+        }));
+        registry.admit_source("10.0.0.1").unwrap();
+        assert!(
+            registry.admit_source("10.0.0.1").is_err(),
+            "the second admission in the window must be refused"
+        );
+
+        std::thread::sleep(RATE_WINDOW + Duration::from_millis(120));
+
+        assert!(
+            registry.admit_source("10.0.0.1").is_ok(),
+            "a source must be admitted again once its window has passed"
+        );
     }
 
     // ---- end to end ----
