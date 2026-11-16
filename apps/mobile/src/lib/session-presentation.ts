@@ -8,7 +8,12 @@ import type {
   RuntimeMode,
   TranscriptBlock,
 } from '@waku/client';
-import { turnAnswerStart, turnFoldLabel } from '@waku/client/transcript-presentation';
+import {
+  turnActivityCount,
+  turnAnswerStart,
+  turnChangedFileCount,
+  turnSummaryLabel,
+} from '@waku/client/transcript-presentation';
 
 import type { MarkdownBlock } from '../md/parse';
 import { TranscriptMarkdownCache } from '../md/transcript-cache';
@@ -70,12 +75,13 @@ export type TranscriptRow =
       topGap: number;
     }
   | {
-      kind: 'fold';
+      kind: 'collapsed';
       key: string;
       turnId: string | null;
       turn: AgentTurn;
       label: string;
-      expanded: boolean;
+      steps: number;
+      files: number;
       topGap: number;
     }
   | { kind: 'changed'; key: string; turnId: string | null; checkpoint: Checkpoint; topGap: number };
@@ -369,7 +375,7 @@ export function findActivityBlock(
 export type TranscriptPipelineRow =
   | { kind: 'message'; key: string; turnId: string | null; message: Message; footerTimestamp: number | null }
   | { kind: 'activities'; key: string; turnId: string | null; block: TranscriptBlock; blockIndex: number; live: boolean }
-  | { kind: 'fold'; key: string; turnId: string | null; turn: AgentTurn; label: string; expanded: boolean }
+  | { kind: 'collapsed'; key: string; turnId: string | null; turn: AgentTurn; label: string; steps: number; files: number }
   | { kind: 'changed'; key: string; turnId: string | null; checkpoint: Checkpoint };
 
 interface TaggedRow {
@@ -380,19 +386,28 @@ interface TaggedRow {
 }
 
 /**
- * Interleaves messages with activity blocks and, for every settled turn,
- * hides everything before the terminal answer — thoughts, tool work, and
- * intermediate text parts alike — behind a "Worked for X" fold anchored where
- * the hidden work began. This mirrors the desktop transcript's turnFolds:
- * only the trailing run of answer text stays visible. Hidden rows are
- * re-emitted for turn ids present in `expandedFolds`.
+ * Interleaves messages with activity blocks. Nothing is hidden by default:
+ * every thought, tool row and text part a turn produced stays in the pipeline,
+ * in the order it happened.
+ *
+ * A turn in `collapsedTurns` is the exception, and only because the reader
+ * asked for it: all of its rows go behind one summary row.
  *
  * Linear in messages + blocks + turns: a commit lands at up to ~8 Hz and the
  * largest real sessions carry thousands of messages.
  */
 export function buildTranscriptPipeline(
   session: AgentSession,
-  expandedFolds: ReadonlySet<string> = new Set(),
+  collapsedTurns: ReadonlySet<string> = new Set(),
+  /**
+   * Turns whose rows must not be mounted, because the list is already holding
+   * the render budget's worth of them. They become one placeholder each.
+   *
+   * Not a fold: the budget only limits how much is mounted at once on a phone
+   * with no virtualized list, and a turn leaves the set as soon as the reader
+   * scrolls back to it.
+   */
+  boundedTurns: ReadonlySet<string> = new Set(),
 ): TranscriptPipelineRow[] {
   const runningTurnId = session.turns.find((turn) => turn.status === 'running')?.id ?? null;
   const latestBlock = session.transcript_blocks.at(-1);
@@ -452,42 +467,65 @@ export function buildTranscriptPipeline(
     }
   }
 
-  // Per settled turn: which rows hide behind the fold and where it anchors.
+  // Per collapsed turn: which rows it hides and where its summary anchors.
+  // Nothing folds by default — a turn appears here only because the reader
+  // collapsed it.
   const hidden = new Set<TaggedRow>();
   const anchors = new Map<TaggedRow, AgentTurn>();
-  for (const turn of session.turns) {
-    if (turn.status === 'running') continue;
-    const turnRows = foldableByTurn.get(turn.id);
-    if (!turnRows) continue;
-    const answerStart = turnAnswerStart(turnRows, (item) => item.answerText);
-    const work = turnRows.slice(0, answerStart);
-    if (!work.length) continue;
-    anchors.set(work[0]!, turn);
-    for (const item of work) hidden.add(item);
+  if (collapsedTurns.size) {
+    for (const turn of session.turns) {
+      if (!collapsedTurns.has(turn.id)) continue;
+      const turnRows = foldableByTurn.get(turn.id);
+      if (!turnRows?.length) continue;
+      anchors.set(turnRows[0]!, turn);
+      for (const item of turnRows) hidden.add(item);
+    }
   }
 
   const turnsById = new Map(session.turns.map((turn) => [turn.id, turn]));
   const rows: TranscriptPipelineRow[] = [];
   const answerRowByTurn = new Map<string, Extract<TranscriptPipelineRow, { kind: 'message' }>>();
+  const placeholderEmitted = new Set<string>();
   for (const item of tagged) {
     const anchorTurn = anchors.get(item);
     if (anchorTurn) {
       rows.push({
-        kind: 'fold',
-        key: `fold:${anchorTurn.id}`,
+        kind: 'collapsed',
+        key: `collapsed:${anchorTurn.id}`,
         turnId: anchorTurn.id,
         turn: anchorTurn,
-        label: turnFoldLabel(anchorTurn),
-        expanded: expandedFolds.has(anchorTurn.id),
+        label: turnSummaryLabel(anchorTurn),
+        steps: turnActivityCount(session, anchorTurn.id),
+        files: turnChangedFileCount(session, anchorTurn.id),
       });
+    }
+    // A turn outside the render budget becomes one placeholder row the reader
+    // can open. This is a limit on what is mounted, not a fold: the turn is
+    // shown in full as soon as it enters the budget, and the placeholder says
+    // how much it is standing in for.
+    if (item.turnId && boundedTurns.has(item.turnId)) {
+      if (!placeholderEmitted.has(item.turnId)) {
+        placeholderEmitted.add(item.turnId);
+        const turn = turnsById.get(item.turnId);
+        if (turn) {
+          rows.push({
+            kind: 'collapsed',
+            key: `placeholder:${turn.id}`,
+            turnId: turn.id,
+            turn,
+            label: turnSummaryLabel(turn),
+            steps: turnActivityCount(session, turn.id),
+            files: turnChangedFileCount(session, turn.id),
+          });
+        }
+      }
+      continue;
     }
     if (!hidden.has(item)) {
       rows.push(item.row);
       if (item.answerText && item.row.kind === 'message' && item.turnId) {
         answerRowByTurn.set(item.turnId, item.row);
       }
-    } else if (item.turnId && expandedFolds.has(item.turnId)) {
-      rows.push(item.row);
     }
     if (item.turnId && lastRowByTurn.get(item.turnId) === item) {
       const turn = turnsById.get(item.turnId);
@@ -503,14 +541,55 @@ export function buildTranscriptPipeline(
   return rows;
 }
 
+/**
+ * Turns kept in full on a phone before older ones become placeholders.
+ *
+ * Measured against the mounted window, not the session: twenty turns of
+ * five-activity work is about the most that can stay mounted and scroll at
+ * native speed without a virtualized list.
+ */
+export const MOBILE_FULL_TURN_BUDGET = 20;
+
+/**
+ * Turns the render budget cannot afford to mount in full, oldest first.
+ *
+ * A phone has no virtualized transcript list: everything inside the mounted
+ * window stays mounted. With work visible by default a long session is far
+ * more rows than before, so a session past `maxTurns` keeps its most recent
+ * turns in full and stands each older one in for a single tappable placeholder.
+ *
+ * The reader's own actions always win: a turn they collapsed or explicitly
+ * opened is never budgeted away, and neither is the turn that is running.
+ */
+export function budgetedTurns(
+  session: AgentSession,
+  options: { maxTurns: number; keep: ReadonlySet<string> } = {
+    maxTurns: MOBILE_FULL_TURN_BUDGET,
+    keep: new Set(),
+  },
+): Set<string> {
+  const running = session.turns.find((turn) => turn.status === 'running')?.id;
+  const eligible = session.turns.filter((turn) => (
+    turn.id !== running && !options.keep.has(turn.id)
+  ));
+  const excess = eligible.length - options.maxTurns;
+  if (excess <= 0) return new Set();
+  return new Set(eligible.slice(0, excess).map((turn) => turn.id));
+}
+
 /** Full expansion — every pipeline row into block rows. Tests and small
  * transcripts; the list expands only its rendered tail. */
 export function buildTranscriptRows(
   session: AgentSession,
-  expandedFolds: ReadonlySet<string> = new Set(),
+  collapsedTurns: ReadonlySet<string> = new Set(),
   md: TranscriptMarkdownCache = new TranscriptMarkdownCache(),
+  boundedTurns: ReadonlySet<string> = new Set(),
 ): TranscriptRow[] {
-  return expandTranscriptRows(buildTranscriptPipeline(session, expandedFolds), md, 0);
+  return expandTranscriptRows(
+    buildTranscriptPipeline(session, collapsedTurns, boundedTurns),
+    md,
+    0,
+  );
 }
 
 /**

@@ -38,6 +38,8 @@ import { useTheme } from '@/hooks/use-theme';
 import { useI18n } from '@/lib/i18n-context';
 import {
   buildTranscriptPipeline,
+  budgetedTurns,
+  MOBILE_FULL_TURN_BUDGET,
   expandTranscriptRows,
   responseForkTurnCount,
   stabilizeTranscriptRows,
@@ -145,9 +147,20 @@ export function TranscriptList({
   const [expandedFolds, setExpandedFolds] = useState<ReadonlySet<string>>(() => new Set());
 
   const runningTurnId = session.turns.find((turn) => turn.status === 'running')?.id ?? null;
+  // A phone mounts everything in the window, so the render budget keeps the
+  // most recent turns in full and stands older ones in for one placeholder
+  // each. Opening a placeholder keeps that turn in full from then on.
+  const [revealedTurns, setRevealedTurns] = useState<ReadonlySet<string>>(() => new Set());
+  const boundedTurns = useMemo(
+    () => budgetedTurns(session, {
+      maxTurns: MOBILE_FULL_TURN_BUDGET,
+      keep: new Set([...expandedFolds, ...revealedTurns]),
+    }),
+    [session, expandedFolds, revealedTurns],
+  );
   const pipeline = useMemo(
-    () => buildTranscriptPipeline(session, expandedFolds),
-    [expandedFolds, session],
+    () => buildTranscriptPipeline(session, expandedFolds, boundedTurns),
+    [expandedFolds, session, boundedTurns],
   );
 
   // The mounted window: pipeline rows from `windowStart` to the end. Fixed
@@ -205,6 +218,14 @@ export function TranscriptList({
   }
 
   const toggleFold = useCallback((turnId: string) => {
+    // Opening a collapsed turn also lifts it out of the render budget: the
+    // reader asked for it, so it is not the budget's to take away.
+    setRevealedTurns((current) => {
+      if (current.has(turnId)) return current;
+      const next = new Set(current);
+      next.add(turnId);
+      return next;
+    });
     setExpandedFolds((current) => {
       const next = new Set(current);
       if (next.has(turnId)) next.delete(turnId);

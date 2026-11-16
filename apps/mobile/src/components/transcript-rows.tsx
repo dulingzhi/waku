@@ -131,12 +131,14 @@ export const TranscriptRowView = memo(function TranscriptRowView({
       );
     case 'activities':
       return <ActivityGroup block={row.block} blockIndex={row.blockIndex} live={row.live} />;
-    case 'fold':
+    case 'collapsed':
       return (
-        <FoldRow
-          expanded={row.expanded}
+        <CollapsedTurnRow
+          files={row.files}
           label={row.label}
+          steps={row.steps}
           turnId={row.turn.id}
+          failed={row.turn.status === 'failed'}
           onToggle={onToggleFold}
         />
       );
@@ -145,42 +147,70 @@ export const TranscriptRowView = memo(function TranscriptRowView({
   }
 });
 
-/** Desktop's turn fold: a hairline divider carrying "Worked for X ›". */
-function FoldRow({
+/**
+ * One collapsed turn: its summary standing in for the whole turn, and the way
+ * back open. This row exists only because the reader collapsed the turn, so it
+ * carries more weight than a tool row — a filled surface and a border — and
+ * says out loud what is behind it.
+ */
+function CollapsedTurnRow({
   label,
-  expanded,
+  steps,
+  files,
+  failed,
   turnId,
   onToggle,
 }: {
   label: string;
-  expanded: boolean;
+  steps: number;
+  files: number;
+  failed: boolean;
   turnId: string;
   onToggle: (turnId: string) => void;
 }) {
   const theme = useTheme();
   const { t } = useI18n();
   const keepTop = useRowAnchor();
+  const stats = [
+    ...(steps > 0 ? [t('transcript.step_count', { count: steps })] : []),
+    ...(files > 0 ? [t('transcript.file_count', { count: files })] : []),
+  ].join(' · ');
   return (
     <Pressable
-      accessibilityHint={expanded ? t('transcript.collapse_work') : t('transcript.expand_work')}
+      accessibilityHint={t('transcript.expand_turn')}
       accessibilityLabel={label}
       accessibilityRole="button"
-      accessibilityState={{ expanded }}
+      accessibilityState={{ expanded: false }}
       hitSlop={{ top: 6, bottom: 6 }}
       onPress={() => keepTop(() => onToggle(turnId))}
-      style={({ pressed }) => [styles.foldRow, { opacity: pressed ? 0.6 : 1 }]}>
-      <View style={[styles.foldLine, { backgroundColor: theme.border }]} />
-      <Text numberOfLines={1} style={[styles.foldLabel, { color: theme.textTertiary }]}>
+      style={({ pressed }) => [
+        styles.collapsedRow,
+        {
+          backgroundColor: theme.overlay,
+          borderColor: failed ? theme.danger : theme.borderStrong,
+          opacity: pressed ? 0.7 : 1,
+        },
+      ]}>
+      <AppSymbol
+        name={failed
+          ? { ios: 'exclamationmark.triangle', android: 'warning', web: 'warning' }
+          : { ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
+        size={12}
+        tintColor={failed ? theme.danger : theme.textTertiary}
+      />
+      <Text
+        numberOfLines={1}
+        style={[styles.collapsedLabel, { color: failed ? theme.danger : theme.textSecondary }]}>
         {label}
       </Text>
-      <AppSymbol
-        name={expanded
-          ? { ios: 'chevron.down', android: 'keyboard_arrow_down', web: 'keyboard_arrow_down' }
-          : { ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
-        size={10}
-        tintColor={theme.textGhost}
-      />
-      <View style={[styles.foldLine, { backgroundColor: theme.border }]} />
+      {stats.length > 0 && (
+        <Text numberOfLines={1} style={[styles.collapsedStats, { color: theme.textTertiary }]}>
+          {stats}
+        </Text>
+      )}
+      <Text numberOfLines={1} style={[styles.collapsedHint, { color: theme.textGhost }]}>
+        {t('transcript.expand_turn')}
+      </Text>
     </Pressable>
   );
 }
@@ -446,14 +476,18 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   attachments: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8, maxWidth: '88%' },
-  foldRow: {
+  collapsedRow: {
     alignItems: 'center',
+    borderRadius: Radius.medium,
+    borderWidth: StyleSheet.hairlineWidth,
     flexDirection: 'row',
-    gap: 9,
-    minHeight: 28,
+    gap: 8,
+    minHeight: 34,
+    paddingHorizontal: 10,
   },
-  foldLine: { flex: 1, height: StyleSheet.hairlineWidth },
-  foldLabel: { flexShrink: 1, fontSize: 12, fontWeight: '500' },
+  collapsedLabel: { flexShrink: 0, fontSize: 12.5, fontWeight: '600' },
+  collapsedStats: { flexShrink: 1, fontSize: 12.5 },
+  collapsedHint: { flexShrink: 0, fontSize: 11 },
   changedCard: {
     borderRadius: Radius.medium,
     borderWidth: StyleSheet.hairlineWidth,

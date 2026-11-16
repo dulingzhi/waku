@@ -6,6 +6,7 @@ import { TranscriptMarkdownCache } from '../md/transcript-cache';
 import {
   buildTranscriptPipeline,
   buildTranscriptRows,
+  budgetedTurns,
   contextPercent,
   displaySessionTitle,
   expandTranscriptRows,
@@ -19,6 +20,73 @@ import {
   stabilizeTranscriptRows,
   userMessageRewindTurnCount,
 } from './session-presentation';
+
+describe('mobile render budget', () => {
+  test('keeps the most recent turns whole and stands older ones in for a placeholder', () => {
+    const turns = Array.from({ length: 30 }, (_, index) => turn({
+      id: `t${index}`,
+      status: 'completed',
+      started_at: index * 10,
+      completed_at: index * 10 + 5,
+    }));
+    const messages = turns.map((item, index) => ({
+      id: `u${index}`,
+      turn_id: item.id,
+      role: 'user' as const,
+      content: `prompt ${index}`,
+      created_at: index * 10,
+      streaming: false,
+    }));
+    const current = session({ turns, messages, transcript_blocks: [] });
+
+    // Nothing is budgeted while the session fits.
+    expect(budgetedTurns(current, { maxTurns: 30, keep: new Set() }).size).toBe(0);
+
+    const bounded = budgetedTurns(current, { maxTurns: 20, keep: new Set() });
+    expect(bounded.size).toBe(10);
+    // The oldest ten go first; the newest twenty stay whole.
+    expect(bounded.has('t0')).toBe(true);
+    expect(bounded.has('t29')).toBe(false);
+
+    const rows = buildTranscriptPipeline(current, new Set(), bounded);
+    const placeholders = rows.filter((row) => row.kind === 'collapsed');
+    expect(placeholders.length).toBe(10);
+    // A placeholder says how much it stands in for.
+    for (const row of placeholders) {
+      if (row.kind !== 'collapsed') continue;
+      expect(row.label.length).toBeGreaterThan(0);
+    }
+    // Budgeted turns mount one row each, never their messages.
+    expect(rows.filter((row) => row.kind === 'message').length).toBe(20);
+  });
+
+  test('a turn the reader opened stays whole even past the budget', () => {
+    const turns = Array.from({ length: 30 }, (_, index) => turn({
+      id: `t${index}`,
+      status: 'completed',
+      started_at: index * 10,
+      completed_at: index * 10 + 5,
+    }));
+    const current = session({
+      turns,
+      messages: turns.map((item, index) => ({
+        id: `u${index}`,
+        turn_id: item.id,
+        role: 'user' as const,
+        content: `prompt ${index}`,
+        created_at: index * 10,
+        streaming: false,
+      })),
+      transcript_blocks: [],
+    });
+
+    // `t0` is kept, so the budget is spread over the other 29 turns: 9 go.
+    const bounded = budgetedTurns(current, { maxTurns: 20, keep: new Set(['t0']) });
+    expect(bounded.has('t0')).toBe(false);
+    expect(bounded.size).toBe(9);
+    expect(bounded.has('t1')).toBe(true);
+  });
+});
 
 describe('mobile session presentation', () => {
   test('uses provider title for untouched tasks', () => {
@@ -77,7 +145,7 @@ describe('mobile session presentation', () => {
     ]);
   });
 
-  test('folds a settled turn behind “Worked for X” like the desktop', () => {
+  test('shows a settled turn in full, with no fold', () => {
     const current = session({
       turns: [turn({ id: 'turn', status: 'completed', started_at: 10, completed_at: 130 })],
       messages: [
@@ -86,20 +154,37 @@ describe('mobile session presentation', () => {
       ],
       transcript_blocks: [activityBlock(1, 'turn')],
     });
-    const collapsed = buildTranscriptRows(current);
-    expect(collapsed.map((row) => row.kind)).toEqual(['user', 'fold', 'md']);
-    const fold = collapsed[1]!;
-    if (fold.kind !== 'fold') throw new Error('expected fold');
-    expect(fold.label).toBe('Worked for 2 minutes');
-    const answer = collapsed[2]!;
+    const rows = buildTranscriptRows(current);
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'activities', 'md']);
+    const answer = rows[2]!;
     if (answer.kind !== 'md') throw new Error('expected md');
     expect(answer.footerTimestamp).toBe(130);
 
-    const expanded = buildTranscriptRows(current, new Set(['turn']));
-    expect(expanded.map((row) => row.kind)).toEqual(['user', 'fold', 'activities', 'md']);
+    // Collapsing is the reader's own act, and it hides the whole turn.
+    const collapsed = buildTranscriptRows(current, new Set(['turn']));
+    expect(collapsed.map((row) => row.kind)).toEqual(['user', 'collapsed']);
+    const summary = collapsed[1]!;
+    if (summary.kind !== 'collapsed') throw new Error('expected collapsed');
+    expect(summary.label).toBe('Worked for 2 minutes');
   });
 
-  test('folds thoughts too — a thought-only turn shows just the answer', () => {
+  test('a failed turn says so instead of timing itself', () => {
+    const current = session({
+      turns: [turn({ id: 'turn', status: 'failed', started_at: 10, completed_at: 22 })],
+      messages: [
+        { id: 'user', turn_id: 'turn', role: 'user', content: 'go', created_at: 1, streaming: false },
+        { id: 'agent', turn_id: 'turn', role: 'assistant', content: 'x', created_at: 2, streaming: false },
+      ],
+      transcript_blocks: [activityBlock(1, 'turn')],
+    });
+    const collapsed = buildTranscriptRows(current, new Set(['turn']));
+    const summary = collapsed.find((row) => row.kind === 'collapsed');
+    if (summary?.kind !== 'collapsed') throw new Error('expected collapsed');
+    expect(summary.label).toBe('This turn failed');
+    expect(summary.label).not.toContain('Worked');
+  });
+
+  test('a thought stays visible: it is part of the work, not hidden content', () => {
     const current = session({
       turns: [turn({ id: 'turn', status: 'completed', started_at: 10, completed_at: 15 })],
       messages: [
@@ -126,12 +211,12 @@ describe('mobile session presentation', () => {
     });
     expect(buildTranscriptRows(current).map((row) => row.kind)).toEqual([
       'user',
-      'fold',
+      'activities',
       'md',
     ]);
   });
 
-  test('hides intermediate text parts — only the terminal answer stays visible', () => {
+  test('keeps intermediate text parts visible, in order', () => {
     const current = session({
       turns: [turn({ id: 'turn', status: 'completed', started_at: 10, completed_at: 40 })],
       messages: [
@@ -141,18 +226,19 @@ describe('mobile session presentation', () => {
       ],
       transcript_blocks: [activityBlock(2, 'turn')],
     });
-    const collapsed = buildTranscriptRows(current);
-    expect(collapsed.map((row) => (
+    const rows = buildTranscriptRows(current);
+    expect(rows.map((row) => (
       row.kind === 'md' ? `md:${row.messageId}` : row.kind
-    ))).toEqual(['user', 'fold', 'md:part2']);
-    const answer = collapsed[2]!;
+    ))).toEqual(['user', 'md:part1', 'activities', 'md:part2']);
+    const answer = rows[3]!;
     if (answer.kind !== 'md') throw new Error('expected md');
     expect(answer.footerTimestamp).toBe(40);
 
-    const expanded = buildTranscriptRows(current, new Set(['turn']));
-    expect(expanded.map((row) => (
+    // Collapsing hides the whole turn behind one summary, prompt still above it.
+    const collapsed = buildTranscriptRows(current, new Set(['turn']));
+    expect(collapsed.map((row) => (
       row.kind === 'md' ? `md:${row.messageId}` : row.kind
-    ))).toEqual(['user', 'fold', 'md:part1', 'activities', 'md:part2']);
+    ))).toEqual(['user', 'collapsed']);
   });
 
   test('keeps a running turn’s work expanded and live', () => {
@@ -244,14 +330,14 @@ describe('mobile session presentation', () => {
     const md = new TranscriptMarkdownCache();
     const pipeline = buildTranscriptPipeline(current);
     expect(pipeline.map((row) => row.kind)).toEqual([
-      'message', 'fold', 'message', 'message', 'fold', 'message',
+      'message', 'activities', 'message', 'message', 'activities', 'message',
     ]);
     const full = expandTranscriptRows(pipeline, md, 0);
     const tail = expandTranscriptRows(pipeline, md, 3);
     expect(tail.map((row) => row.key)).toEqual(full.slice(-3).map((row) => row.key));
     expect(tail.map((row) => row.topGap)).toEqual(full.slice(-3).map((row) => row.topGap));
     // The first mounted row measures its gap against the unmounted row
-    // before it — here the fold above the first answer.
+    // before it — here the activity block above the first answer.
     const fromAnswer = expandTranscriptRows(pipeline, md, 2);
     expect(fromAnswer.map((row) => row.key).slice(0, 2)).toEqual(['md:a1.0', 'md:a1.1']);
     expect(fromAnswer.map((row) => row.topGap).slice(0, 2)).toEqual([12, 12]);
