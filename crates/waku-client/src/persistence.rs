@@ -409,6 +409,19 @@ pub struct PersistedState {
     pub disabled_providers: Vec<ProviderKind>,
     #[serde(default)]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    /// The relay the daemon reported, carried through untouched.
+    ///
+    /// `#[serde(skip)]` on purpose: this is the daemon's configuration, not the
+    /// app's. Persisting it here would create a second source of truth for a
+    /// setting the app cannot edit, and the two would drift the first time a
+    /// daemon was reconfigured outside the app.
+    #[serde(skip)]
+    pub relay_url: Option<String>,
+    /// Whether the daemon also keeps listening while dialing a relay.
+    ///
+    /// Skipped for the same reason as [`Self::relay_url`].
+    #[serde(skip)]
+    pub relay_keep_listening: bool,
     #[serde(skip)]
     daemon_settings_extra: BTreeMap<String, serde_json::Value>,
     #[serde(skip)]
@@ -467,6 +480,8 @@ impl PersistedState {
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
             provider_binary_overrides: HashMap::new(),
+            relay_url: None,
+            relay_keep_listening: false,
             daemon_settings_extra: BTreeMap::new(),
             dirty_sessions: HashSet::new(),
         }
@@ -551,13 +566,23 @@ impl PersistedState {
     }
 
     pub fn daemon_settings(&self) -> DaemonSettings {
-        DaemonSettings {
+        let mut settings = DaemonSettings {
             computer_use_enabled: self.computer_use_enabled,
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
             disabled_providers: self.disabled_providers.clone(),
             provider_binary_overrides: self.provider_binary_overrides.clone(),
-            extra: self.daemon_settings_extra.clone(),
-        }
+            // The desktop app does not configure a relay: a daemon that dials
+            // one is usually headless, and its settings document is the record
+            // of that. `default()` is "listen only", which is what a daemon
+            // started from the app expects. `apply_daemon_settings` keeps
+            // whatever the daemon reported, so values set outside the app
+            // survive this round trip.
+            ..DaemonSettings::default()
+        };
+        settings.extra = self.daemon_settings_extra.clone();
+        settings.relay_url = self.relay_url.clone();
+        settings.relay_keep_listening = self.relay_keep_listening;
+        settings
     }
 
     pub fn apply_daemon_settings(&mut self, settings: DaemonSettings) {
@@ -569,6 +594,11 @@ impl PersistedState {
         self.computer_use_allowed_apps = settings.computer_use_allowed_apps;
         self.disabled_providers = settings.disabled_providers;
         self.provider_binary_overrides = settings.provider_binary_overrides;
+        // Kept even though the app cannot edit them: dropping them here would
+        // silently erase a relay a daemon was configured with the moment the
+        // user toggled any other daemon setting.
+        self.relay_url = settings.relay_url;
+        self.relay_keep_listening = settings.relay_keep_listening;
         self.daemon_settings_extra = settings.extra;
     }
 

@@ -483,13 +483,21 @@ impl PersistedState {
     }
 
     pub fn daemon_settings(&self) -> crate::DaemonSettings {
-        crate::DaemonSettings {
+        let mut settings = crate::DaemonSettings {
             computer_use_enabled: self.computer_use_enabled,
             computer_use_allowed_apps: self.computer_use_allowed_apps.clone(),
             disabled_providers: self.disabled_providers.clone(),
             provider_binary_overrides: self.provider_binary_overrides.clone(),
-            extra: self.daemon_settings_extra.clone(),
-        }
+            // Relay settings are owned by the daemon's own settings document,
+            // not by the desktop app's stored state: the app never configures a
+            // relay, and an app-side copy would be a second place to drift.
+            // `default()` carries the "listen only" values the app expects;
+            // `extra` is restored below so a round trip here still preserves
+            // unknown keys.
+            ..crate::DaemonSettings::default()
+        };
+        settings.extra = self.daemon_settings_extra.clone();
+        settings
     }
 
     fn app_state(&self) -> AppState {

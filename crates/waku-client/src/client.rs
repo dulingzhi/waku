@@ -102,6 +102,61 @@ impl DaemonClient {
             })
             .collect();
         let url = daemon_url(address)?;
+        Self::connect_to_url(url, token, resume_from, last_sequences, expected_ed25519)
+    }
+
+    /// Connect to a daemon through a relay.
+    ///
+    /// `relay_address` is the relay's `ws(s)://host:port`; `session_id` names
+    /// the session the daemon published. The record layer is unchanged — the
+    /// relay moves bytes it cannot read — so this differs from [`Self::connect`]
+    /// only in the path it dials.
+    pub fn connect_via_relay(
+        relay_address: &str,
+        session_id: &str,
+        token: String,
+    ) -> anyhow::Result<Self> {
+        Self::connect_via_relay_with_identity(relay_address, session_id, token, None)
+    }
+
+    /// [`Self::connect_via_relay`], pinning the daemon's signing key.
+    pub fn connect_via_relay_with_identity(
+        relay_address: &str,
+        session_id: &str,
+        token: String,
+        expected_ed25519: Option<&ed25519_dalek::VerifyingKey>,
+    ) -> anyhow::Result<Self> {
+        if session_id.is_empty() || session_id.contains('/') {
+            anyhow::bail!("a relay session id must be non-empty and contain no slash");
+        }
+        let normalized =
+            if relay_address.starts_with("ws://") || relay_address.starts_with("wss://") {
+                relay_address.to_owned()
+            } else {
+                format!("ws://{relay_address}")
+            };
+        let mut url = url::Url::parse(&normalized).context("relay address is invalid")?;
+        // A relay path is `/<session>/client`, not `/v1`: the relay pairs by
+        // session and role, and knows nothing about Waku's versioned path.
+        url.set_path(&format!("/{session_id}/client"));
+        url.set_query(None);
+        url.set_fragment(None);
+        Self::connect_to_url(
+            url.into(),
+            token,
+            Vec::new(),
+            HashMap::new(),
+            expected_ed25519,
+        )
+    }
+
+    fn connect_to_url(
+        url: String,
+        token: String,
+        resume_from: Vec<ReplayCursor>,
+        last_sequences: HashMap<(Uuid, Uuid), LastSequence>,
+        expected_ed25519: Option<&ed25519_dalek::VerifyingKey>,
+    ) -> anyhow::Result<Self> {
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_WIRE_MESSAGE_BYTES))
             .max_frame_size(Some(MAX_WIRE_MESSAGE_BYTES));

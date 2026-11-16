@@ -135,11 +135,22 @@ behaviour changes, and the fingerprint's guards cover both directions — a
 change that alters the rows moves it, and a change that does not leaves it
 alone.
 
-## Stage 5 — Remote access over a relay, end to end encrypted (unscheduled)
+## Stage 5 — Remote access over a relay, end to end encrypted (in progress)
 
-Detailed in `docs/remote-access.md`. It depends on stage 3's remote groundwork
-and on a security design settling before any code is written, which is why it
-is a separate document rather than a bullet here.
+Detailed in `docs/remote-access.md`. It depended on stage 3's remote groundwork
+and on a security design settling before any code was written.
+
+Both of those prerequisites are now met, and step 1 of the staging plan has
+shipped: the record layer and handshake exist, every daemon connection is sealed
+end to end, and the TypeScript client interoperates with it byte for byte
+(cross-language vectors). What remains is step 2 — the self-hosted relay — which
+is now only a transport problem, because the bytes it carries are already
+opaque to it.
+
+The step is judged by its own check rather than by its work items, as with every
+other stage: a client reaches a daemon behind a NAT through the relay, the
+relay's operator cannot read a task title from the traffic, and a replayed frame
+is rejected.
 
 ## What this plan deliberately does not do
 

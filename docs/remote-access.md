@@ -98,10 +98,10 @@ acceptable only if a reviewer signs off on the transcript binding.
 relay learning it.
 
 1. The daemon shows, in Settings → Daemon, a short-lived pairing code. It
-   carries the relay address, a session id, and a pairing secret the relay
-   distributed to both sides. It does **not** carry an ephemeral key: a key
-   written down before a connection exists has stopped being ephemeral, and
-   forward secrecy depends on it being created per connection.
+   carries the relay address and a session id the **daemon** generated. It does
+   **not** carry an ephemeral key: a key written down before a connection exists
+   has stopped being ephemeral, and forward secrecy depends on it being created
+   per connection.
 2. The client connects to the relay, presents the session id, and completes the
    key agreement, generating its ephemeral key at that moment.
 3. Both sides derive a session key and display a short authentication string.
@@ -112,22 +112,57 @@ Step 4 matters: **the token becomes an application-layer credential rather than
 a transport credential.** The relay never sees it, and a successful handshake
 does not by itself grant control.
 
+**Why the session id does not need to be a secret the relay hands out.** An
+earlier draft had the relay distribute it to both sides. It does not have to,
+and having it generate the id would make the relay the authority on which
+endpoint belongs to which session — a role it does not need. What actually stops
+a relay from substituting its own daemon is the pinned Ed25519 key
+(`record.rs:482`): a client that paired before refuses a `server_hello` carrying
+any other key. A guessed session id therefore gets an attacker a connection that
+fails at the handshake, not control of a session.
+
+The relay still needs to know the id to pair the two sockets. That tells it two
+sockets belong together and nothing else — no identity, no token, no key.
+
+
 **The authentication string.** This is a security boundary, not a display
-detail, and it must not be invented here. It is the first half of the Noise
-handshake hash — the value the protocol accumulates across every message of the
-handshake — rendered in a form a person can compare. Running a plain hash over
-the session key would be wrong twice over: an attacker can grind two different
-handshakes to the same short hash, and a value that does not cover the
-transcript lets an intermediary run one handshake per side and sit between them
-with both comparisons passing. Whatever implementation is chosen, it must expose
-the handshake hash, and the string comes from that.
+detail, and it must not be invented here. Two properties are required, and a
+short hash over the session key has neither:
+
+- It has to cover the **whole transcript** — every public key both sides
+  exchanged — or an intermediary can run one handshake per side and sit between
+  them with both comparisons passing.
+- It has to be long enough that grinding a collision is not cheaper than
+  attacking the handshake itself.
+
+**What the implementation actually does, and where that differs from the plan.**
+An earlier version of this section said the string is the first half of the
+Noise handshake hash. Noise is not used: `record.rs` hand-rolls a one-round-trip
+handshake, so there is no Noise handshake hash to read. The equivalent value is
+`handshake::transcript_hash` — a SHA-256 over the protocol label, the transcript
+label, and all four public keys (client static and ephemeral, server ephemeral,
+daemon static), each length-prefixed. That has the first property for the same
+reason a Noise handshake hash does: it is a digest of everything that was
+negotiated, so a spliced connection produces two different values.
+
+It does not yet have a shipped display form. When the pairing UI lands, the
+string must be derived from that transcript hash and shown with enough digits to
+make the second property true; truncating it to four characters would undo the
+work the digest does.
+
+**The plan's own warning still applies**: whatever is displayed must come from
+the transcript, never from a hash of the session key, because a key hash is not
+bound to what was negotiated.
+
 
 **No plaintext fallback.** The record layer is required, not offered. A layer
 that can be negotiated away is a layer an attacker strips before doing anything
-else, so the choice is made once in the WebSocket subprotocol: a client that
-does not get an encrypted record layer closes the connection instead of falling
-back. The protocol version does not change, because the negotiation lives below
-it.
+else. The choice is made by frame type rather than by a subprotocol header: the
+first frame on the socket is a binary `client_hello`, every frame after it is a
+record, and a text frame anywhere ends the connection. A client that predates
+the record layer gets one plaintext `Rejected` explaining that an encrypted
+connection is required, and is then closed — an explanation, not a fallback.
+
 
 **Forward secrecy.** Ephemeral keys per connection, so a later compromise of a
 device does not decrypt recorded traffic.
@@ -222,6 +257,16 @@ following it: a relay operator is assumed untrusted from the moment the relay
 exists, and no amount of "it is your own server" makes a UI that looks identical
 in both modes safe. Operators end up running relays they do not fully control —
 a VPS, a shared host, a friend's machine — and the client cannot tell.
+
+Step 1 is done, so this step starts from a connection that is already opaque to
+anything carrying it. The work is therefore only transport-shaped: pair two
+sockets, move bytes, enforce limits, and hold nothing else.
+
+**What the relay is allowed to know**, restated because it is the property the
+step is judged on: a session id, two sockets, and byte counts. Not a token, not
+a transcript, not a command, not a path, not a key it could use to impersonate
+either end. An implementation that adds a debug hook printing payloads has
+undone the step regardless of what the tests say.
 
 **Step 3 — public relay.** Adds abuse limits and the operational work a shared
 relay implies.

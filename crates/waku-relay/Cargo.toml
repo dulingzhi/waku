@@ -1,0 +1,23 @@
+[package]
+name = "waku-relay"
+version = "0.1.0"
+edition = "2024"
+description = "Pairing relay for Waku daemons behind NAT; forwards bytes it cannot read"
+license = "GPL-3.0-only"
+readme = "README.md"
+
+[lib]
+name = "waku_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "waku-relay"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+serde_json = "1.0"
+tungstenite = { version = "0.30", default-features = false, features = [
+    "handshake",
+    "rustls-tls-native-roots",
+] }

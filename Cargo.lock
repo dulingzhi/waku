@@ -8765,6 +8765,7 @@ dependencies = [
  "uuid",
  "waku-client",
  "waku-protocol",
+ "waku-relay",
  "windows-sys 0.61.2",
  "x25519-dalek",
  "zeroize",
@@ -8806,6 +8807,15 @@ dependencies = [
  "windows-sys 0.61.2",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "waku-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "tungstenite",
 ]
 
 [[package]]

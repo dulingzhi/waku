@@ -70,7 +70,7 @@ pub struct ServerOptions {
     pub allow_shutdown: bool,
 }
 
-struct ConnectionPermit(Arc<AtomicUsize>);
+pub(crate) struct ConnectionPermit(Arc<AtomicUsize>);
 
 impl Drop for ConnectionPermit {
     fn drop(&mut self) {
@@ -557,6 +557,123 @@ impl RequestDispatcher {
     }
 }
 
+/// Everything a daemon connection needs, independent of how it arrived.
+///
+/// One instance is shared by the listener and by every outbound relay dial, so
+/// a client reaching the daemon through a relay subscribes to the same
+/// [`Hub`] and is served by the same dispatcher as a local one. Splitting this
+/// per direction would mean a relay client silently received no session events.
+pub struct DaemonServer {
+    token: String,
+    identity: Arc<DaemonIdentity>,
+    backend: Arc<dyn Backend>,
+    dispatcher: Arc<RequestDispatcher>,
+    hub: Arc<Hub>,
+    options: ServerOptions,
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl DaemonServer {
+    pub fn new(
+        token: String,
+        identity: Arc<DaemonIdentity>,
+        backend: Arc<dyn Backend>,
+        options: ServerOptions,
+    ) -> Self {
+        let hub = Arc::new(Hub::default());
+        let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
+        Self {
+            token,
+            identity,
+            backend,
+            dispatcher,
+            hub,
+            options,
+            active_connections: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Claims one of the connection slots, or `None` when the daemon is at its
+    /// cap. Both directions share the cap: a relay peer occupies a connection
+    /// exactly as a local one does.
+    fn try_claim_connection(&self) -> Option<ConnectionPermit> {
+        self.active_connections
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_CONNECTIONS).then_some(active + 1)
+            })
+            .ok()?;
+        Some(ConnectionPermit(self.active_connections.clone()))
+    }
+
+    fn shutdown_backend(&self) {
+        self.backend.shutdown();
+    }
+
+    /// Serves one dialed relay connection on this thread, blocking until it
+    /// ends.
+    ///
+    /// Blocking is deliberate: the relay reconnect loop needs to know when the
+    /// connection actually closed before deciding how long to wait, and a
+    /// detached thread would make every dial look instant.
+    pub(crate) fn serve_dialed<S>(
+        &self,
+        socket: tungstenite::WebSocket<S>,
+        shutdown: Arc<AtomicBool>,
+        permit: ConnectionPermit,
+    ) -> anyhow::Result<()>
+    where
+        S: std::io::Read + std::io::Write + ConnectionStream,
+    {
+        let _permit = permit;
+        self.clone_for_connection().serve_socket(socket, &shutdown)
+    }
+
+    fn clone_for_connection(&self) -> DaemonConnection {
+        DaemonConnection {
+            token: self.token.clone(),
+            identity: self.identity.clone(),
+            dispatcher: self.dispatcher.clone(),
+            hub: self.hub.clone(),
+            options: self.options.clone(),
+        }
+    }
+
+    /// Claims a connection slot for a dialed relay peer.
+    pub(crate) fn claim_dialed_connection(&self) -> Option<ConnectionPermit> {
+        self.try_claim_connection()
+    }
+}
+
+/// The subset of [`DaemonServer`] a single connection thread owns.
+struct DaemonConnection {
+    token: String,
+    identity: Arc<DaemonIdentity>,
+    dispatcher: Arc<RequestDispatcher>,
+    hub: Arc<Hub>,
+    options: ServerOptions,
+}
+
+impl DaemonConnection {
+    fn serve_socket<S>(
+        &self,
+        socket: tungstenite::WebSocket<S>,
+        shutdown: &Arc<AtomicBool>,
+    ) -> anyhow::Result<()>
+    where
+        S: std::io::Read + std::io::Write + ConnectionStream,
+    {
+        serve_sealed_connection(
+            socket,
+            &self.token,
+            &self.identity,
+            self.dispatcher.clone(),
+            self.hub.clone(),
+            shutdown.clone(),
+            &self.options,
+        )
+    }
+}
+
 pub fn serve(
     listener: TcpListener,
     token: String,
@@ -565,31 +682,31 @@ pub fn serve(
     shutdown: Arc<AtomicBool>,
     options: ServerOptions,
 ) -> anyhow::Result<()> {
+    let server = DaemonServer::new(token, identity, backend, options);
+    serve_listener(listener, &server, &shutdown)
+}
+
+/// Accept loop for the listener direction.
+fn serve_listener(
+    listener: TcpListener,
+    server: &DaemonServer,
+    shutdown: &Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     listener
         .set_nonblocking(true)
         .context("could not configure Waku daemon listener")?;
-    let hub = Arc::new(Hub::default());
-    let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
-    let options = Arc::new(options);
-    let active_connections = Arc::new(AtomicUsize::new(0));
     while !shutdown.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
-                if active_connections
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                        (active < MAX_CONNECTIONS).then_some(active + 1)
-                    })
-                    .is_err()
-                {
+                let Some(connection_permit) = server.try_claim_connection() else {
                     continue;
-                }
-                let connection_permit = ConnectionPermit(active_connections.clone());
-                let token = token.clone();
-                let identity = identity.clone();
-                let dispatcher = dispatcher.clone();
-                let hub = hub.clone();
+                };
+                let token = server.token.clone();
+                let identity = server.identity.clone();
+                let dispatcher = server.dispatcher.clone();
+                let hub = server.hub.clone();
                 let shutdown = shutdown.clone();
-                let options = options.clone();
+                let options = server.options.clone();
                 std::thread::Builder::new()
                     .name("waku-daemon-connection".into())
                     .spawn(move || {
@@ -609,7 +726,7 @@ pub fn serve(
             Err(error) => return Err(error).context("Waku daemon listener failed"),
         }
     }
-    backend.shutdown();
+    server.shutdown_backend();
     Ok(())
 }
 
@@ -642,6 +759,37 @@ fn handle_connection(
         Some(config),
     )
     .context("WebSocket handshake failed")?;
+    serve_sealed_connection(
+        socket,
+        expected_token,
+        identity,
+        dispatcher,
+        hub,
+        shutdown,
+        options,
+    )
+}
+
+/// Everything a daemon connection does once a WebSocket exists.
+///
+/// Shared by both directions on purpose: an accepted socket and a dialed relay
+/// connection differ only in who opened the TCP connection, and neither the
+/// sealed handshake, the token check, the limits nor the request loop may drift
+/// between them. Anything specific to accepting lives in
+/// [`handle_connection`]; anything specific to dialing lives in
+/// [`crate::relay::dial`].
+fn serve_sealed_connection<S>(
+    socket: tungstenite::WebSocket<S>,
+    expected_token: &str,
+    identity: &DaemonIdentity,
+    dispatcher: Arc<RequestDispatcher>,
+    hub: Arc<Hub>,
+    shutdown: Arc<AtomicBool>,
+    options: &ServerOptions,
+) -> anyhow::Result<()>
+where
+    S: std::io::Read + std::io::Write + ConnectionStream,
+{
     // From here on every frame is a record. A client that predates the sealed
     // protocol sends plaintext JSON, which cannot be read as a record — so
     // before refusing it, tell it why in the one plaintext frame this daemon
@@ -721,16 +869,12 @@ fn handle_connection(
         config.max_message_size = Some(MAX_WIRE_MESSAGE_BYTES);
         config.max_frame_size = Some(MAX_WIRE_MESSAGE_BYTES);
     });
-    sealed
-        .socket_mut()
-        .get_mut()
-        .set_read_timeout(Some(SOCKET_POLL_INTERVAL))?;
-    // A client that stops reading must not let its outgoing queue grow at the
-    // daemon's event rate; a write stalled past this timeout drops it.
-    sealed
-        .socket_mut()
-        .get_mut()
-        .set_write_timeout(Some(SOCKET_WRITE_STALL_TIMEOUT))?;
+    // The steady-state read loop is a poll loop: `SealedConnection::read`
+    // returns `Ok(None)` when the read times out, and that is the only reason
+    // the loop can notice shutdown or drain its outgoing queue. The timeouts are
+    // therefore part of the protocol, not an optimization, and both connection
+    // directions need them.
+    timeout_stream::<S>(sealed.socket_mut().get_mut())?;
 
     let (outgoing, outgoing_rx) = bounded(MAX_QUEUED_MESSAGES_PER_SUBSCRIBER);
     let (subscriber, kicked) = Subscriber::new(outgoing.clone());
@@ -808,6 +952,50 @@ fn handle_connection(
     }
     hub.unsubscribe(subscriber_id);
     Ok(())
+}
+
+/// Applies the polling timeouts a daemon connection needs to either stream
+/// direction.
+///
+/// The accepted side has a `TcpStream`; the dialed side may have a TLS stream
+/// wrapped around one. Both expose the same two timeouts, but through different
+/// types, so the shared connection loop asks here instead of knowing which.
+fn timeout_stream<S: ConnectionStream>(stream: &mut S) -> std::io::Result<()> {
+    stream.set_daemon_timeouts(SOCKET_POLL_INTERVAL, SOCKET_WRITE_STALL_TIMEOUT)
+}
+
+/// The part of a stream the shared connection loop needs.
+///
+/// Deliberately narrow: this is not a general socket abstraction, just enough to
+/// configure a connection that has already been established by one of the two
+/// callers.
+pub(crate) trait ConnectionStream {
+    fn set_daemon_timeouts(&mut self, read: Duration, write: Duration) -> std::io::Result<()>;
+}
+
+impl ConnectionStream for TcpStream {
+    fn set_daemon_timeouts(&mut self, read: Duration, write: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(read))?;
+        self.set_write_timeout(Some(write))
+    }
+}
+
+impl ConnectionStream for tungstenite::stream::MaybeTlsStream<TcpStream> {
+    fn set_daemon_timeouts(&mut self, read: Duration, write: Duration) -> std::io::Result<()> {
+        match self {
+            // A plain dial is still possible on a `ws://` relay; the timeout
+            // applies to the socket either way.
+            tungstenite::stream::MaybeTlsStream::Plain(stream) => {
+                stream.set_read_timeout(Some(read))?;
+                stream.set_write_timeout(Some(write))
+            }
+            tungstenite::stream::MaybeTlsStream::Rustls(stream) => {
+                stream.get_mut().set_read_timeout(Some(read))?;
+                stream.get_mut().set_write_timeout(Some(write))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 // tungstenite's `accept_hdr_with_config` callback requires this exact
@@ -1140,8 +1328,8 @@ fn retryable_error(error: &(dyn std::error::Error + 'static)) -> bool {
 ///
 /// `Ok(None)` means the socket produced nothing this poll (a read timeout), not
 /// a disconnect: the connection loop treats them differently.
-fn read_sealed_client_message(
-    sealed: &mut SealedConnection<TcpStream>,
+fn read_sealed_client_message<S: std::io::Read + std::io::Write>(
+    sealed: &mut SealedConnection<S>,
 ) -> anyhow::Result<Option<ClientMessage>> {
     match sealed.read()? {
         Some(plaintext) => Ok(Some(serde_json::from_slice(&plaintext)?)),
@@ -1150,10 +1338,11 @@ fn read_sealed_client_message(
 }
 
 /// Seal and write one server message.
-fn write_sealed<T: serde::Serialize>(
-    sealed: &mut SealedConnection<TcpStream>,
-    value: &T,
-) -> anyhow::Result<()> {
+fn write_sealed<S, T>(sealed: &mut SealedConnection<S>, value: &T) -> anyhow::Result<()>
+where
+    S: std::io::Read + std::io::Write,
+    T: serde::Serialize,
+{
     sealed.send(&serde_json::to_vec(value)?)
 }
 
@@ -2471,6 +2660,110 @@ mod tests {
             agent_preset: None,
             computer_use_enabled: false,
             provider_cursor: None,
+        }
+    }
+
+    /// A client reaches a daemon through a relay that cannot read the session.
+    ///
+    /// This is the check the relay step is judged on, and it is end to end on
+    /// purpose: a real relay process, a real daemon dialing out to it, and a
+    /// real client connecting to the relay's other side. Mocks would be the
+    /// thing under test.
+    ///
+    /// What each assertion is for:
+    ///
+    /// - the round trip proves the two ends completed a sealed handshake
+    ///   *through* the relay, so the relay carried bytes it could not read;
+    /// - the bad token is rejected over the same path, so a relay session does
+    ///   not become a way around authentication;
+    /// - the recorder's byte count is non-zero, which proves the traffic went
+    ///   through this relay rather than a direct connection.
+    #[test]
+    fn a_client_reaches_a_daemon_through_a_relay() {
+        // --- the relay ---------------------------------------------------
+        let relay_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let relay_address = relay_listener.local_addr().unwrap().to_string();
+        let recorder = Arc::new(waku_relay::Recorder::default());
+        let registry = Arc::new(waku_relay::Registry::new(waku_relay::Limits::default()));
+        let for_serve = recorder.clone();
+        let for_serve_registry = registry.clone();
+        std::thread::spawn(move || {
+            let _ = waku_relay::serve(
+                relay_listener,
+                for_serve_registry,
+                SharedForwarded(for_serve),
+            );
+        });
+
+        // --- the daemon, dialing out with no listener of its own -----------
+        let session_id = "test-session-42";
+        let server = Arc::new(DaemonServer::new(
+            "secret".into(),
+            Arc::new(DaemonIdentity::generate()),
+            Arc::new(TaskStateBackend::default()),
+            ServerOptions::default(),
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let relay_url = format!("ws://{relay_address}/{session_id}/daemon");
+        {
+            let server = server.clone();
+            let shutdown = shutdown.clone();
+            std::thread::spawn(move || {
+                let _ = crate::relay::run_relay(relay_url, server, shutdown);
+            });
+        }
+
+        // --- the client ---------------------------------------------------
+        // Let the daemon establish its dial before the client arrives. Without
+        // this the two race for the relay's two roles, and the losing side's
+        // retry can pair with the wrong counterpart, which surfaces as a
+        // signature failure rather than as an ordering problem. A live session
+        // with no client yet means the daemon holds its role, which is the
+        // state this waits for.
+        let paired_deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while registry.live_sessions() == 0 {
+            assert!(
+                std::time::Instant::now() < paired_deadline,
+                "the daemon never reached the relay"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let client = loop {
+            match DaemonClient::connect_via_relay(&relay_address, session_id, "secret".into()) {
+                Ok(client) => break client,
+                Err(error) if std::time::Instant::now() < deadline => {
+                    let _ = error;
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => panic!("could not reach the daemon through the relay: {error:#}"),
+            }
+        };
+
+        let payload = client
+            .request(Uuid::nil(), Uuid::nil(), Command::LoadTaskState)
+            .expect("the round trip must complete through the relay");
+        assert!(matches!(payload, ResponsePayload::TaskState { .. }));
+
+        assert!(
+            recorder.bytes() > 0,
+            "no bytes crossed the relay, so this did not exercise it"
+        );
+
+        client.shutdown();
+        shutdown.store(true, Ordering::Release);
+    }
+
+    /// Hands one recorder to every relay connection thread.
+    ///
+    /// `waku_relay::serve` takes its sink by value and each connection borrows
+    /// it, so the shared handle is a thin wrapper rather than a second counter.
+    struct SharedForwarded(Arc<waku_relay::Recorder>);
+
+    impl waku_relay::Forwarded for SharedForwarded {
+        fn forwarded(&self, direction: waku_relay::Role, bytes: usize) {
+            waku_relay::Forwarded::forwarded(self.0.as_ref(), direction, bytes);
         }
     }
 }

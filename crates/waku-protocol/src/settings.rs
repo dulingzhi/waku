@@ -17,6 +17,21 @@ pub struct DaemonSettings {
     pub disabled_providers: Vec<ProviderKind>,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    /// The relay this daemon dials, when it cannot be reached directly. `None`
+    /// means the daemon only listens, which is the default and the only mode
+    /// the desktop app uses.
+    ///
+    /// This lives in settings rather than in a new config file because the
+    /// daemon already owns exactly one settings document, and a second source
+    /// would mean two places to look when a relay never connects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
+    /// Whether this daemon should also keep listening on its bind address
+    /// while dialing the relay. Off by default: a relayed daemon is usually on
+    /// a host that cannot be reached inbound anyway, and an extra listener is
+    /// just another surface to keep locked down.
+    #[serde(default)]
+    pub relay_keep_listening: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
