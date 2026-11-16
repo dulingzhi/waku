@@ -1024,7 +1024,7 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed);
 
-    let kinds = folded_transcript_row_kinds(&session, &HashSet::from([turn_id]));
+    let kinds = folded_transcript_row_kinds(&session, &HashSet::new());
     // The work the agent did must be reachable by index, not just counted.
     assert!(
         kinds.iter().any(|kind| matches!(kind, TurnBlock(_))),
@@ -1042,15 +1042,21 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
     for index in 0..kinds.len() {
         assert!(kinds.get(index).is_some());
     }
-    // Collapsed, that same work is one fold row — reachable, not lost.
+    // By default every row of the turn is on screen: work and answer alike.
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
         vec![
             Message(0),
-            TurnFold(turn_id),
+            TurnBlock(0),
             Message(1),
             ResponseFooter(turn_id, 1),
         ]
+    );
+    // Collapsing a turn is the reader's own act, and it hides the whole turn
+    // behind one summary row rather than a divider that splits the answer.
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
+        vec![Message(0), TurnCollapsed(turn_id)]
     );
 }
 
@@ -1107,7 +1113,7 @@ fn response_hover_owns_every_response_row_but_not_the_prompt() {
     assert_eq!(response_row_turn_id(&session, Message(0)), None);
     for row in [
         TurnBlock(0),
-        TurnFold(turn_id),
+        TurnCollapsed(turn_id),
         Message(1),
         ResponseFooter(turn_id, 1),
         ChangedFiles(turn_id),
@@ -1145,17 +1151,17 @@ fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
-        vec![Message(0), TurnFold(turn_id), ChangedFiles(turn_id)]
-    );
-    assert_eq!(
-        folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
         vec![
             Message(0),
-            TurnFold(turn_id),
             TurnBlock(0),
             Message(1),
             ChangedFiles(turn_id),
-        ]
+        ],
+        "an interrupted turn with no answer keeps its work visible by default"
+    );
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
+        vec![Message(0), TurnCollapsed(turn_id)]
     );
     assert_eq!(response_footer_message_index(&session, turn_id), None);
 }
@@ -1248,7 +1254,7 @@ fn an_inline_checkpoint_keeps_followup_row_identity() {
 /// Missing one leaves the transcript rendering stale rows, which drops every
 /// reasoning block and tool activity from the session.
 #[test]
-fn the_row_fingerprint_moves_whenever_the_fold_does() {
+fn the_row_fingerprint_moves_whenever_the_rows_do() {
     let mut base = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = base.begin_turn("Build it");
     base.transcript_blocks.push(TranscriptBlock {
@@ -1290,11 +1296,11 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
     let baseline_rows = rows(&base);
     let baseline_fingerprint = transcript_rows_fingerprint(&base, &settled);
 
-    // Expansion lives outside the session, so check it against the same base.
+    // Collapsing lives outside the session, so check it against the same base.
     assert_ne!(
         transcript_rows_fingerprint(&base, &HashSet::from([turn_id])),
         baseline_fingerprint,
-        "expanding a turn fold"
+        "collapsing a turn"
     );
 
     type Mutation = (&'static str, fn(&mut AgentSession));
@@ -1326,9 +1332,10 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
         ("a message reassigned to no turn", |session| {
             session.messages[1].turn_id = None;
         }),
-        // A blank part is work, not answer, so where the answer starts — and
-        // with it everything the fold swallows — turns on the content itself.
-        ("the final text part left blank", |session| {
+        // The response footer exists only for a turn that produced visible
+        // text, so emptying the whole answer removes a row.
+        ("the whole answer emptied", |session| {
+            session.messages[1].content.clear();
             session.messages[2].content.clear();
         }),
     ];
@@ -1360,8 +1367,209 @@ fn the_row_fingerprint_moves_whenever_the_fold_does() {
     );
 }
 
+/// A settled turn folds nothing by default. This is the guard against the
+/// regression that motivated the redesign: any code path that hides work
+/// behind a disclosure while the reader has not asked for it breaks here.
+///
+/// The strongest form of the assertion: with no turn collapsed, the folded row
+/// list must be byte-identical to the unfolded one. If someone reintroduces a
+/// default fold, this fails immediately.
 #[test]
-fn a_settled_turn_folds_all_of_its_work_above_the_answer() {
+fn nothing_is_hidden_by_default() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::from_reasoning(
+            ReasoningBlock {
+                content: "Looking around".into(),
+                started_at_ms: 1_000,
+                finished_at_ms: 2_000,
+            },
+            true,
+        )],
+    });
+    session.push_message(MessageRole::Assistant, "I found the relevant code.");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 2,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )],
+    });
+    session.push_message(MessageRole::Assistant, "Done. The change is ready.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    let anchors = session
+        .transcript_blocks
+        .iter()
+        .map(|block| block.after_message)
+        .collect::<Vec<_>>();
+    let unfolded = transcript_row_kinds(session.messages.len(), &anchors);
+    let by_default = folded_transcript_row_kinds(&session, &HashSet::new());
+
+    // The only row folding adds is the response footer, which is a settled
+    // turn's own action row rather than hidden content.
+    let without_footer = by_default
+        .iter()
+        .copied()
+        .filter(|row| !matches!(row, ResponseFooter(_, _)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        without_footer, unfolded,
+        "with no turn collapsed, folding must hide nothing"
+    );
+    assert!(
+        !by_default
+            .iter()
+            .any(|row| matches!(row, TurnCollapsed(_))),
+        "no turn may be collapsed unless the reader asked"
+    );
+    // Every reasoning and activity row the turn produced is present.
+    assert_eq!(
+        by_default
+            .iter()
+            .filter(|row| matches!(row, TurnBlock(_)))
+            .count(),
+        2,
+        "both work blocks must be visible: {by_default:?}"
+    );
+}
+
+/// A turn without an answer — interrupted, or tool-only — still never folds
+/// on its own: the raw work is what the reader has to judge.
+#[test]
+fn an_answerless_turn_still_shows_its_work() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )],
+    });
+    session.push_message(MessageRole::Assistant, "");
+    session.finish_active_turn(TurnStatus::Failed);
+
+    let by_default = folded_transcript_row_kinds(&session, &HashSet::new());
+    assert_eq!(by_default, vec![Message(0), TurnBlock(0), Message(1)]);
+    assert!(
+        !by_default
+            .iter()
+            .any(|row| matches!(row, TurnCollapsed(_))),
+        "a failed turn must show what it did: {by_default:?}"
+    );
+}
+
+/// Settling a turn replaces its working indicator with its response footer and
+/// moves no other row. Identical row sets at identical content means an
+/// identical height, so the transcript cannot jump when the stream ends.
+#[test]
+fn settling_a_turn_only_swaps_the_indicator_for_the_footer() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )],
+    });
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.status = SessionStatus::Working;
+
+    let running = folded_transcript_row_kinds(&session, &HashSet::new());
+    assert_eq!(
+        running.last(),
+        Some(&WorkingIndicator),
+        "a live turn closes with the working indicator: {running:?}"
+    );
+
+    session.finish_active_turn(TurnStatus::Completed);
+    session.status = SessionStatus::Idle;
+    let settled = folded_transcript_row_kinds(&session, &HashSet::new());
+
+    let without_indicator = running
+        .iter()
+        .copied()
+        .filter(|row| *row != WorkingIndicator)
+        .collect::<Vec<_>>();
+    let without_footer = settled
+        .iter()
+        .copied()
+        .filter(|row| !matches!(row, ResponseFooter(_, _)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        without_indicator, without_footer,
+        "the settled rows must match the streaming rows apart from the footer"
+    );
+}
+
+/// Every navigation anchor is a user prompt. Dropping the old fold row must not
+/// let some other row kind become an anchor.
+#[test]
+fn navigation_anchors_are_exactly_the_user_prompts() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let first = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(first),
+        activities: vec![ActivityItem::new(
+            None,
+            ActivityKind::Command,
+            "Ran tests",
+            None,
+            true,
+        )],
+    });
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.finish_active_turn(TurnStatus::Completed);
+    let second = session.begin_turn("One more thing");
+    session.push_message(MessageRole::Assistant, "Also done.");
+    session.finish_active_turn(TurnStatus::Completed);
+
+    let rows = folded_transcript_row_kinds(&session, &HashSet::from([first]));
+    let anchors = transcript_navigation_turns(&session, &rows);
+
+    assert_eq!(anchors.len(), 2, "one anchor per prompt: {rows:?}");
+    let prompt_count = session
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .count();
+    assert_eq!(
+        anchors.len(),
+        prompt_count,
+        "anchors and prompts must stay in lockstep"
+    );
+    for anchor in &anchors {
+        assert_eq!(
+            session.messages[anchor.message_index].role,
+            MessageRole::User,
+            "an anchor must land on the prompt itself"
+        );
+    }
+    // The collapsed turn is still anchored: its prompt row is outside the fold.
+    assert!(rows.contains(&Message(0)), "the prompt survives collapsing");
+    assert_eq!(anchors[0].message_index, 0);
+}
+
+#[test]
+fn a_settled_turn_shows_all_of_its_work_with_the_answer() {
     let project_id = Uuid::new_v4();
     let mut session = AgentSession::new(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
@@ -1392,31 +1600,24 @@ fn a_settled_turn_folds_all_of_its_work_above_the_answer() {
     session.push_message(MessageRole::Assistant, "Done. The change is ready.");
     session.finish_active_turn(TurnStatus::Completed);
 
-    // The summary opens the turn and everything the agent did before its
-    // answer sits behind it — reasoning, tool activity and interim commentary
-    // alike. A divider between two pieces of work would read as a cut-off
-    // response.
+    // The turn's real order, with work in place between its text parts — the
+    // default presentation of a settled turn.
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
         vec![
             Message(0),
-            TurnFold(turn_id),
-            Message(2),
-            ResponseFooter(turn_id, 2),
-        ]
-    );
-    // Expanding restores the turn's real order in place.
-    assert_eq!(
-        folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
-        vec![
-            Message(0),
-            TurnFold(turn_id),
             TurnBlock(0),
             Message(1),
             TurnBlock(1),
             Message(2),
             ResponseFooter(turn_id, 2),
         ]
+    );
+    // Collapsing hides the turn as a whole, footer included: the summary row
+    // stands in for the entire turn.
+    assert_eq!(
+        folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
+        vec![Message(0), TurnCollapsed(turn_id)]
     );
 }
 
@@ -1446,7 +1647,7 @@ fn consecutive_trailing_text_parts_all_stay_out_of_the_fold() {
         folded_transcript_row_kinds(&session, &HashSet::new()),
         vec![
             Message(0),
-            TurnFold(turn_id),
+            TurnBlock(0),
             Message(1),
             Message(2),
             ResponseFooter(turn_id, 2),
@@ -1477,11 +1678,12 @@ fn a_turn_without_an_answer_folds_completely() {
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
-        vec![Message(0), TurnFold(turn_id)]
+        vec![Message(0), TurnBlock(0), Message(1)],
+        "an answerless turn is never hidden once it settles"
     );
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::from([turn_id])),
-        vec![Message(0), TurnFold(turn_id), TurnBlock(0), Message(1)]
+        vec![Message(0), TurnCollapsed(turn_id)]
     );
 }
 
@@ -1582,7 +1784,8 @@ fn assistant_response_footer_treats_a_blank_part_as_work() {
         folded_transcript_row_kinds(&session, &HashSet::new()),
         vec![
             Message(0),
-            TurnFold(turn_id),
+            Message(1),
+            Message(2),
             Message(3),
             ResponseFooter(turn_id, 3),
         ]
@@ -1622,31 +1825,25 @@ fn unkeyed_assistant_message_keeps_a_standalone_footer() {
 }
 
 #[test]
-fn turn_fold_visibility_splice_preserves_surrounding_message_rows() {
+fn turn_collapse_splice_preserves_surrounding_message_rows() {
     let turn_id = Uuid::new_v4();
-    let collapsed = vec![
-        Message(0),
-        TurnFold(turn_id),
-        Message(2),
-        ResponseFooter(turn_id, 2),
-    ];
     let expanded = vec![
         Message(0),
-        TurnFold(turn_id),
         TurnBlock(0),
         Message(1),
         TurnBlock(1),
         Message(2),
         ResponseFooter(turn_id, 2),
     ];
+    let collapsed = vec![Message(0), TurnCollapsed(turn_id)];
 
-    let expand_splice = transcript_row_splice(&collapsed, &expanded);
-    assert_eq!(expand_splice, Some((2..2, 3)));
+    let collapse_splice = transcript_row_splice(&expanded, &collapsed);
+    assert_eq!(collapse_splice, Some((1..6, 1)));
     assert_eq!(
-        transcript_row_splice(&expanded, &collapsed),
-        Some((2..5, 0))
+        transcript_row_splice(&collapsed, &expanded),
+        Some((1..2, 5))
     );
-    assert_eq!(transcript_row_splice(&collapsed, &collapsed), None);
+    assert_eq!(transcript_row_splice(&expanded, &expanded), None);
 }
 
 #[test]

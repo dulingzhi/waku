@@ -18,7 +18,7 @@ impl Waku {
         let fingerprint = self
             .selected_session()
             .map_or(EMPTY_TRANSCRIPT_FINGERPRINT, |session| {
-                transcript_rows_fingerprint(session, &self.expanded_turns)
+                transcript_rows_fingerprint(session, &self.collapsed_turns)
             });
         if self.transcript_row_kinds_fingerprint.get() != Some(fingerprint) {
             let next_kinds = self.selected_transcript_row_kinds();
@@ -30,7 +30,7 @@ impl Waku {
 
     pub(super) fn selected_transcript_row_kinds(&self) -> Vec<TranscriptRowKind> {
         self.selected_session().map_or_else(Vec::new, |session| {
-            folded_transcript_row_kinds(session, &self.expanded_turns)
+            folded_transcript_row_kinds(session, &self.collapsed_turns)
         })
     }
 
@@ -412,7 +412,12 @@ impl Waku {
 pub(super) enum TranscriptRowKind {
     Message(usize),
     TurnBlock(usize),
-    TurnFold(Uuid),
+    /// One summary row standing in for a whole turn the reader collapsed.
+    ///
+    /// Nothing produces this unless the reader asked: a settled turn keeps all
+    /// of its work on screen. This row hides the turn's own rows — answer and
+    /// footer included — because collapsing is a request to see less.
+    TurnCollapsed(Uuid),
     /// Actions and completion time for one settled response. This is a turn
     /// row rather than part of an assistant message so tool activity that
     /// follows the last text segment can never strand the footer mid-response.
@@ -632,7 +637,7 @@ pub(super) fn assistant_response_footer(
             .filter_map(|row| match *row {
                 TranscriptRowKind::Message(index) => session.messages.get(index),
                 TranscriptRowKind::TurnBlock(_)
-                | TranscriptRowKind::TurnFold(_)
+                | TranscriptRowKind::TurnCollapsed(_)
                 | TranscriptRowKind::ResponseFooter(_, _)
                 | TranscriptRowKind::ChangedFiles(_)
                 | TranscriptRowKind::WorkingIndicator => None,
@@ -827,7 +832,7 @@ pub(super) fn transcript_row_kinds(
 /// the frame path, and the values it folds in are already well distributed.
 pub(super) fn transcript_rows_fingerprint(
     session: &AgentSession,
-    expanded_turns: &HashSet<Uuid>,
+    collapsed_turns: &HashSet<Uuid>,
 ) -> u64 {
     let mut hash = mix_uuid(EMPTY_TRANSCRIPT_FINGERPRINT, session.id);
 
@@ -840,9 +845,10 @@ pub(super) fn transcript_rows_fingerprint(
     for message in &session.messages {
         hash = mix(hash, message.role as u64);
         hash = mix_turn_id(hash, message.turn_id);
-        // The fold counts a blank text part as work, so a part crossing that
-        // line moves rows. `trim` stops at the first non-space character, so
-        // this stays a per-message constant on the frame path.
+        // The response footer exists only for a turn that produced visible
+        // text, so a message crossing that line moves rows. `trim` stops at the
+        // first non-space character, so this stays a per-message constant on
+        // the frame path.
         hash = mix(hash, message.content.trim().is_empty() as u64);
     }
 
@@ -868,10 +874,10 @@ pub(super) fn transcript_rows_fingerprint(
 
     // A set has no stable iteration order, so combine its members with an
     // order-independent sum instead of folding them in sequence.
-    let expanded = expanded_turns.iter().fold(0u64, |combined, turn_id| {
+    let collapsed = collapsed_turns.iter().fold(0u64, |combined, turn_id| {
         combined.wrapping_add(mix_uuid(EMPTY_TRANSCRIPT_FINGERPRINT, *turn_id))
     });
-    mix(mix(hash, expanded_turns.len() as u64), expanded)
+    mix(mix(hash, collapsed_turns.len() as u64), collapsed)
 }
 
 /// The fingerprint of "no session selected", and the seed everything else
@@ -896,21 +902,25 @@ fn mix_turn_id(hash: u64, turn_id: Option<Uuid>) -> u64 {
     }
 }
 
-/// A settled turn presents its answer — the trailing run of assistant text —
-/// under a single work summary row standing in for everything that came
-/// before it: reasoning, tool activity and interim commentary alike.
+/// A settled turn shows everything it produced, in the order it happened.
 ///
-/// That summary belongs at the *top* of the turn, where the work began. It
-/// used to be anchored at the first row it hid, which left it stranded mid-turn
-/// whenever the agent thought before it spoke — a divider reading "Worked for
-/// 19 seconds" with more work listed below it, as if the response had been cut
-/// in half. Expanding it restores the turn's full order in place.
+/// Folding used to be the default for every settled turn: a summary row opened
+/// the turn and everything before the trailing run of answer text disappeared
+/// behind it — reasoning, tool activity and interim commentary alike. That made
+/// the transcript unreadable at a glance; judgement about whether a turn went
+/// well needs the work, not a duration.
+///
+/// So the only thing this removes is what the reader explicitly asked to
+/// remove: a turn listed in `collapsed_turns` becomes one summary row covering
+/// its whole extent, answer and footer included. With that set empty — the
+/// state of every session that has never been collapsed by hand — this is a
+/// no-op over [`transcript_row_kinds`].
 ///
 /// Every field this reads is fingerprinted by [`transcript_rows_fingerprint`]
 /// so frames can skip the fold; consult a new one and that must learn it too.
 pub(super) fn folded_transcript_row_kinds(
     session: &AgentSession,
-    expanded_turns: &HashSet<Uuid>,
+    collapsed_turns: &HashSet<Uuid>,
 ) -> Vec<TranscriptRowKind> {
     let anchors = session
         .transcript_blocks
@@ -918,8 +928,6 @@ pub(super) fn folded_transcript_row_kinds(
         .map(|block| block.after_message)
         .collect::<Vec<_>>();
     let raw_rows = transcript_row_kinds(session.messages.len(), &anchors);
-    let mut hidden_rows = HashSet::new();
-    let mut fold_anchors = HashMap::new();
     let mut response_footers = HashMap::new();
 
     for turn in &session.turns {
@@ -930,22 +938,51 @@ pub(super) fn folded_transcript_row_kinds(
         if let Some(message_index) = response_footer_message_index_from_rows(session, &turn_rows) {
             response_footers.insert(turn.id, message_index);
         }
-        let hidden = &turn_rows[..turn_answer_start(session, &turn_rows)];
-        let Some(anchor) = hidden.first().copied() else {
-            continue;
-        };
-        fold_anchors.insert(anchor, turn.id);
-        hidden_rows.extend(hidden.iter().copied());
     }
 
-    let mut rows = Vec::with_capacity(raw_rows.len() + fold_anchors.len() + 1);
-    for row in raw_rows {
-        if let Some(turn_id) = fold_anchors.get(&row).copied() {
-            rows.push(TranscriptRowKind::TurnFold(turn_id));
+    // Which rows a collapsed turn owns, and the first of them, where its
+    // summary row stands. The prompt opens the turn but is never one of its
+    // rows, so a collapsed turn keeps its prompt as the heading above the
+    // summary — the same shape the expanded turn has.
+    let mut folded_rows = HashSet::new();
+    let mut collapse_anchors = HashMap::new();
+    if !collapsed_turns.is_empty() {
+        // The prompt opens the turn but is never one of its rows: it is the
+        // heading the summary sits under, so collapsing keeps it visible. The
+        // user's message carries the turn id and would otherwise be swallowed
+        // with the work.
+        let is_prompt = |row: &TranscriptRowKind| match *row {
+            TranscriptRowKind::Message(index) => session
+                .messages
+                .get(index)
+                .is_some_and(|message| message.role == MessageRole::User),
+            _ => false,
+        };
+        for row in raw_rows.iter().copied() {
+            if is_prompt(&row) {
+                continue;
+            }
+            if let Some(turn_id) = row_turn_id(session, row)
+                && collapsed_turns.contains(&turn_id)
+            {
+                folded_rows.insert(row);
+                collapse_anchors.entry(turn_id).or_insert(row);
+            }
         }
-        let expanded =
-            row_turn_id(session, row).is_some_and(|turn_id| expanded_turns.contains(&turn_id));
-        if expanded || !hidden_rows.contains(&row) {
+    }
+
+    // One summary row per collapsed turn, emitted where its first row was and
+    // standing in for all of them.
+    let mut rows = Vec::with_capacity(raw_rows.len() + collapse_anchors.len() + 1);
+    let mut emitted = HashSet::new();
+    for row in raw_rows {
+        if let Some(turn_id) = row_turn_id(session, row)
+            && collapse_anchors.get(&turn_id) == Some(&row)
+            && emitted.insert(turn_id)
+        {
+            rows.push(TranscriptRowKind::TurnCollapsed(turn_id));
+        }
+        if !folded_rows.contains(&row) {
             rows.push(row);
         }
     }
@@ -965,6 +1002,9 @@ pub(super) fn folded_transcript_row_kinds(
         .iter()
         .filter(|turn| {
             turn.status != TurnStatus::Running
+                // A collapsed turn is one summary row: its footer and its file
+                // card belong to the turn the reader chose to fold away.
+                && !collapsed_turns.contains(&turn.id)
                 && turn.checkpoint.as_ref().is_some_and(|checkpoint| {
                     checkpoint.status == CheckpointStatus::Ready && !checkpoint.files.is_empty()
                 })
@@ -997,9 +1037,9 @@ pub(super) fn folded_transcript_row_kinds(
 
     // Footer actions belong to the response as a whole, not to whichever text
     // message happened to arrive last. Insert one after the turn's final
-    // visible row, which may be answer text, tool activity, or a collapsed work
-    // disclosure. The message index supplies stable copy/fork identity without
-    // deciding the footer's position.
+    // visible row, which may be answer text, tool activity, or the collapsed
+    // turn's own summary. The message index supplies stable copy/fork identity
+    // without deciding the footer's position.
     if response_footers.is_empty() {
         return rows;
     }
@@ -1008,6 +1048,10 @@ pub(super) fn folded_transcript_row_kinds(
     for (index, row) in rows.iter().copied().enumerate() {
         if let Some(turn_id) = row_turn_id(session, row)
             && response_footers.contains_key(&turn_id)
+            // A collapsed turn is represented by its one summary row and gets
+            // no footer: the turn the reader folded away takes its actions with
+            // it.
+            && !collapsed_turns.contains(&turn_id)
         {
             last_row_by_turn.insert(turn_id, index);
         }
@@ -1074,7 +1118,7 @@ fn response_footer_message_index_from_rows(
     let message_index = turn_rows.iter().rev().find_map(|row| match *row {
         TranscriptRowKind::Message(message_index) => Some(message_index),
         TranscriptRowKind::TurnBlock(_)
-        | TranscriptRowKind::TurnFold(_)
+        | TranscriptRowKind::TurnCollapsed(_)
         | TranscriptRowKind::ResponseFooter(_, _)
         | TranscriptRowKind::ChangedFiles(_)
         | TranscriptRowKind::WorkingIndicator => None,
@@ -1088,7 +1132,7 @@ fn response_footer_message_index_from_rows(
         .filter_map(|row| match *row {
             TranscriptRowKind::Message(message_index) => session.messages.get(message_index),
             TranscriptRowKind::TurnBlock(_)
-            | TranscriptRowKind::TurnFold(_)
+            | TranscriptRowKind::TurnCollapsed(_)
             | TranscriptRowKind::ResponseFooter(_, _)
             | TranscriptRowKind::ChangedFiles(_)
             | TranscriptRowKind::WorkingIndicator => None,
@@ -1098,12 +1142,17 @@ fn response_footer_message_index_from_rows(
 }
 
 /// Where the turn's answer begins within its own rows: the trailing run of
-/// assistant text parts. Everything before that is work and folds.
+/// assistant text parts.
+///
+/// No longer decides what is hidden — nothing is hidden by default. The
+/// response footer still uses it, because "the answer" it copies and offers
+/// actions for is that trailing run, not the interim commentary the agent
+/// produced while it worked.
 ///
 /// A blank part renders nothing, so it counts as work rather than extending the
 /// run backwards over the reasoning and tool calls between it and the answer.
 /// A turn that produced no text at all — interrupted, or pure tool output — has
-/// no answer, and all of it folds.
+/// no answer.
 fn turn_answer_start(session: &AgentSession, turn_rows: &[TranscriptRowKind]) -> usize {
     let is_answer_text = |row: &TranscriptRowKind| match *row {
         TranscriptRowKind::Message(message_index) => session
@@ -1111,7 +1160,7 @@ fn turn_answer_start(session: &AgentSession, turn_rows: &[TranscriptRowKind]) ->
             .get(message_index)
             .is_some_and(|message| !message.content.trim().is_empty()),
         TranscriptRowKind::TurnBlock(_)
-        | TranscriptRowKind::TurnFold(_)
+        | TranscriptRowKind::TurnCollapsed(_)
         | TranscriptRowKind::ResponseFooter(_, _)
         | TranscriptRowKind::ChangedFiles(_)
         | TranscriptRowKind::WorkingIndicator => false,
@@ -1129,7 +1178,7 @@ fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
     match row {
         TranscriptRowKind::Message(index) => session.messages.get(index)?.turn_id,
         TranscriptRowKind::TurnBlock(index) => session.transcript_blocks.get(index)?.turn_id,
-        TranscriptRowKind::TurnFold(turn_id) => Some(turn_id),
+        TranscriptRowKind::TurnCollapsed(turn_id) => Some(turn_id),
         TranscriptRowKind::ResponseFooter(turn_id, _) => Some(turn_id),
         TranscriptRowKind::ChangedFiles(turn_id) => Some(turn_id),
         TranscriptRowKind::WorkingIndicator => None,
@@ -1150,27 +1199,65 @@ pub(super) fn response_row_turn_id(session: &AgentSession, row: TranscriptRowKin
         }
         TranscriptRowKind::WorkingIndicator => None,
         TranscriptRowKind::TurnBlock(_)
-        | TranscriptRowKind::TurnFold(_)
+        | TranscriptRowKind::TurnCollapsed(_)
         | TranscriptRowKind::ResponseFooter(_, _)
         | TranscriptRowKind::ChangedFiles(_) => row_turn_id(session, row),
     }
 }
 
-pub(super) fn turn_fold_label(session: &AgentSession, turn_id: Uuid) -> String {
+/// The summary row standing in for a turn the reader collapsed, and the
+/// default-visible footer stats of every turn.
+///
+/// A failed turn must never read as a successful one: reporting "worked for
+/// 12 seconds" over work that actually failed is worse than saying nothing.
+/// Until the protocol carries a reason, this much is always knowable.
+pub(super) fn turn_summary_label(session: &AgentSession, turn_id: Uuid) -> String {
     let Some(turn) = session.turns.iter().find(|turn| turn.id == turn_id) else {
         return tr!("transcript.worked");
     };
-    let seconds = turn
-        .completed_at
-        .unwrap_or_else(unix_time)
-        .saturating_sub(turn.started_at)
-        .max(1);
-    let duration = format_worked_duration(seconds);
+    match turn.status {
+        TurnStatus::Failed => return tr!("transcript.turn_failed"),
+        TurnStatus::Running => return tr!("transcript.turn_running"),
+        TurnStatus::Completed | TurnStatus::Interrupted => {}
+    }
+    let duration = format_worked_duration(turn_worked_seconds(turn));
     if turn.status == TurnStatus::Interrupted {
         tr!("transcript.you_stopped_after", duration = duration)
     } else {
         tr!("transcript.worked_for", duration = duration)
     }
+}
+
+/// How long a turn ran, in whole seconds, never zero.
+pub(super) fn turn_worked_seconds(turn: &AgentTurn) -> u64 {
+    turn.completed_at
+        .unwrap_or_else(unix_time)
+        .saturating_sub(turn.started_at)
+        .max(1)
+}
+
+/// How many tool activities a turn ran, counting one collapsed block's rows.
+///
+/// The footer states this beside the duration so a reader can tell a slow turn
+/// from a busy one without opening anything.
+pub(super) fn turn_activity_count(session: &AgentSession, turn_id: Uuid) -> usize {
+    session
+        .transcript_blocks
+        .iter()
+        .filter(|block| block.turn_id == Some(turn_id))
+        .map(|block| block.activities.len())
+        .sum()
+}
+
+/// The files a turn changed, from its post-turn checkpoint.
+pub(super) fn turn_changed_file_count(session: &AgentSession, turn_id: Uuid) -> usize {
+    session
+        .turns
+        .iter()
+        .find(|turn| turn.id == turn_id)
+        .and_then(|turn| turn.checkpoint.as_ref())
+        .filter(|checkpoint| checkpoint.status == CheckpointStatus::Ready)
+        .map_or(0, |checkpoint| checkpoint.files.len())
 }
 
 pub(super) fn format_worked_duration(seconds: u64) -> String {
