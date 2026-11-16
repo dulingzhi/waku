@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
+import vectors from './record.vectors.json';
+
 import {
   authenticationString,
   fingerprintOf,
@@ -235,5 +237,32 @@ describe('authentication strings', () => {
     const transcript = new Uint8Array(32);
     for (let index = 0; index < 32; index += 1) transcript[index] = index * 7;
     expect(/^\d{4} \d{4} \d{4}$/.test(authenticationString(transcript))).toBe(true);
+  });
+});
+
+describe('cross-language pairing vectors', () => {
+  // The Rust exporter writes these from fixed inputs, so they are reproducible
+  // and a diff means the protocol changed. Without this group the two
+  // implementations could drift and the failure would surface as a correct
+  // pairing rejected -- or, worse, an attacker's handshake accepted, since the
+  // fingerprint is the only thing standing between a client and a substituted
+  // daemon.
+  test('the fingerprint matches the Rust implementation', () => {
+    expect(fingerprintOf(hexToBytes(vectors.pairing.ed25519Public))).toBe(
+      vectors.pairing.fingerprint,
+    );
+  });
+
+  test('the authentication string matches the Rust implementation', () => {
+    expect(authenticationString(hexToBytes(vectors.pairing.transcriptHash))).toBe(
+      vectors.pairing.authenticationString,
+    );
+  });
+
+  test('a rendered code round-trips and carries the expected fingerprint', () => {
+    const parsed = parsePairingCode(vectors.pairing.renderedCode);
+    expect(parsed.fingerprint).toBe(vectors.pairing.fingerprint);
+    expect(parsed.relay).toBe('relay.example.test:443');
+    expect(renderPairingCode(parsed)).toBe(vectors.pairing.renderedCode);
   });
 });
