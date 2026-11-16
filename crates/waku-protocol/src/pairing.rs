@@ -135,6 +135,53 @@ impl PairingCode {
             fingerprint,
         })
     }
+
+    /// Which WebSocket scheme a client should use to reach this relay.
+    ///
+    /// **Never taken from the code.** A code travels through chat windows and
+    /// photographs, so a code that could name `ws://` would be a code an
+    /// attacker rewrites to strip the transport encryption — and the
+    /// fingerprint check would still pass, because it authenticates the daemon
+    /// rather than the path.
+    ///
+    /// A loopback relay gets `ws://` because it never leaves the machine, and
+    /// requiring a certificate there would push self-hosters toward copying a
+    /// certificate instead of toward the safe default. Everything else gets
+    /// `wss://`: a relay reached over a network is exactly the case where the
+    /// transport is the only thing between the peer and an observer.
+    pub fn relay_scheme(&self) -> &'static str {
+        if is_loopback_host(&self.relay) {
+            "ws"
+        } else {
+            "wss"
+        }
+    }
+
+    /// The full URL a client dials, scheme included.
+    pub fn relay_url(&self) -> String {
+        format!("{}://{}", self.relay_scheme(), self.relay)
+    }
+}
+
+/// Whether `host[:port]` names the local machine.
+///
+/// Only the textual forms that unambiguously mean loopback. Anything else —
+/// including a hostname that resolves to loopback — is treated as remote, which
+/// errs toward `wss`.
+fn is_loopback_host(relay: &str) -> bool {
+    let host = if let Some(rest) = relay.strip_prefix('[') {
+        // `[::1]:8080`
+        match rest.split_once(']') {
+            Some((address, _)) => address,
+            None => return false,
+        }
+    } else {
+        match relay.rsplit_once(':') {
+            Some((address, port)) if port.chars().all(|c| c.is_ascii_digit()) => address,
+            _ => relay,
+        }
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 /// The longest session id a relay accepts.
@@ -275,6 +322,67 @@ mod tests {
         assert!(PairingCode::parse("https://relay.test/abc#d258dc0e8595ed66").is_err());
         assert!(PairingCode::parse("").is_err());
         assert!(PairingCode::parse("   ").is_err());
+    }
+
+    #[test]
+    fn a_remote_relay_is_reached_over_tls_whatever_the_code_says() {
+        // The scheme is chosen, never read. A code that could name `ws://`
+        // would be a code an attacker rewrites to strip transport encryption
+        // while the fingerprint check still passes, because that check covers
+        // the daemon and not the path.
+        for relay in [
+            "relay.example.test:443",
+            "relay.example.test",
+            "203.0.113.7:8080",
+            // A hostname that merely looks local is remote until proven
+            // otherwise; erring toward TLS is the safe direction.
+            "127.0.0.1.nip.io:443",
+            "localhost.evil.test:443",
+            "10.0.0.5:9000",
+        ] {
+            let code = PairingCode {
+                relay: relay.into(),
+                session_id: "abc".into(),
+                fingerprint: "d258dc0e8595ed66".into(),
+            };
+            assert_eq!(code.relay_scheme(), "wss", "{relay} must use TLS");
+            assert!(code.relay_url().starts_with("wss://"), "{relay}");
+        }
+    }
+
+    #[test]
+    fn a_loopback_relay_does_not_need_a_certificate() {
+        // A relay on the same machine never crosses a network, and demanding a
+        // certificate there would make the working self-hosted setup the
+        // inconvenient one.
+        for relay in ["127.0.0.1:8080", "localhost:8080", "[::1]:8080"] {
+            let code = PairingCode {
+                relay: relay.into(),
+                session_id: "abc".into(),
+                fingerprint: "d258dc0e8595ed66".into(),
+            };
+            assert_eq!(code.relay_scheme(), "ws", "{relay}");
+            assert_eq!(code.relay_url(), format!("ws://{relay}"));
+        }
+    }
+
+    #[test]
+    fn a_relay_with_no_port_is_still_classified() {
+        // `rsplit_once(':')` would otherwise take the host for a port when
+        // there is no port, and silently classify a remote host as loopback.
+        let remote = PairingCode {
+            relay: "relay.example.test".into(),
+            session_id: "abc".into(),
+            fingerprint: "d258dc0e8595ed66".into(),
+        };
+        assert_eq!(remote.relay_scheme(), "wss");
+
+        let local = PairingCode {
+            relay: "localhost".into(),
+            session_id: "abc".into(),
+            fingerprint: "d258dc0e8595ed66".into(),
+        };
+        assert_eq!(local.relay_scheme(), "ws");
     }
 
     #[test]

@@ -2773,6 +2773,26 @@ mod tests {
             .expect("the round trip must complete through the relay");
         assert!(matches!(payload, ResponsePayload::TaskState { .. }));
 
+        // The string a user is asked to compare must actually reach the client.
+        // Without this the value could be computed correctly and then dropped
+        // before anyone could see it, leaving a security check that looks
+        // implemented and is absent.
+        //
+        // That both ends derive the *same* string is `record.rs`'s business and
+        // is checked there against both halves of a handshake; this asserts the
+        // value survives the trip to a real client over a real relay.
+        let shown = client.authentication_string().to_owned();
+        assert_eq!(
+            shown.len(),
+            14,
+            "the string is twelve digits in three groups of four, got {shown:?}"
+        );
+        assert_eq!(
+            shown.chars().filter(|c| c.is_ascii_digit()).count(),
+            12,
+            "the string must be digits: {shown:?}"
+        );
+
         assert!(
             recorder.bytes() > 0,
             "no bytes crossed the relay, so this did not exercise it"

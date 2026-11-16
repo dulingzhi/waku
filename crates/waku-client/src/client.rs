@@ -43,6 +43,12 @@ struct ClientInner {
     /// A fingerprint of this connection's session key, so a caller can tell
     /// two connections apart without ever touching the key itself.
     session_key_fingerprint: [u8; 32],
+    /// The short authentication string for this connection.
+    ///
+    /// Shown to the user so they can compare it against what the daemon
+    /// displays. It is the only value that detects a relay running one
+    /// handshake per side — such a relay passes every other check.
+    authentication_string: String,
 }
 
 #[derive(Clone, Copy)]
@@ -132,8 +138,16 @@ impl DaemonClient {
     /// pin, because such a call would be the one used by accident.
     pub fn connect_with_pairing_code(code: &str, token: String) -> anyhow::Result<Self> {
         let parsed = waku_protocol::pairing::PairingCode::parse(code)?;
-        let client =
-            Self::connect_via_relay_with_identity(&parsed.relay, &parsed.session_id, token, None)?;
+        // The scheme comes from the code's classification, not from the code's
+        // text: a remote relay is reached over TLS whatever a rewritten code
+        // might say. Passing the composed URL means the generic relay path
+        // below never has to guess a default for this case.
+        let client = Self::connect_via_relay_with_identity(
+            &parsed.relay_url(),
+            &parsed.session_id,
+            token,
+            None,
+        )?;
 
         let proven = client.daemon_signing_key();
         if let Err(error) = pairing_fingerprint_matches(&parsed.fingerprint, &proven) {
@@ -229,6 +243,11 @@ impl DaemonClient {
         set_client_read_timeout(sealed.socket_mut(), Some(READ_POLL_INTERVAL))?;
 
         let session_key_fingerprint = sealed.outgoing_key_fingerprint();
+        // Captured here, before the connection is handed to its thread: the
+        // string is a property of the handshake that just completed, and the UI
+        // needs it while it can still ask the user to compare it against what
+        // the daemon shows.
+        let authentication_string = sealed.authentication_string();
         let (outgoing, outgoing_rx) = unbounded();
         let inner = Arc::new(ClientInner {
             outgoing,
@@ -240,6 +259,7 @@ impl DaemonClient {
             disconnected: AtomicBool::new(false),
             daemon_signing_key,
             session_key_fingerprint,
+            authentication_string,
         });
         let thread_inner = inner.clone();
         std::thread::Builder::new()
@@ -293,6 +313,16 @@ impl DaemonClient {
     /// see [`waku_protocol::sealed::SealedConnection::outgoing_key_fingerprint`].
     pub fn session_key_fingerprint(&self) -> [u8; 32] {
         self.inner.session_key_fingerprint
+    }
+
+    /// The short authentication string for this connection.
+    ///
+    /// A user compares this against the daemon's. It is what catches a relay
+    /// that terminated the connection and ran one handshake per side: each of
+    /// those handshakes is individually sound, so every other check passes,
+    /// but the two ends then show different strings.
+    pub fn authentication_string(&self) -> &str {
+        &self.inner.authentication_string
     }
 
     pub fn unsubscribe(&self, session_id: Uuid, runtime_id: Uuid) {
