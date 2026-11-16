@@ -128,6 +128,52 @@ export function isValidSessionId(sessionId: string): boolean {
 }
 
 /**
+ * Whether `host[:port]` names the local machine (`pairing.rs:169`).
+ *
+ * Only the textual forms that unambiguously mean loopback. Anything else —
+ * including a hostname that resolves to loopback — is treated as remote, which
+ * errs toward `wss`.
+ */
+function isLoopbackHost(relay: string): boolean {
+  let host = relay;
+  if (relay.startsWith('[')) {
+    // `[::1]:8080`
+    const close = relay.indexOf(']');
+    if (close < 0) return false;
+    host = relay.slice(1, close);
+  } else {
+    const colon = relay.lastIndexOf(':');
+    if (colon >= 0) {
+      const port = relay.slice(colon + 1);
+      if (port.length > 0 && /^[0-9]+$/.test(port)) host = relay.slice(0, colon);
+    }
+  }
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
+/**
+ * Which WebSocket scheme a client should use to reach this relay
+ * (`PairingCode::relay_scheme`, `pairing.rs:152`).
+ *
+ * **Never taken from the code.** A code travels through chat windows and
+ * photographs, so a code that could name `ws://` would be one an attacker
+ * rewrites to strip the transport encryption — and the fingerprint check would
+ * still pass, because it authenticates the daemon rather than the path.
+ *
+ * A loopback relay gets `ws://`: it never leaves the machine, and demanding a
+ * certificate there would push self-hosters toward copying one instead of
+ * toward the safe default. Everything else gets `wss://`.
+ */
+export function relayScheme(code: PairingCode): 'ws' | 'wss' {
+  return isLoopbackHost(code.relay) ? 'ws' : 'wss';
+}
+
+/** The full URL a client dials (`PairingCode::relay_url`, `pairing.rs:161`). */
+export function relayUrl(code: PairingCode): string {
+  return `${relayScheme(code)}://${code.relay}`;
+}
+
+/**
  * `fingerprint_of` (`pairing.rs:171`).
  *
  * Sixteen lowercase hex characters: the first 8 bytes of SHA-256 over the

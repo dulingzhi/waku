@@ -11,6 +11,8 @@ import {
   pairingFingerprintMatches,
   PairingCodeError,
   parsePairingCode,
+  relayScheme,
+  relayUrl,
   renderPairingCode,
   type PairingCode,
 } from './pairing';
@@ -123,6 +125,62 @@ describe('session ids', () => {
   test('refuses an over-long id', () => {
     expect(isValidSessionId('a'.repeat(MAX_SESSION_ID_LEN))).toBe(true);
     expect(isValidSessionId('a'.repeat(MAX_SESSION_ID_LEN + 1))).toBe(false);
+  });
+});
+
+describe('relay scheme', () => {
+  /**
+   * The cases `pairing.rs` tests pin. The scheme is chosen, never read from the
+   * code, so these are the rules — not examples.
+   */
+  const code = (relay: string): PairingCode => ({
+    relay,
+    sessionId: 'abc',
+    fingerprint: 'd258dc0e8595ed66',
+  });
+
+  test('a remote relay is reached over TLS whatever the code says', () => {
+    for (const relay of [
+      'relay.example.test:443',
+      'relay.example.test',
+      '203.0.113.7:8080',
+      // A hostname that merely looks local is remote until proven otherwise.
+      '127.0.0.1.nip.io:443',
+      'localhost.evil.test:443',
+      '10.0.0.5:9000',
+    ]) {
+      expect(`${relay}:${relayScheme(code(relay))}`).toBe(`${relay}:wss`);
+      expect(relayUrl(code(relay))).toBe(`wss://${relay}`);
+    }
+  });
+
+  test('a loopback relay does not need a certificate', () => {
+    for (const relay of ['127.0.0.1:8080', 'localhost:8080', '[::1]:8080']) {
+      expect(`${relay}:${relayScheme(code(relay))}`).toBe(`${relay}:ws`);
+      expect(relayUrl(code(relay))).toBe(`ws://${relay}`);
+    }
+  });
+
+  test('a relay with no port is still classified', () => {
+    // A last-colon split that treated the host as a port would silently mark a
+    // remote host as loopback.
+    expect(relayScheme(code('relay.example.test'))).toBe('wss');
+    expect(relayScheme(code('localhost'))).toBe('ws');
+  });
+
+  test('an unbracketed IPv6-ish relay is treated as remote', () => {
+    // `2001:db8::1` ends in `:1`, whose "port" is numeric, so the host is
+    // `2001:db8:` — not loopback, and therefore `wss`. Erring toward TLS is
+    // the safe direction for anything that is not exactly loopback.
+    expect(relayScheme(code('2001:db8::1'))).toBe('wss');
+    // The literal `::1` with no port splits as host `:` plus port `1`, which
+    // is not the loopback spelling either; only a bracketed form is.
+    expect(relayScheme(code('::1'))).toBe('wss');
+  });
+
+  test('an empty bracket does not crash or claim loopback', () => {
+    expect(relayScheme(code('[broken'))).toBe('wss');
+    expect(relayScheme(code('[]:80'))).toBe('wss');
   });
 });
 

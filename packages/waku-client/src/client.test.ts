@@ -10,6 +10,7 @@ import {
   type WebSocketLike,
 } from "./client";
 import { PROTOCOL_VERSION } from "./generated";
+import { fingerprintOf } from "./pairing";
 import {
   agreementBytes,
   Opener,
@@ -38,8 +39,27 @@ class FakeSocket implements WebSocketLike {
   private sealer: Sealer | null = null;
   private opener: Opener | null = null;
   private readonly daemonX25519 = x25519.utils.randomSecretKey();
-  private readonly signingKey = ed25519.utils.randomSecretKey();
-  readonly daemonEd25519Public = ed25519.getPublicKey(this.signingKey);
+  private signingKey: Uint8Array = ed25519.utils.randomSecretKey();
+
+  /** The daemon's public signing key. A getter, not a field: `overrideSigningKey`
+   * replaces the private half after construction, and a frozen copy computed in
+   * the constructor would keep advertising the old one. */
+  get daemonEd25519Public(): Uint8Array {
+    return ed25519.getPublicKey(this.signingKey) as Uint8Array;
+  }
+
+  /** The daemon's signing key, so a test can pin a client to this exact daemon. */
+  get daemonSigningKey(): Uint8Array {
+    return this.signingKey;
+  }
+  /**
+   * Use a caller-supplied signing key, so two FakeSockets can present the same
+   * daemon identity — which is what a pairing test needs to build the pin
+   * before the client is constructed.
+   */
+  overrideSigningKey(key: Uint8Array): void {
+    this.signingKey = key;
+  }
 
   addEventListener(type: "open", listener: () => void): void;
   addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
@@ -107,7 +127,6 @@ class FakeSocket implements WebSocketLike {
       daemonX25519Public,
     );
     const signature = ed25519.sign(transcript, this.signingKey);
-
     const shared = x25519.getSharedSecret(serverEphemeralSecret, clientEphemeral);
     const bound = x25519.getSharedSecret(serverEphemeralSecret, clientStatic);
     const boundToDaemon = x25519.getSharedSecret(this.daemonX25519, clientEphemeral);
@@ -398,8 +417,117 @@ test("daemonUrl pins the versioned endpoint", () => {
   expect(daemonUrl("wss://waku.example.test")).toBe("wss://waku.example.test/v1");
 });
 
-describe("sealed transport", () => {
-  test("a plaintext text frame is refused, not skipped", async () => {
+describe("pairing", () => {
+  /** A client pinned to whatever key this fake daemon will prove. */
+  function pinned(options: { wrongFingerprint?: boolean } = {}) {
+    const sockets: FakeSocket[] = [];
+    let nextId = 0;
+    // Construct the daemon first so its fingerprint is known before the client
+    // is built: the pin is a constructor option, not something applied later.
+    const probe = new FakeSocket();
+    const fingerprint = options.wrongFingerprint
+      ? '0000000000000000'
+      : fingerprintOf(probe.daemonEd25519Public);
+    const client = new WakuClient({
+      address: "127.0.0.1:4312",
+      token: "secret",
+      expectedFingerprint: fingerprint,
+      randomUUID: () => `00000000-0000-4000-8000-${String(++nextId).padStart(12, "0")}`,
+      webSocketFactory: () => {
+        const socket = new FakeSocket();
+        socket.overrideSigningKey(probe.daemonSigningKey);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    return { client, sockets, fingerprint };
+  }
+
+  test("accepts a daemon whose key matches the pin", async () => {
+    const { client, sockets } = pinned();
+    const connected = client.connect();
+    const socket = sockets[0]!;
+    socket.open();
+    await flush();
+    socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await expect(connected).resolves.toBeUndefined();
+    expect(client.connected).toBe(true);
+  });
+
+  test("refuses a daemon whose key does not match the pin", async () => {
+    const { client, sockets } = pinned({ wrongFingerprint: true });
+    const connected = client.connect();
+    // Attach the handler before driving the handshake: the rejection lands
+    // while `socket.receive` is still awaited, and an unawaited rejecting
+    // promise is reported as unhandled even when asserted on afterwards.
+    const settled = connected.catch((cause: unknown) => cause);
+    const socket = sockets[0]!;
+    socket.open();
+    await flush();
+    socket.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    const error = (await settled) as WakuConnectionError;
+    expect(error.kind).toBe("rejected");
+    expect(error.message).toContain("not the one it claims");
+    expect(client.connected).toBe(false);
+  });
+
+  test("a rejected pin never retries", async () => {
+    const { client, sockets } = pinned({ wrongFingerprint: true });
+    const settled = client.connect().catch(() => undefined);
+    sockets[0]!.open();
+    await flush();
+    sockets[0]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    await settled;
+    // No second socket was created: the failure is final for this attempt.
+    expect(sockets).toHaveLength(1);
+  });
+
+  test("a pin that matches a four-character prefix is still refused", async () => {
+    // The sabotage case: a comparison that stopped early would accept this.
+    const probe = new FakeSocket();
+    const real = fingerprintOf(probe.daemonEd25519Public);
+    const sockets: FakeSocket[] = [];
+    const client = new WakuClient({
+      address: "127.0.0.1:4312",
+      token: "secret",
+      expectedFingerprint: `${real.slice(0, 4)}${'0'.repeat(12)}`,
+      randomUUID: () => "00000000-0000-4000-8000-000000000001",
+      webSocketFactory: () => {
+        const socket = new FakeSocket();
+        socket.overrideSigningKey(probe.daemonSigningKey);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    const connected = client.connect();
+    const settled = connected.catch((cause: unknown) => cause);
+    sockets[0]!.open();
+    await flush();
+    sockets[0]!.receive({ type: "hello", protocolVersion: PROTOCOL_VERSION, daemonVersion: "test" });
+    const error = (await settled) as WakuConnectionError;
+    expect(error.kind).toBe("rejected");
+  });
+
+  test("exposes the authentication string once connected", async () => {
+    const { client, sockets } = fixture();
+    expect(client.authenticationString).toBeNull();
+    await connect(client, sockets);
+    const sas = client.authenticationString;
+    expect(sas).not.toBeNull();
+    expect(/^\d{4} \d{4} \d{4}$/.test(sas!)).toBe(true);
+  });
+
+  test("clears the authentication string when the connection drops", async () => {
+    const { client, sockets } = fixture();
+    const socket = await connect(client, sockets);
+    expect(client.authenticationString).not.toBeNull();
+    socket.fail("connection lost");
+    await flush();
+    expect(client.authenticationString).toBeNull();
+  });
+});
+
+describe("sealed transport", () => {  test("a plaintext text frame is refused, not skipped", async () => {
     const { client, sockets } = fixture();
     const connected = client.connect();
     const socket = sockets[0]!;

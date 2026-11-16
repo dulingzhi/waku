@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 use crate::DaemonClient;
 use waku_protocol::{
-    APP_EXECUTABLE_ENV, Command, DAEMON_TOKEN_ENV, DaemonReady, DaemonSettings, PROTOCOL_VERSION,
-    ReplayCursor, ResponsePayload,
+    APP_EXECUTABLE_ENV, Command, DAEMON_TOKEN_ENV, DaemonPairing, DaemonReady, DaemonSettings,
+    PROTOCOL_VERSION, ReplayCursor, ResponsePayload,
 };
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -135,6 +135,13 @@ pub struct DaemonProcess {
     /// process restart.
     client_address: String,
     token: String,
+    /// What this process published for reaching it through a relay, if it dials
+    /// one.
+    ///
+    /// Kept per process rather than per supervisor because the session id is
+    /// generated at startup: a restart produces a new one, and a cached value
+    /// would show a code that no longer pairs with anything.
+    pairing: Option<DaemonPairing>,
 }
 
 impl DaemonProcess {
@@ -243,7 +250,17 @@ impl DaemonProcess {
             child,
             client_address,
             token,
+            pairing: ready.pairing,
         })
+    }
+
+    /// What this process published for reaching it through a relay.
+    ///
+    /// `None` when the daemon only listens, which is the ordinary desktop
+    /// setup. A value here is the only way a desktop UI can show a code: the
+    /// readiness line is consumed during startup and never surfaced otherwise.
+    pub fn pairing(&self) -> Option<&DaemonPairing> {
+        self.pairing.as_ref()
     }
 
     pub fn client(&self) -> DaemonClient {
@@ -466,6 +483,20 @@ impl DaemonSupervisor {
 
     pub fn is_remote(&self) -> bool {
         self.inner.executable.is_none()
+    }
+
+    /// What the running daemon published for reaching it through a relay.
+    ///
+    /// `None` for a daemon that only listens, and `None` while it is
+    /// restarting: a code belongs to one process, and the session id changes on
+    /// every start, so showing the previous one would invite a pairing attempt
+    /// against something that no longer exists.
+    pub fn pairing(&self) -> Option<DaemonPairing> {
+        let target = self.inner.target.lock();
+        match &*target {
+            DaemonTarget::Local(process) => process.pairing().cloned(),
+            DaemonTarget::Restarting(_) | DaemonTarget::Remote { .. } => None,
+        }
     }
 
     pub fn settings(&self) -> DaemonSettings {
@@ -788,5 +819,33 @@ mod tests {
             "127.0.0.1:34123"
         );
         assert_eq!(desktop_client_address("[::]:34123").unwrap(), "[::1]:34123");
+    }
+
+    /// A readiness line from a relayed daemon must arrive with its code intact.
+    ///
+    /// This is the whole path a desktop UI depends on: the daemon writes the
+    /// line, the supervisor parses it, and the pairing block is what the
+    /// settings page shows. Nothing else in this crate would notice if the
+    /// field were dropped, because a missing `pairing` is exactly what a
+    /// listening-only daemon produces.
+    #[test]
+    fn a_relayed_readiness_line_keeps_its_pairing_block() {
+        let line = r#"{"address":"127.0.0.1:34123","protocolVersion":8,"pid":9,
+            "x25519Public":"AA==","ed25519Public":"AQ==",
+            "pairing":{"code":"waku://relay.test:443/abc#d258dc0e8595ed66",
+                       "relay":"relay.test:443","sessionId":"abc"}}"#;
+        let ready: DaemonReady = serde_json::from_str(line).expect("the line must parse");
+
+        let pairing = ready.pairing.expect("a relayed daemon reports pairing");
+        assert_eq!(pairing.code, "waku://relay.test:443/abc#d258dc0e8595ed66");
+        assert_eq!(pairing.relay, "relay.test:443");
+        assert_eq!(pairing.session_id, "abc");
+
+        // And a listening-only daemon must parse with none, so the UI's
+        // "no relay configured" case is reachable rather than an error.
+        let plain = r#"{"address":"127.0.0.1:34123","protocolVersion":8,"pid":9,
+            "x25519Public":"AA==","ed25519Public":"AQ=="}"#;
+        let ready: DaemonReady = serde_json::from_str(plain).expect("the line must parse");
+        assert!(ready.pairing.is_none());
     }
 }

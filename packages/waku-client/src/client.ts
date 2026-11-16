@@ -14,6 +14,7 @@ import {
   SessionKeys,
   type Direction,
 } from "./record";
+import { pairingFingerprintMatches } from "./pairing";
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const OPEN = 1;
@@ -45,6 +46,18 @@ export interface WakuClientOptions {
   /** A daemon address (`127.0.0.1:34123`) or complete ws(s) URL. */
   address: string;
   token: string;
+  /**
+   * The daemon fingerprint a pairing code named, as 16 lowercase hex
+   * characters.
+   *
+   * When set, the handshake must prove a signing key whose fingerprint is
+   * exactly this. A mismatch fails the connection rather than retrying: the
+   * whole point of the pin is that a relay substituting its own keys cannot
+   * proceed, and a retry loop would just hide the failure. This is also why
+   * there is no "skip" — a check a caller may disable is a check an attacker
+   * disables.
+   */
+  expectedFingerprint?: string;
   clientId?: string;
   requestTimeoutMs?: number;
   /** How long a handshake may take before the attempt fails as `timeout`. */
@@ -115,6 +128,8 @@ export class WakuClient {
 
   private readonly address: string;
   private readonly token: string;
+  /** The fingerprint a pairing code pinned, or null for a plain connection. */
+  private readonly expectedFingerprint: string | null;
   private readonly requestTimeoutMs: number;
   private readonly connectTimeoutMs: number;
   private readonly socketFactory: (url: string) => WebSocketLike;
@@ -142,6 +157,7 @@ export class WakuClient {
   constructor(options: WakuClientOptions) {
     this.address = options.address;
     this.token = options.token;
+    this.expectedFingerprint = options.expectedFingerprint?.toLowerCase() ?? null;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 120_000;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 15_000;
     this.socketFactory =
@@ -183,6 +199,23 @@ export class WakuClient {
   /** The close reason of the last established connection that ended remotely, when the peer gave one. */
   get lastDisconnectReason(): string | null {
     return this.disconnectReason;
+  }
+
+  /**
+   * The short authentication string for the current connection, or null when
+   * there is no live connection.
+   *
+   * Both ends show this to a person, and comparing it is the only check that
+   * catches a relay running one handshake per side: two handshakes produce two
+   * different strings, while the pairing fingerprint covers only the daemon's
+   * identity. That is why a UI must display it rather than merely record it.
+   *
+   * Cleared when the connection drops, because a string from a finished
+   * handshake describes a connection that is no longer the one in progress.
+   */
+  get authenticationString(): string | null {
+    if (this.state !== "connected" || !this.keys) return null;
+    return this.keys.authenticationString();
   }
 
   /** Connects, or reconnects while replaying events after the last seen sequence. */
@@ -523,6 +556,33 @@ export class WakuClient {
     if (generation !== this.connectionGeneration) {
       keys.destroy();
       return;
+    }
+    // The pin, checked against the key the handshake just proved. Done here —
+    // after the signature verified and before any business message — so a relay
+    // that substituted its own keys cannot get a single frame through. A
+    // mismatch fails the attempt instead of retrying: a retry loop would turn a
+    // detected substitution into a connection that eventually succeeds.
+    if (this.expectedFingerprint) {
+      const proven = keys.peerEd25519;
+      if (!proven) {
+        keys.destroy();
+        failHandshake(
+          new WakuConnectionError(
+            "handshake",
+            "the handshake proved no daemon signing key to compare with the pairing code",
+          ),
+        );
+        socket.close(1002, "pairing check failed");
+        return;
+      }
+      try {
+        pairingFingerprintMatches(this.expectedFingerprint, proven);
+      } catch (error) {
+        keys.destroy();
+        failHandshake(new WakuConnectionError("rejected", asError(error).message));
+        socket.close(1002, "pairing check failed");
+        return;
+      }
     }
     this.keys = keys;
     const clientSide = keys.clientSide();
