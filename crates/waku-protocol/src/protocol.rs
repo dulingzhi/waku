@@ -43,6 +43,29 @@ pub struct DaemonReady {
     pub x25519_public: String,
     /// Base64 of the 32-byte Ed25519 public key, used to verify signatures.
     pub ed25519_public: String,
+    /// Present only when the daemon dials a relay.
+    ///
+    /// It lives here rather than on a second stdout line because the readiness
+    /// reader stops after one line: a daemon that printed its pairing code
+    /// separately would have that line read by nobody, and the UI would show
+    /// nothing while looking implemented.
+    ///
+    /// Absent — not empty — when no relay is configured, so a daemon that only
+    /// listens cannot be mistaken for a relayed one with a blank code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<DaemonPairing>,
+}
+
+/// What a client needs to reach a relayed daemon.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonPairing {
+    /// The daemon's `waku://` code, ready to display.
+    pub code: String,
+    /// The relay the daemon dialed, for display next to the code.
+    pub relay: String,
+    /// The session the daemon is holding.
+    pub session_id: String,
 }
 
 // Versioned wire type: variants differ in size by design, and boxing one would
@@ -649,6 +672,52 @@ mod tests {
     /// names are part of what a client pins. They are camelCase on the wire and
     /// the two keys are plain base64 strings.
     #[test]
+    fn a_relayed_daemon_publishes_its_pairing_code_in_the_readiness_line() {
+        // The readiness reader stops after one line, so the code has to travel
+        // here. A daemon that printed it separately would have that line read
+        // by nobody and the UI would show nothing while looking implemented.
+        let ready = DaemonReady {
+            address: "127.0.0.1:4570".into(),
+            protocol_version: PROTOCOL_VERSION,
+            pid: 7,
+            x25519_public: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into(),
+            ed25519_public: "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=".into(),
+            pairing: Some(DaemonPairing {
+                code: "waku://relay.test:443/abc123#d258dc0e8595ed66".into(),
+                relay: "relay.test:443".into(),
+                session_id: "abc123".into(),
+            }),
+        };
+        let json = serde_json::to_value(&ready).unwrap();
+
+        assert_eq!(
+            json["pairing"]["code"],
+            "waku://relay.test:443/abc123#d258dc0e8595ed66"
+        );
+        assert_eq!(json["pairing"]["relay"], "relay.test:443");
+        assert_eq!(json["pairing"]["sessionId"], "abc123");
+
+        // And it must survive a round trip: the desktop reads this line from a
+        // child process's stdout, not from a value it built itself.
+        let parsed: DaemonReady = serde_json::from_value(json).unwrap();
+        let pairing = parsed
+            .pairing
+            .expect("a relayed daemon must report pairing");
+        assert_eq!(
+            waku_protocol_pairing_round_trip(&pairing.code),
+            ("relay.test".to_owned() + ":443", "abc123".to_owned())
+        );
+    }
+
+    /// Parse a code and return its relay and session, so this test checks the
+    /// published code is one a client could actually use.
+    fn waku_protocol_pairing_round_trip(code: &str) -> (String, String) {
+        let parsed =
+            crate::pairing::PairingCode::parse(code).expect("the published code must parse");
+        (parsed.relay, parsed.session_id)
+    }
+
+    #[test]
     fn the_readiness_line_carries_the_daemon_public_keys() {
         let ready = DaemonReady {
             address: "127.0.0.1:4567".into(),
@@ -656,8 +725,19 @@ mod tests {
             pid: 4242,
             x25519_public: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into(),
             ed25519_public: "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=".into(),
+            // Absent, which is what a daemon that only listens sends.
+            pairing: None,
         };
         let json = serde_json::to_value(&ready).unwrap();
+
+        // A daemon with no relay must not carry the key at all. An explicit
+        // `null` would make "no relay" and "a relay whose code is missing"
+        // different shapes for the client to tell apart, and only one of them
+        // is worth handling.
+        assert!(
+            json.get("pairing").is_none(),
+            "a listening-only daemon must omit pairing entirely"
+        );
 
         assert_eq!(json["address"], "127.0.0.1:4567");
         assert_eq!(json["protocolVersion"], PROTOCOL_VERSION);

@@ -3,4 +3,21 @@ import type { ComputerAppGrant } from "./ComputerAppGrant";
 import type { ProviderKind } from "./ProviderKind";
 import type { JsonValue } from "./serde_json/JsonValue";
 
-export type DaemonSettings = { computer_use_enabled: boolean, computer_use_allowed_apps: Array<ComputerAppGrant>, disabled_providers: Array<ProviderKind>, provider_binary_overrides: { [key in ProviderKind]?: string }, } & ({ [key in string]: number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null });
+export type DaemonSettings = { computer_use_enabled: boolean, computer_use_allowed_apps: Array<ComputerAppGrant>, disabled_providers: Array<ProviderKind>, provider_binary_overrides: { [key in ProviderKind]?: string },
+/**
+ * The relay this daemon dials, when it cannot be reached directly. `None`
+ * means the daemon only listens, which is the default and the only mode
+ * the desktop app uses.
+ *
+ * This lives in settings rather than in a new config file because the
+ * daemon already owns exactly one settings document, and a second source
+ * would mean two places to look when a relay never connects.
+ */
+relay_url?: string | null,
+/**
+ * Whether this daemon should also keep listening on its bind address
+ * while dialing the relay. Off by default: a relayed daemon is usually on
+ * a host that cannot be reached inbound anyway, and an extra listener is
+ * just another surface to keep locked down.
+ */
+relay_keep_listening: boolean, } & ({ [key in string]: number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null });

@@ -34,12 +34,62 @@ fn main() -> anyhow::Result<()> {
             )
         })?;
 
+    // Loaded here, before readiness, because the relay decision rides in the
+    // readiness line. Loaded once: the store moves into the backend later, so a
+    // second open would mean reading the same document twice and leaving the
+    // two copies to disagree.
+    let task_path = waku_core::persistence::StateStore::default_path();
+    let settings = waku_core::DaemonSettingsStore::open_with_legacy(
+        waku_core::DaemonSettings::default_path(),
+        [task_path.with_file_name("settings.json")],
+    )
+    .context("could not load daemon settings")?;
+
+    // The relay decision is made before readiness is announced because the
+    // pairing code travels *in* the readiness line. The readiness reader stops
+    // after one line, so a code printed separately would be read by nobody.
+    let configured = settings.get();
+    let relay_address = configured.relay_url.clone();
+    let relay_keep_listening = configured.relay_keep_listening; // Generated here, not configured. A user copies a relay address from an
+    // operator; making them also invent a session id would mean one they can
+    // mistype with no way to tell a typo from a relay outage. It changes on
+    // every start, which is what a pairing code is for.
+    let session_id = relay_address
+        .as_ref()
+        .map(|_| waku_core::relay::new_session_id());
+    let pairing = relay_address.as_ref().map(|relay| {
+        let code = waku_protocol::pairing::PairingCode {
+            relay: relay.clone(),
+            session_id: session_id.clone().expect("generated alongside the relay"),
+            fingerprint: identity.fingerprint(),
+        };
+        waku_protocol::DaemonPairing {
+            code: code.render(),
+            relay: relay.clone(),
+            session_id: session_id.clone().expect("generated alongside the relay"),
+        }
+    });
+
+    // A configured address that already carries a scheme or a path produces a
+    // pairing code nobody can parse, and the daemon would start looking healthy
+    // while being unusable. Failing here puts the error in the log of the
+    // process that was misconfigured, instead of in a client that cannot tell a
+    // bad code from a dead relay.
+    if let Some(relay) = relay_address.as_deref()
+        && (relay.contains("://") || relay.contains('/'))
+    {
+        return Err(anyhow::anyhow!(
+            "relay_url must be host:port with no scheme and no path, but is {relay:?}"
+        ));
+    }
+
     let ready = DaemonReady {
         address: address.to_string(),
         protocol_version: PROTOCOL_VERSION,
         pid: std::process::id(),
         x25519_public: identity.x25519_public_base64(),
         ed25519_public: identity.ed25519_public_base64(),
+        pairing,
     };
     println!("{}", serde_json::to_string(&ready)?);
     std::io::stdout().flush()?;
@@ -77,12 +127,6 @@ fn main() -> anyhow::Result<()> {
             })?;
     }
 
-    let task_path = waku_core::persistence::StateStore::default_path();
-    let settings = waku_core::DaemonSettingsStore::open_with_legacy(
-        waku_core::DaemonSettings::default_path(),
-        [task_path.with_file_name("settings.json")],
-    )
-    .context("could not load daemon settings")?;
     let task_store = waku_core::persistence::StateStore::daemon(task_path);
 
     // The identity is the one loaded above, before readiness was announced.
@@ -91,13 +135,6 @@ fn main() -> anyhow::Result<()> {
     // missing and both could try to create it, and the `DaemonReady` line could
     // publish keys from a different identity than the one the server ran on.
     let identity = Arc::new(identity);
-
-    // Read the relay configuration before the store moves into the backend:
-    // this is the only place the daemon decides whether to dial, and it is a
-    // startup decision rather than something to re-read later.
-    let configured = settings.get();
-    let relay_url = configured.relay_url.clone();
-    let relay_keep_listening = configured.relay_keep_listening;
 
     // One `DaemonServer` serves both modes, so a client that reaches the daemon
     // through the relay sees the same sessions, subscriptions and replay cursors
@@ -112,34 +149,12 @@ fn main() -> anyhow::Result<()> {
         },
     ));
 
-    let Some(relay_address) = relay_url else {
+    let Some(relay_address) = relay_address else {
         // No relay configured: listen and nothing else, which is the default
         // and the mode the desktop app expects.
         return server.serve(listener, shutdown);
     };
-
-    // The session id is generated here, not configured. A user copies a relay
-    // address from an operator; making them also invent a session id would mean
-    // one they can mistype and no way to tell a typo from a relay outage. The id
-    // changes on every start, which is what a pairing code is for.
-    let session_id = waku_core::relay::new_session_id();
-    // The code a client needs: relay address, session, and the daemon's identity
-    // fingerprint so the client can pin it. Printed on stdout as JSON next to
-    // `DaemonReady` so a UI can read it rather than scraping a log line.
-    let pairing = waku_protocol::pairing::PairingCode {
-        relay: relay_address.clone(),
-        session_id: session_id.clone(),
-        fingerprint: identity.fingerprint(),
-    };
-    println!(
-        "{}",
-        serde_json::json!({
-            "relay": relay_address,
-            "sessionId": session_id,
-            "pairingCode": pairing.render(),
-        })
-    );
-    std::io::stdout().flush()?;
+    let session_id = session_id.expect("generated whenever a relay is configured");
 
     // A relay is configured. Dial out, and keep listening only if asked: a
     // relayed daemon usually sits behind the very NAT that made the relay
