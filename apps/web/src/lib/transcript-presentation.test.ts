@@ -16,7 +16,7 @@ import {
   reasoningTitle,
   shouldVirtualizeActivityText,
   turnAnswerStart,
-  turnFoldLabel,
+  turnSummaryLabel,
   userMessageRewindTurnCount,
   formatMessageTime,
   formatWorkingElapsed,
@@ -24,9 +24,17 @@ import {
 
 describe('desktop transcript language', () => {
   test('uses the desktop stopped and worked labels', () => {
-    expect(turnFoldLabel(turn('interrupted', 100, 164))).toBe('You stopped after 1 minute 4 seconds')
-    expect(turnFoldLabel(turn('completed', 100, 160))).toBe('Worked for 1 minute')
-    expect(turnFoldLabel(turn('completed', 100, 3_820))).toBe('Worked for 1 hour 2 minutes')
+    expect(turnSummaryLabel(turn('interrupted', 100, 164))).toBe('You stopped after 1 minute 4 seconds')
+    expect(turnSummaryLabel(turn('completed', 100, 160))).toBe('Worked for 1 minute')
+    expect(turnSummaryLabel(turn('completed', 100, 3_820))).toBe('Worked for 1 hour 2 minutes')
+  })
+
+  test('a failed turn never reads as a successful one', () => {
+    // The whole point of the change: "Worked for 12 seconds" over a failure is
+    // worse than saying nothing, so the label states the failure instead.
+    expect(turnSummaryLabel(turn('failed', 100, 112))).toBe('This turn failed')
+    expect(turnSummaryLabel(turn('failed', 100, 112))).not.toContain('Worked')
+    expect(turnSummaryLabel(turn('running', 100, 0))).toBe('Running')
   })
 
   test('calls provider reasoning a thought', () => {

@@ -32,6 +32,7 @@ import {
   activityFileChangeStats,
   activityGroupIsLive,
   activityHeaderTitle,
+  activityPayloadPreview,
   activityPreview,
   activityRowDetail,
   activityTextRows,
@@ -41,9 +42,13 @@ import {
   formatMessageTime,
   formatWorkingElapsed,
   reasoningTitle,
+  shouldInlineDiff,
   shouldVirtualizeActivityText,
+  turnActivityCount,
   turnAnswerStart,
-  turnFoldLabel,
+  turnChangedFileCount,
+  turnSummaryLabel,
+  turnWorkedSeconds,
   userMessageRewindTurnCount,
 } from '@/lib/transcript-presentation'
 import type { AssistantResponseFooter, Translator } from '@/lib/transcript-presentation'
@@ -122,13 +127,13 @@ export function Transcript({
   const activeTurnFrame = useRef<number | null>(null)
   const wasNearBottom = useRef(true)
   const expandedSession = useRef(session.id)
-  const [expandedTurns, setExpandedTurns] = useState<Set<string>>(new Set())
+  const [collapsedTurns, setCollapsedTurns] = useState<Set<string>>(new Set())
   const [atTop, setAtTop] = useState(true)
   const [atBottom, setAtBottom] = useState(true)
   const [railFits, setRailFits] = useState(false)
   const [activeTurnIndex, setActiveTurnIndex] = useState(() => Math.max(0, session.turns.length - 1))
   const [messageEdit, setMessageEdit] = useState<MessageEdit | null>(null)
-  const items = buildTranscriptItems(session, expandedTurns, new Set(rewindTurnCounts))
+  const items = buildTranscriptItems(session, collapsedTurns, new Set(rewindTurnCounts))
   const itemIndexesByMessage = new Map<string, number>()
   items.forEach((item, index) => {
     if (item.kind === 'message' && item.message.role === 'user') {
@@ -182,7 +187,7 @@ export function Transcript({
   useEffect(() => {
     if (expandedSession.current === session.id) return
     expandedSession.current = session.id
-    setExpandedTurns(new Set())
+    setCollapsedTurns(new Set())
     setMessageEdit(null)
     wasNearBottom.current = true
     setAtBottom(true)
@@ -278,7 +283,7 @@ export function Transcript({
               }}
               rewindingTurnCount={rewindingTurnCount}
               onReviewChanges={onReviewChanges}
-              onToggleTurn={(turnId) => setExpandedTurns((current) => {
+              onToggleTurn={(turnId) => setCollapsedTurns((current) => {
                 const next = new Set(current)
                 if (next.has(turnId)) next.delete(turnId)
                 else next.add(turnId)
@@ -531,11 +536,12 @@ function ConversationNavigationRail({
 
 type TranscriptRenderItem =
   | {
-      kind: 'fold'
+      kind: 'collapsed'
       key: string
       turnId: string
       turn: AgentSession['turns'][number]
-      expanded: boolean
+      steps: number
+      files: number
     }
   | {
       kind: 'block'
@@ -572,12 +578,12 @@ type TranscriptRenderItem =
 
 function buildTranscriptItems(
   session: AgentSession,
-  expandedTurns: Set<string>,
+  collapsedTurns: Set<string>,
   availableRewindTurnCounts: ReadonlySet<number>,
 ): TranscriptRenderItem[] {
   const turns = new Map(session.turns.map((turn) => [turn.id, turn]))
   const rawRows = transcriptRows(session)
-  const folds = turnFolds(session, rawRows)
+  const collapses = turnCollapses(session, rawRows, collapsedTurns)
   const responseFooters = assistantResponseFooters(session)
   const inlineCheckpoints = new Map<number, NonNullable<AgentSession['turns'][number]['checkpoint']>>()
   const standaloneCheckpoints = new Map<string, NonNullable<AgentSession['turns'][number]['checkpoint']>>()
@@ -601,17 +607,18 @@ function buildTranscriptItems(
   const items: TranscriptRenderItem[] = []
   let seenUserMessage = false
   for (const row of rawRows) {
-    const fold = folds.anchors.get(row.key)
-    if (fold) {
+    const collapse = collapses.anchors.get(row.key)
+    if (collapse) {
       items.push({
-        kind: 'fold',
-        key: `fold-${fold.turnId}`,
-        turnId: fold.turnId,
-        turn: fold.turn,
-        expanded: expandedTurns.has(fold.turnId),
+        kind: 'collapsed',
+        key: `collapsed-${collapse.turnId}`,
+        turnId: collapse.turnId,
+        turn: collapse.turn,
+        steps: turnActivityCount(session, collapse.turnId),
+        files: turnChangedFileCount(session, collapse.turnId),
       })
     }
-    if (folds.hidden.has(row.key) && !expandedTurns.has(row.turnId ?? '')) continue
+    if (collapses.hidden.has(row.key)) continue
     if (row.kind === 'block') {
       const liveTurn = Boolean(
         row.block.turn_id
@@ -655,7 +662,7 @@ function buildTranscriptItems(
   if (standaloneCheckpoints.size) {
     const lastItemByTurn = new Map<string, number>()
     items.forEach((item, index) => {
-      const turnId = item.kind === 'fold' || item.kind === 'changed'
+      const turnId = item.kind === 'collapsed' || item.kind === 'changed'
         ? item.turnId
         : item.kind === 'block'
           ? item.block.turn_id
@@ -761,12 +768,15 @@ function TranscriptItemView({
 }) {
   if (item.kind === 'tail') return <div className="h-5" />
   let content: ReactNode
-  if (item.kind === 'fold') {
+  if (item.kind === 'collapsed') {
     content = (
-      <TurnFold
-        expanded={item.expanded}
-        label={turnFoldLabel(item.turn, t)}
-        onToggle={() => onToggleTurn(item.turnId)}
+      <TurnCollapsedRow
+        files={item.files}
+        onOpen={() => onToggleTurn(item.turnId)}
+        steps={item.steps}
+        t={t}
+        turn={item.turn}
+        turnId={item.turnId}
       />
     )
   } else if (item.kind === 'block') {
@@ -908,53 +918,81 @@ function transcriptRows(session: AgentSession): TranscriptItem[] {
   return rows
 }
 
-function turnFolds(session: AgentSession, rows: TranscriptItem[]) {
+/**
+ * Which rows a collapsed turn hides, and where its summary row stands.
+ *
+ * Nothing folds by default. A turn appears here only because the reader
+ * collapsed it, and then every row it produced goes behind one summary row —
+ * its prompt stays visible as the heading above it.
+ */
+function turnCollapses(session: AgentSession, rows: TranscriptItem[], collapsedTurns: Set<string>) {
   const hidden = new Set<string>()
   const anchors = new Map<string, { turnId: string; turn: AgentSession['turns'][number] }>()
+  if (!collapsedTurns.size) return { hidden, anchors }
   const rowsByTurn = new Map<string, TranscriptItem[]>()
   for (const row of rows) {
     if (!row.turnId || (row.kind === 'message' && row.message.role !== 'assistant')) continue
+    if (!collapsedTurns.has(row.turnId)) continue
     const turnRows = rowsByTurn.get(row.turnId) ?? []
     turnRows.push(row)
     rowsByTurn.set(row.turnId, turnRows)
   }
   for (const turn of session.turns) {
-    if (turn.status === 'running') continue
-    const turnRows = rowsByTurn.get(turn.id) ?? []
-    const answerStart = turnAnswerStart(turnRows, (row) => (
-      row.kind === 'message' && Boolean(row.message.content.trim())
-    ))
-    const work = turnRows.slice(0, answerStart)
-    if (!work.length) continue
-    anchors.set(work[0]!.key, { turnId: turn.id, turn })
-    for (const row of work) hidden.add(row.key)
+    const turnRows = rowsByTurn.get(turn.id)
+    if (!turnRows?.length) continue
+    anchors.set(turnRows[0]!.key, { turnId: turn.id, turn })
+    for (const row of turnRows) hidden.add(row.key)
   }
   return { hidden, anchors }
 }
 
-function TurnFold({
-  label,
-  expanded,
-  onToggle,
+/** One collapsed turn: its summary standing in for the whole turn. */
+function TurnCollapsedRow({
+  turnId,
+  turn,
+  steps,
+  files,
+  t,
+  onOpen,
 }: {
-  label: string
-  expanded: boolean
-  onToggle: () => void
+  turnId: string
+  turn: AgentSession['turns'][number]
+  steps: number
+  files: number
+  t: Translator
+  onOpen: () => void
 }) {
+  const failed = turn.status === 'failed'
+  const stats = [
+    formatDuration(turnWorkedSeconds(turn), t),
+    ...(steps > 0 ? [t('transcript.step_count', { count: steps })] : []),
+    ...(files > 0 ? [t('transcript.file_count', { count: files })] : []),
+  ].join(' · ')
   return (
-    <div className="flex h-6 w-full items-center gap-2.5">
-      <div className="h-px flex-1 bg-border" />
-      <button
-        aria-expanded={expanded}
-        className="flex h-6 shrink-0 items-center gap-1 rounded px-0.5 text-[11.5px] font-medium leading-4 text-[var(--text-tertiary)] outline-none hover:text-[var(--text-secondary)] focus-visible:ring-1 focus-visible:ring-ring"
-        type="button"
-        onClick={onToggle}
+    <button
+      aria-expanded={false}
+      className={cn(
+        'flex h-[34px] w-full min-w-0 items-center gap-2 rounded-[9px] border bg-[var(--overlay)] px-2.5 text-left outline-none',
+        'hover:bg-[var(--overlay-strong)] focus-visible:ring-1 focus-visible:ring-ring',
+        failed ? 'border-destructive' : 'border-[var(--border-strong)]',
+      )}
+      onClick={onOpen}
+      type="button"
+    >
+      <WakuIcon
+        className={cn('size-3 shrink-0', failed ? 'text-destructive' : 'text-[var(--text-tertiary)]')}
+        name={failed ? 'alert' : 'chevronRight'}
+      />
+      <span
+        className={cn(
+          'shrink-0 text-[12.5px] font-medium',
+          failed ? 'text-destructive' : 'text-[var(--text-secondary)]',
+        )}
       >
-        {label}
-        <WakuIcon className="size-2.5" name={expanded ? 'chevronDown' : 'chevronRight'} />
-      </button>
-      <div className="h-px flex-1 bg-border" />
-    </div>
+        {turnSummaryLabel(turn, t)}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-[12.5px] text-[var(--text-tertiary)]">{stats}</span>
+    </button>
   )
 }
 
@@ -1426,7 +1464,6 @@ function Markdown({
 function ActivityGroup({
   activities,
   backgroundWork,
-  liveGroup,
   t,
   onOpenBackgroundWork,
 }: {
@@ -1436,37 +1473,22 @@ function ActivityGroup({
   t: Translator
   onOpenBackgroundWork?: (key: BackgroundWorkKey) => void
 }) {
-  const [expanded, setExpanded] = useState(liveGroup)
-  useEffect(() => {
-    setExpanded(liveGroup)
-  }, [liveGroup])
+  // No group header and no disclosure: every activity row is on screen, in the
+  // order it happened. `liveGroup` still tells a running block that it is live.
   if (!activities.length) return null
   return (
-    <div className="min-w-0 text-[12px] text-[var(--text-tertiary)]">
-      <button
-        aria-expanded={expanded}
-        className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring"
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-      >
-        <span className="min-w-0 truncate text-left text-[12.5px] font-medium text-[var(--text-secondary)]">{activityHeaderTitle(activities, liveGroup, t)}</span>
-        <WakuIcon className="size-2.5 shrink-0" name={expanded ? 'chevronDown' : 'chevronRight'} />
-      </button>
-      {expanded && (
-        <div className="ml-1.5 flex min-w-0 flex-col gap-2 border-l pb-0.5 pl-3">
-          {activities.map((activity) => (
-            <ActivityRow
-              activity={activity}
-              backgroundWork={backgroundWork.find((item) => (
-                item.originActivityId === activity.source_id
-              ))}
-              key={activity.id}
-              t={t}
-              onOpenBackgroundWork={onOpenBackgroundWork}
-            />
+    <div className="ml-1.5 flex min-w-0 flex-col border-l pb-0.5 pl-3">
+      {activities.map((activity) => (
+        <ActivityRow
+          activity={activity}
+          backgroundWork={backgroundWork.find((item) => (
+            item.originActivityId === activity.source_id
           ))}
-        </div>
-      )}
+          key={activity.id}
+          t={t}
+          onOpenBackgroundWork={onOpenBackgroundWork}
+        />
+      ))}
     </div>
   )
 }
@@ -1516,22 +1538,38 @@ function ActivityRow({
     }
     updateDetailEdges(viewport)
   }, [activity.complete, expanded, scrollContent, updateDetailEdges])
+  const failedRow = activity.failed
+  // Small single-file edits open on sight; everything else shows its tail.
+  const inlineDiff = !expanded && !activity.reasoning && shouldInlineDiff(activity)
+  const payloadPreview = expanded || inlineDiff || activity.reasoning
+    ? null
+    : activityPayloadPreview(activity)
   return (
-    <div className="min-w-0 overflow-hidden rounded-[9px] border bg-[var(--activity-surface)]">
+    <div className={cn('min-w-0', failedRow && 'border-l-2 border-destructive')}>
       <div className="flex h-7 w-full min-w-0 items-center">
         <button
-          aria-expanded={hasDetail ? expanded : undefined}
+          aria-expanded={hasDetail || Boolean(inlineDiff) ? expanded : undefined}
           className={cn(
-            'flex h-7 min-w-0 flex-1 items-center gap-2 px-2 text-left outline-none',
-            expanded ? 'rounded-t-[8px]' : 'rounded-[8px]',
-            hasDetail && 'hover:bg-[var(--activity-hover-surface)] active:bg-[var(--activity-active-surface)] focus-visible:bg-[var(--activity-hover-surface)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
+            'flex h-7 min-w-0 flex-1 items-center gap-2 rounded-[6px] pl-2 pr-1 text-left outline-none',
+            (hasDetail || inlineDiff) && 'cursor-pointer',
+            (hasDetail || inlineDiff) && 'hover:bg-[var(--activity-hover-surface)] active:bg-[var(--activity-active-surface)] focus-visible:bg-[var(--activity-hover-surface)] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring',
           )}
           disabled={!hasDetail}
           type="button"
           onClick={() => setExpanded((value) => !value)}
         >
-          <WakuIcon className="size-3 shrink-0 text-[var(--text-tertiary)]" name={iconName} />
-          <span className="shrink-0 font-semibold text-[var(--text-secondary)]">{actionLabel}</span>
+          <WakuIcon
+            className={cn('size-3 shrink-0', failedRow ? 'text-destructive' : 'text-[var(--text-tertiary)]')}
+            name={iconName}
+          />
+          <span
+            className={cn(
+              'shrink-0 font-semibold',
+              failedRow ? 'text-destructive' : 'text-[var(--text-secondary)]',
+            )}
+          >
+            {actionLabel}
+          </span>
           {rowDetail && (
             <span className="min-w-0 flex-1 truncate text-[var(--text-secondary)]">
               {rowDetail}
@@ -1543,7 +1581,10 @@ function ActivityRow({
               <span className="shrink-0 text-destructive">-{fileStats.deletions}</span>
             </>
           )}
-          <ActivityState activity={activity} expanded={expanded} hasDetail={hasDetail} t={t} />
+          {failedRow && (
+            <span className="shrink-0 text-[11px] text-destructive">{t('transcript.row_failed')}</span>
+          )}
+          <ActivityState activity={activity} expanded={expanded} hasDetail={hasDetail || inlineDiff} t={t} />
         </button>
         {backgroundWork && onOpenBackgroundWork && (
           <button
@@ -1561,6 +1602,21 @@ function ActivityRow({
           </button>
         )}
       </div>
+      {inlineDiff && <InlineActivityDiff activity={activity} />}
+      {payloadPreview && (
+        <button
+          className="mt-1 ml-0.5 flex w-full min-w-0 flex-col gap-0.5 overflow-hidden rounded-[6px] bg-[var(--activity-surface)] px-2.5 py-1.5 text-left font-mono text-[10.5px] leading-4 text-[var(--text-secondary)] outline-none hover:bg-[var(--activity-hover-surface)] focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={() => setExpanded(true)}
+          type="button"
+        >
+          <span className="whitespace-pre-wrap">{payloadPreview.text}</span>
+          {payloadPreview.hiddenLines > 0 && (
+            <span className="text-[10px] text-[var(--text-tertiary)]">
+              {t('activity.more_lines', { count: payloadPreview.hiddenLines })}
+            </span>
+          )}
+        </button>
+      )}
       {expanded && hasDetail && (
         activity.reasoning ? (
           <div className="border-t">
@@ -1597,6 +1653,41 @@ function ActivityRow({
 }
 
 type ActivityScrollEdges = { atTop: boolean; atBottom: boolean }
+
+/**
+ * A small file change shown inline, inside the row that made it.
+ *
+ * Deliberately plain: this is a glance at a one-line edit, not a review
+ * surface. Anything larger stays behind the row's own disclosure, and the
+ * Review panel remains the place a change is actually read.
+ */
+function InlineActivityDiff({ activity }: { activity: ActivityItem }) {
+  const change = activity.file_changes?.[0]
+  if (!change?.diff) return null
+  return (
+    <div className="mt-1 ml-0.5 min-w-0 overflow-hidden rounded-[6px] bg-[var(--activity-surface)] font-mono text-[10.5px] leading-4">
+      {change.diff.split('\n').map((line, index) => {
+        const added = line.startsWith('+') && !line.startsWith('+++')
+        const removed = line.startsWith('-') && !line.startsWith('---')
+        const header = line.startsWith('@@') || line.startsWith('+++') || line.startsWith('---')
+        return (
+          <div
+            className={cn(
+              'w-full whitespace-pre-wrap px-2',
+              added && 'bg-[color-mix(in_srgb,var(--success)_14%,transparent)] text-[var(--text-secondary)]',
+              removed && 'bg-[color-mix(in_srgb,var(--destructive)_14%,transparent)] text-[var(--text-secondary)]',
+              !added && !removed && 'text-[var(--text-tertiary)]',
+              header && 'font-medium',
+            )}
+            key={`${index}-${line}`}
+          >
+            {line || ' '}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 function ActivityScrollableContent({
   children,

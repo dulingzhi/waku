@@ -299,8 +299,21 @@ export function activityFileChangeStats(activity: ActivityItem) {
   }
 }
 
-export function turnFoldLabel(turn: AgentSession['turns'][number], t?: Translator) {
-  const seconds = Math.max(1, (turn.completed_at ?? Math.floor(Date.now() / 1_000)) - turn.started_at)
+/**
+ * The label on a collapsed turn's summary row, and the default-visible footer
+ * stats of every turn.
+ *
+ * A failed turn must never read as a successful one. Reporting "Worked for 12
+ * seconds" over work that failed is worse than saying nothing.
+ */
+export function turnSummaryLabel(turn: AgentSession['turns'][number], t?: Translator) {
+  if (turn.status === 'failed') {
+    return t ? t('transcript.turn_failed') : 'This turn failed'
+  }
+  if (turn.status === 'running') {
+    return t ? t('transcript.turn_running') : 'Running'
+  }
+  const seconds = turnWorkedSeconds(turn)
   if (t) {
     return t(turn.status === 'interrupted' ? 'transcript.you_stopped_after' : 'transcript.worked_for', {
       duration: formatDuration(seconds, t),
@@ -309,6 +322,84 @@ export function turnFoldLabel(turn: AgentSession['turns'][number], t?: Translato
   return turn.status === 'interrupted'
     ? `You stopped after ${formatDuration(seconds)}`
     : `Worked for ${formatDuration(seconds)}`
+}
+
+/** How long a turn ran, in whole seconds, never zero. */
+export function turnWorkedSeconds(turn: AgentSession['turns'][number]) {
+  return Math.max(1, (turn.completed_at ?? Math.floor(Date.now() / 1_000)) - turn.started_at)
+}
+
+/** How many tool activities a turn ran. */
+export function turnActivityCount(session: AgentSession, turnId: string) {
+  return session.transcript_blocks
+    .filter((block) => block.turn_id === turnId)
+    .reduce((total, block) => (
+      total + (block.content.kind === 'activities' ? block.content.data.length : 0)
+    ), 0)
+}
+
+/** The files a turn changed, from its post-turn checkpoint. */
+export function turnChangedFileCount(session: AgentSession, turnId: string) {
+  const turn = session.turns.find((candidate) => candidate.id === turnId)
+  const checkpoint = turn?.checkpoint
+  if (!checkpoint || checkpoint.status !== 'ready') return 0
+  return checkpoint.files.length
+}
+
+/**
+ * Lines of a payload shown before the reader asks for all of it.
+ *
+ * The tail, not the head: a command's verdict — a test summary, an error stack,
+ * an exit reason — is at the end of its output, and the head is usually
+ * progress noise.
+ */
+export const ACTIVITY_PAYLOAD_PREVIEW_LINES = 8
+
+export interface ActivityPayloadPreview {
+  text: string
+  hiddenLines: number
+  fromTail: boolean
+}
+
+/**
+ * The payload preview for an activity the reader has not opened.
+ *
+ * `null` means there is nothing worth showing: a row whose whole story is
+ * already in its title stays one line, and an empty output is not the same as
+ * one that printed blank lines.
+ */
+export function activityPayloadPreview(activity: ActivityItem): ActivityPayloadPreview | null {
+  const output = activity.output?.trim()
+  if (!output) return null
+  const lines = output.split('\n')
+  if (activity.kind === 'command') {
+    const start = Math.max(0, lines.length - ACTIVITY_PAYLOAD_PREVIEW_LINES)
+    return { text: lines.slice(start).join('\n'), hiddenLines: start, fromTail: true }
+  }
+  const shown = lines.slice(0, ACTIVITY_PAYLOAD_PREVIEW_LINES)
+  return {
+    text: shown.join('\n'),
+    hiddenLines: lines.length - shown.length,
+    fromTail: false,
+  }
+}
+
+/**
+ * Whether a file change is small enough to show inline without being asked.
+ *
+ * All three must hold: one file, at most `INLINE_DIFF_MAX_LINES` rows, and a
+ * change that both adds and removes. A one-line edit is exactly the case where
+ * a click to see it feels like friction, while a pure addition or deletion is
+ * fully described by its file row and its counts.
+ */
+export function shouldInlineDiff(activity: ActivityItem) {
+  const INLINE_DIFF_MAX_LINES = 30
+  const changes = activity.file_changes ?? []
+  if (changes.length !== 1) return false
+  const change = changes[0]!
+  if (!change.diff || change.additions == null || change.deletions == null) return false
+  if (change.additions <= 0 || change.deletions <= 0) return false
+  return change.diff.split('\n').length <= INLINE_DIFF_MAX_LINES
 }
 
 export function formatDuration(seconds: number, t?: Translator) {
