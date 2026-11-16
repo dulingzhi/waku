@@ -275,7 +275,7 @@ impl Registry {
     ///
     /// Returns an error when the role is already held, which the caller must
     /// treat as a refusal and not a retry.
-    pub fn claim(self: &Arc<Self>, session_id: &str, role: Role) -> Result<Slot> {
+    pub fn claim(self: &Arc<Self>, session_id: &str, role: Role, source: &str) -> Result<Slot> {
         let counter = {
             let mut sessions = self.sessions.lock().expect("registry lock");
             let expired = sessions
@@ -286,6 +286,19 @@ impl Registry {
                 // its counters are meaningless and its slots belong to sockets
                 // that should already be closed.
                 sessions.remove(session_id);
+            }
+            let is_new = !sessions.contains_key(session_id);
+            // Rate-limit only the *creation* of a session, and only here.
+            //
+            // The earlier version of this idea keyed the limit on the caller's
+            // address and counted every connection, which would have throttled
+            // ordinary use: a client and its daemon usually arrive from one
+            // address (`127.0.0.1` on a single machine, one NAT everywhere
+            // else), so pairing one session would have spent two of the four
+            // requests the default allows. A session is what a hostile caller
+            // would create in bulk, and a session is what this counts.
+            if is_new {
+                self.admit_source(source)?;
             }
             let session = sessions
                 .entry(session_id.to_owned())
@@ -496,7 +509,7 @@ fn handle(
     // Every socket must have a counterpart or time out. The socket is parked in
     // the registry while it waits, so the other end's thread can find it.
     let mut socket = socket;
-    let slot = match registry.claim(&session_id, role) {
+    let slot = match registry.claim(&session_id, role, &peer.ip().to_string()) {
         Ok(slot) => slot,
         Err(error) => {
             // A role that is already held is a refusal, not a retry. Say so in
@@ -545,7 +558,7 @@ fn handle(
                 // session. Their socket being taken only means the pump
                 // started, and a role released here let a second daemon claim
                 // the session while the first was still carrying traffic.
-                parking.wait_until_finished(&session_id, limits.session_duration);
+                parking.wait_until_finished(&session_id);
                 Ok(())
             } else {
                 bail!("timed out waiting for a counterpart")
@@ -620,27 +633,26 @@ impl Parking {
         self.arrived.notify_all();
     }
 
-    /// Block until no pump is running for `session_id`, or `timeout` elapses.
+    /// Block until no pump is running for `session_id`.
     ///
     /// Returns immediately when nothing is running, which is the case when the
     /// counterpart vanished before it could drive.
-    fn wait_until_finished(&self, session_id: &str, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
+    ///
+    /// **No timeout, deliberately.** A deadline here would return while the
+    /// pump was still running and release the parked side's role, letting a
+    /// second daemon claim a session that was still carrying traffic — the same
+    /// defect as waking on `take`, only on a one-hour timescale instead of an
+    /// instant one, which is why no test caught it. The wait is bounded by the
+    /// pump itself: it ends when either socket closes or the byte cap is hit.
+    fn wait_until_finished(&self, session_id: &str) {
         let mut running = self.running.lock().expect("running lock");
-        loop {
-            let Some(count) = running.get(session_id) else {
-                return;
-            };
-            if *count == 0 || Instant::now() >= deadline {
-                return;
-            }
-            let now = Instant::now();
-            let remaining = deadline.checked_duration_since(now).unwrap_or_default();
-            let (guard, _) = self
+        while running.get(session_id).is_some_and(|count| *count > 0) {
+            // A spurious wake-up just re-checks the condition.
+            running = self
                 .arrived
-                .wait_timeout(running, remaining)
-                .expect("running lock");
-            running = guard;
+                .wait_timeout(running, Duration::from_secs(1))
+                .expect("running lock")
+                .0;
         }
     }
 
@@ -840,18 +852,18 @@ mod tests {
     #[test]
     fn a_second_daemon_cannot_take_a_live_session() {
         let registry = Arc::new(Registry::new(Limits::default()));
-        let first = registry.claim("s", Role::Daemon).unwrap();
+        let first = registry.claim("s", Role::Daemon, "10.0.0.1").unwrap();
         assert_eq!(first.role(), Role::Daemon);
         // The whole point: a stranger who guesses the id is refused, never
         // swapped in.
-        assert!(registry.claim("s", Role::Daemon).is_err());
+        assert!(registry.claim("s", Role::Daemon, "10.0.0.1").is_err());
     }
 
     #[test]
     fn both_roles_can_be_claimed_and_released() {
         let registry = Arc::new(Registry::new(Limits::default()));
-        let daemon = registry.claim("s", Role::Daemon).unwrap();
-        let client = registry.claim("s", Role::Client).unwrap();
+        let daemon = registry.claim("s", Role::Daemon, "10.0.0.1").unwrap();
+        let client = registry.claim("s", Role::Client, "10.0.0.1").unwrap();
         assert!(registry.is_paired("s"));
         drop(client);
         drop(daemon);
@@ -859,10 +871,44 @@ mod tests {
         assert_eq!(registry.live_sessions(), 0);
     }
 
+    /// One address pairing its own session must cost one admission, not two.
+    ///
+    /// A client and its daemon normally share an address: `127.0.0.1` on a
+    /// single machine, one NAT everywhere else. Counting connections rather
+    /// than sessions would make ordinary pairing spend double, and with the
+    /// default budget a few reconnects would lock the pair out entirely. The
+    /// limit exists to stop one host creating sessions in bulk, so a session is
+    /// what it counts.
+    #[test]
+    fn a_client_and_its_daemon_cost_one_admission() {
+        let registry = Arc::new(Registry::new(Limits {
+            sessions_per_source_per_second: 1,
+            ..Limits::default()
+        }));
+        // Daemon first, client second, both from one address.
+        let daemon = registry
+            .claim("pair-one", Role::Daemon, "127.0.0.1")
+            .expect("the daemon must be admitted");
+        let client = registry
+            .claim("pair-one", Role::Client, "127.0.0.1")
+            .expect("the client must be admitted; it is not a new session");
+        assert!(registry.is_paired("pair-one"));
+        drop(client);
+        drop(daemon);
+
+        // A *different* session from the same address is what the limit is for.
+        assert!(
+            registry
+                .claim("pair-two", Role::Daemon, "127.0.0.1")
+                .is_err(),
+            "a second new session from the same source must be refused"
+        );
+    }
+
     #[test]
     fn a_byte_cap_ends_the_session() {
         let registry = Arc::new(Registry::new(Limits::default()));
-        let slot = registry.claim("s", Role::Daemon).unwrap();
+        let slot = registry.claim("s", Role::Daemon, "10.0.0.1").unwrap();
         assert!(slot.account(100, 100));
         assert!(!slot.account(1, 100));
     }
