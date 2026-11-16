@@ -257,12 +257,38 @@ describe('cross-language handshake', () => {
       .toThrow('handshake signature invalid');
   });
 
-  test('a handshake started now derives keys the daemon would accept', () => {
-    // The vector cannot prove `finish` end to end without secrets, so this
-    // proves the other half: our own start/finish pair agrees with our own
-    // daemon-side derivation, and the fingerprint format is the exporter's.
-    const { handshake, clientHello } = ClientHandshake.start();
+  test('a started handshake produces a hello the daemon can answer', () => {
+    // `ClientHandshake.start` is the one handshake step that runs before any
+    // reply, so it is the only one this side can exercise alone. What it must
+    // produce is a 64-byte frame carrying two distinct X25519 public keys; a
+    // degenerate key (all zeroes, or the static key repeated) would still be
+    // 64 bytes and would silently break the agreements downstream.
+    const { clientHello } = ClientHandshake.start();
     expect(clientHello.length).toBe(64);
-    expect(handshake).toBeDefined();
+
+    const staticKey = clientHello.subarray(0, 32);
+    const ephemeralKey = clientHello.subarray(32, 64);
+    expect(toHex(staticKey)).not.toBe(toHex(ephemeralKey));
+    expect(toHex(staticKey)).not.toBe('00'.repeat(32));
+    expect(toHex(ephemeralKey)).not.toBe('00'.repeat(32));
+
+    // Two starts must not reuse an ephemeral key, or every connection would
+    // share the `ee` agreement.
+    expect(toHex(ClientHandshake.start().clientHello.subarray(32, 64))).not.toBe(
+      toHex(ephemeralKey),
+    );
+  });
+
+  test('the handshake group is evidence, not a regression baseline', () => {
+    // `ClientHandshake::start` and `handshake::accept` draw fresh ephemeral
+    // keys on both sides, so regenerating the vector file rewrites this group
+    // and nothing else. Asserting exact equality against it would fail on
+    // every legitimate regeneration, which is why the tests above use it only
+    // for shape and signature checks — those hold for any exchange.
+    //
+    // Every other group is built from fixed secrets and does carry regression
+    // weight: see the record and derivation tests.
+    expect(vectors.handshake.serverHello.length).toBe(SERVER_HELLO_LEN * 2);
+    expect(vectors.handshake.clientHello.length).toBe(64 * 2);
   });
 });

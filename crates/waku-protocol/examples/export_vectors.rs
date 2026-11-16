@@ -10,35 +10,49 @@
 //! ```text
 //! cargo run -p waku-protocol --example export_vectors > vectors.json
 //! ```
+//!
+//! # What is reproducible, and what is not
+//!
+//! Every group except `handshake` is built from fixed secrets, so re-running
+//! this produces an identical file and a diff means the protocol changed.
+//!
+//! `handshake` is not. `ClientHandshake::start` and `handshake::accept` draw a
+//! fresh ephemeral key from the OS and expose no injection point — deliberately,
+//! since a type that can be constructed from caller-supplied bytes is a type
+//! whose "used once per connection" property is only a comment. Adding one
+//! purely for this example would weaken that, so this group instead records a
+//! single real exchange: it proves the two implementations *did* agree once,
+//! and cannot serve as a regression baseline.
+//!
+//! The record and derivation groups carry the regression weight. They are the
+//! ones that catch a changed label, a reordered agreement, or a moved nonce.
 
 use ed25519_dalek::SigningKey;
 use waku_protocol::record::handshake;
 use waku_protocol::record::{Direction, SessionKeys};
-
-/// The first `n` bytes of a record sealed over a fixed plaintext, used as a
-/// key fingerprint.
-///
-/// This exists because `SessionKeys` deliberately exposes no accessor for the
-/// raw keys — a value that never leaves the type cannot be logged or compared
-/// by accident. Sealing a known plaintext gives the same equality check
-/// without widening the API.
-fn key_fingerprint(keys: &SessionKeys, direction: Direction) -> String {
-    let mut sealer = keys.sealer(direction);
-    // A 32-byte plaintext, so the record is exactly `8 (counter) + 32
-    // (ciphertext) + 16 (tag)` and the ciphertext can be sliced out whole.
-    let record = sealer.seal(&[0_u8; 32]).expect("seal");
-    hex(&record[8..40])
-}
 use x25519_dalek::{PublicKey, StaticSecret};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Deterministic keys, so a regenerated file is identical and a diff means a
-/// real change rather than fresh randomness.
+/// Deterministic keys, so a regenerated file is identical for every group that
+/// does not involve a live handshake.
 fn secret(seed: u8) -> StaticSecret {
     StaticSecret::from([seed; 32])
+}
+
+/// The ciphertext of a record sealed over a fixed 32-byte plaintext, used as a
+/// key fingerprint.
+///
+/// This exists because `SessionKeys` deliberately exposes no accessor for the
+/// raw keys — a value that never leaves the type cannot be logged by accident.
+/// Sealing a known plaintext gives the same equality check without widening the
+/// API.
+fn key_fingerprint(keys: &SessionKeys, direction: Direction) -> String {
+    let mut sealer = keys.sealer(direction);
+    let record = sealer.seal(&[0_u8; 32]).expect("seal");
+    hex(&record[8..40])
 }
 
 fn main() {
@@ -81,9 +95,9 @@ fn main() {
     let second_record = c2s.seal(b"second").expect("seal");
     let s2c_record = s2c.seal(record_plaintext).expect("seal");
 
-    // --- a full handshake ------------------------------------------------
-    // Both sides derive; the exporter prints the daemon's half so the
-    // TypeScript side can drive `ClientHandshake::finish` against it.
+    // --- one real handshake (not reproducible) ---------------------------
+    // See the module docs: the ephemeral keys are drawn from the OS, so these
+    // bytes change on every run. This group is evidence, not a baseline.
     let daemon_x25519 = secret(0xbb);
     let daemon_signing = SigningKey::from_bytes(&[0xcc; 32]);
     let client_static_secret = secret(0xdd);
@@ -95,8 +109,8 @@ fn main() {
         .finish(&server_hello, None)
         .expect("finish");
 
-    // The two sides must have derived the same session key. If they have not,
-    // the vectors below are useless and this file says so.
+    // Both sides must derive the same session key, or the group below records
+    // a handshake that never actually agreed on anything.
     let mut client_sealer = client_keys.sealer(Direction::ClientToServer);
     let mut daemon_opener = daemon_keys.opener(Direction::ClientToServer);
     let probe = client_sealer.seal(b"agreement probe").expect("seal");
