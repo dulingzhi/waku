@@ -112,11 +112,34 @@ fn main() -> anyhow::Result<()> {
         },
     ));
 
-    let Some(relay_url) = relay_url else {
+    let Some(relay_address) = relay_url else {
         // No relay configured: listen and nothing else, which is the default
         // and the mode the desktop app expects.
         return server.serve(listener, shutdown);
     };
+
+    // The session id is generated here, not configured. A user copies a relay
+    // address from an operator; making them also invent a session id would mean
+    // one they can mistype and no way to tell a typo from a relay outage. The id
+    // changes on every start, which is what a pairing code is for.
+    let session_id = waku_core::relay::new_session_id();
+    // The code a client needs: relay address, session, and the daemon's identity
+    // fingerprint so the client can pin it. Printed on stdout as JSON next to
+    // `DaemonReady` so a UI can read it rather than scraping a log line.
+    let pairing = waku_protocol::pairing::PairingCode {
+        relay: relay_address.clone(),
+        session_id: session_id.clone(),
+        fingerprint: identity.fingerprint(),
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "relay": relay_address,
+            "sessionId": session_id,
+            "pairingCode": pairing.render(),
+        })
+    );
+    std::io::stdout().flush()?;
 
     // A relay is configured. Dial out, and keep listening only if asked: a
     // relayed daemon usually sits behind the very NAT that made the relay
@@ -138,7 +161,7 @@ fn main() -> anyhow::Result<()> {
         drop(listener);
     }
 
-    waku_core::relay::run_relay(relay_url, server, shutdown)
+    waku_core::relay::run_relay(relay_address, session_id, server, shutdown)
 }
 
 fn ensure_bind_allowed(address: SocketAddr, allow_non_loopback: bool) -> anyhow::Result<()> {

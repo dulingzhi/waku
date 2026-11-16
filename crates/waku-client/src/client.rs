@@ -119,6 +119,38 @@ impl DaemonClient {
         Self::connect_via_relay_with_identity(relay_address, session_id, token, None)
     }
 
+    /// Connect using the code a daemon displayed.
+    ///
+    /// The code carries the relay, the session and the daemon's fingerprint. The
+    /// fingerprint is checked against the key the handshake actually proved, so
+    /// a relay that substituted its own daemon fails here rather than being
+    /// trusted — this is the pairing step, and it only happens once per daemon
+    /// identity.
+    ///
+    /// **The check is not optional.** A code without a usable fingerprint fails
+    /// to parse; there is no variant of this call that connects and skips the
+    /// pin, because such a call would be the one used by accident.
+    pub fn connect_with_pairing_code(code: &str, token: String) -> anyhow::Result<Self> {
+        let parsed = waku_protocol::pairing::PairingCode::parse(code)?;
+        let client =
+            Self::connect_via_relay_with_identity(&parsed.relay, &parsed.session_id, token, None)?;
+
+        let proven = client.daemon_signing_key();
+        let actual = waku_protocol::pairing::fingerprint_of(&proven);
+        if actual != parsed.fingerprint {
+            // Drop the connection before returning: a client that stayed
+            // connected to an unverified daemon would be one request away from
+            // handing it the token.
+            client.shutdown();
+            anyhow::bail!(
+                "the daemon at this pairing code is not the one it claims: \
+                 expected fingerprint {}, got {actual}",
+                parsed.fingerprint
+            );
+        }
+        Ok(client)
+    }
+
     /// [`Self::connect_via_relay`], pinning the daemon's signing key.
     pub fn connect_via_relay_with_identity(
         relay_address: &str,

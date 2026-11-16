@@ -2717,12 +2717,13 @@ mod tests {
             ServerOptions::default(),
         ));
         let shutdown = Arc::new(AtomicBool::new(false));
-        let relay_url = format!("ws://{relay_address}/{session_id}/daemon");
         {
             let server = server.clone();
             let shutdown = shutdown.clone();
+            let relay_address = format!("ws://{relay_address}");
+            let session = session_id.to_owned();
             std::thread::spawn(move || {
-                let _ = crate::relay::run_relay(relay_url, server, shutdown);
+                let _ = crate::relay::run_relay(relay_address, session, server, shutdown);
             });
         }
 
@@ -2766,6 +2767,42 @@ mod tests {
 
         client.shutdown();
         shutdown.store(true, Ordering::Release);
+    }
+
+    /// The fingerprint a pairing code shows is the one a client recomputes.
+    ///
+    /// This is the whole basis of pairing: the daemon renders a code from its
+    /// own key, the client rebuilds the same string from the key the handshake
+    /// proved, and a mismatch is what refuses a substituted daemon. If the two
+    /// sides truncated the hash differently the client would reject a correct
+    /// pairing, which looks exactly like an attack — so the shared function is
+    /// checked against the identity here rather than assumed.
+    #[test]
+    fn the_pairing_fingerprint_matches_the_identity_that_computed_it() {
+        let identity = DaemonIdentity::generate();
+        let public = identity.ed25519_public().to_bytes();
+
+        assert_eq!(
+            identity.fingerprint(),
+            waku_protocol::pairing::fingerprint_of(&public),
+            "the identity and the shared helper must agree, or pairing rejects a good daemon"
+        );
+
+        // Sixteen characters, so a code stays typeable, and hex, so it survives
+        // being read aloud or copied by hand.
+        assert_eq!(identity.fingerprint().len(), 16);
+        assert!(
+            identity
+                .fingerprint()
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        );
+
+        // Two daemons must not share one, or a code would not identify anyone.
+        assert_ne!(
+            identity.fingerprint(),
+            DaemonIdentity::generate().fingerprint()
+        );
     }
 
     /// Hands one recorder to every relay connection thread.

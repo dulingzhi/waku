@@ -60,15 +60,51 @@ pub(crate) fn next_backoff(consecutive_failures: u32) -> Duration {
     wait.min(MAX_BACKOFF)
 }
 
-/// Dials `url`, hands the connection to the shared server, and repeats forever.
+/// Build the WebSocket URL a daemon dials: `<relay>/<session>/daemon`.
+///
+/// Kept separate from [`run_relay`] so the string construction is testable
+/// without a socket, and so the one place that decides a relay path is a
+/// function rather than three format strings.
+pub(crate) fn relay_endpoint(relay_address: &str, session_id: &str) -> anyhow::Result<String> {
+    let trimmed = relay_address.trim().trim_end_matches('/');
+    if !(trimmed.starts_with("ws://") || trimmed.starts_with("wss://")) {
+        anyhow::bail!("a relay address starts with ws:// or wss://; got {relay_address:?}");
+    }
+    if !waku_protocol::pairing::is_valid_session_id(session_id) {
+        anyhow::bail!("{session_id:?} is not a usable relay session id");
+    }
+    Ok(format!("{trimmed}/{session_id}/daemon"))
+}
+
+/// Generate a session id that an attacker cannot guess.
+///
+/// 128 bits from the OS, rendered as 32 lowercase hex characters. Guessing one
+/// gets an attacker a connection that fails at the pinned key, but the margin is
+/// free and removes guessing from the list of things to think about.
+pub fn new_session_id() -> String {
+    use rand_core::RngCore as _;
+
+    let mut bytes = [0_u8; 16];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Dials the relay at `relay_address` under `session_id`, and repeats forever.
 ///
 /// Blocks for the life of the daemon, so it belongs on its own thread. Returns
 /// only when shutdown is observed.
+///
+/// `relay_address` is `ws(s)://host:port`; the session and role are added here
+/// rather than being part of the configured string. That keeps the configured
+/// value to something a user can copy from a relay operator, and keeps the
+/// session id — which changes on every start — out of their hands.
 pub fn run_relay(
-    url: String,
+    relay_address: String,
+    session_id: String,
     server: std::sync::Arc<DaemonServer>,
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
+    let url = relay_endpoint(&relay_address, &session_id)?;
     // Validate once, up front: a typo in the relay URL should fail at startup
     // with a clear message, not as an endless reconnect loop that looks like a
     // network problem.
@@ -224,6 +260,56 @@ mod tests {
         assert!(
             total >= Duration::from_secs(360),
             "twelve capped retries take {total:?}, which is too fast to be safe"
+        );
+    }
+
+    #[test]
+    fn the_endpoint_is_the_relay_plus_session_and_role() {
+        assert_eq!(
+            relay_endpoint("ws://relay.test:8080", "abc123").unwrap(),
+            "ws://relay.test:8080/abc123/daemon"
+        );
+        // A trailing slash from a copied address must not produce `//`.
+        assert_eq!(
+            relay_endpoint("wss://relay.test/", "abc").unwrap(),
+            "wss://relay.test/abc/daemon"
+        );
+    }
+
+    #[test]
+    fn an_endpoint_without_a_ws_scheme_is_refused() {
+        // A bare host would otherwise be dialled as a relative URL and fail
+        // somewhere far from the setting that caused it.
+        assert!(relay_endpoint("relay.test:8080", "abc").is_err());
+        assert!(relay_endpoint("https://relay.test", "abc").is_err());
+    }
+
+    #[test]
+    fn an_endpoint_with_an_unusable_session_is_refused() {
+        // These are the ids `waku_relay::parse_path` rejects. A daemon that
+        // dialled with one would reconnect forever against a four-character
+        // error, which reads like a network fault.
+        for session in ["", "a/b", "a b", "a?b", "a#b"] {
+            assert!(
+                relay_endpoint("ws://relay.test", session).is_err(),
+                "{session:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_generated_session_id_is_usable_and_unpredictable() {
+        let first = new_session_id();
+        let second = new_session_id();
+        assert_eq!(first.len(), 32, "128 bits render as 32 hex characters");
+        assert!(
+            waku_protocol::pairing::is_valid_session_id(&first),
+            "the relay must accept what this generates: {first}"
+        );
+        assert_ne!(first, second, "two sessions must not share an id");
+        assert!(
+            first.chars().all(|c| c.is_ascii_hexdigit()),
+            "the id must be hex: {first}"
         );
     }
 }

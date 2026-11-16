@@ -77,14 +77,14 @@ impl DaemonIdentity {
     /// Sixteen lowercase hex characters from SHA-256 of the public key. Only a
     /// hash is ever emitted, so a log file cannot be used to reconstruct or
     /// confirm a key beyond checking it.
+    ///
+    /// Delegates to [`waku_protocol::pairing::fingerprint_of`] rather than
+    /// repeating the truncation: a client compares its own computation of the
+    /// same function against the code, and two implementations of "the first
+    /// eight bytes" that drifted would reject a correct pairing in a way that
+    /// looks like an attack.
     pub fn fingerprint(&self) -> String {
-        use sha2::{Digest as _, Sha256};
-
-        let digest = Sha256::digest(self.ed25519_public().to_bytes());
-        digest[..8]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        waku_protocol::pairing::fingerprint_of(&self.ed25519_public().to_bytes())
     }
 
     /// The key-agreement secret. Used once per connection against a client's
