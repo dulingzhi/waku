@@ -2,6 +2,16 @@ export interface ConnectionConfig {
   address: string
   token: string
   remember: boolean
+  /**
+   * The daemon fingerprint a pairing code named, when this connection came
+   * from one.
+   *
+   * Kept so a reconnect after a reload still checks the identity: the pin is
+   * what makes "this is the daemon I paired with" true, and dropping it on a
+   * page reload would silently downgrade every later connection to
+   * first-contact trust.
+   */
+  fingerprint?: string
 }
 
 const SESSION_KEY = 'waku.remote.session.v1'
@@ -56,6 +66,7 @@ export function validateConnectionConfig(
     address: normalizeDaemonAddress(value.address, t),
     token,
     remember: value.remember ?? false,
+    ...(value.fingerprint ? { fingerprint: value.fingerprint.toLowerCase() } : {}),
   }
 }
 
@@ -72,7 +83,16 @@ export function storeConnection(config: ConnectionConfig): void {
   clearStoredConnection()
   const storage = config.remember ? window.localStorage : window.sessionStorage
   const key = config.remember ? PERSISTENT_KEY : SESSION_KEY
-  storage.setItem(key, JSON.stringify({ address: config.address, token: config.token }))
+  storage.setItem(
+    key,
+    JSON.stringify({
+      address: config.address,
+      token: config.token,
+      // The pin travels with the address: a stored connection that lost it
+      // would reconnect without checking the daemon's identity.
+      ...(config.fingerprint ? { fingerprint: config.fingerprint } : {}),
+    }),
+  )
 }
 
 export function clearStoredConnection(): void {
@@ -93,6 +113,7 @@ function parseStoredConnection(
       address: value.address,
       token: value.token,
       remember,
+      fingerprint: typeof value.fingerprint === 'string' ? value.fingerprint : undefined,
     })
   } catch {
     return null

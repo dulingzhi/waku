@@ -1,4 +1,5 @@
 import * as Haptics from 'expo-haptics';
+import { parsePairingCode, relayUrl } from '@waku/client/pairing';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -31,6 +32,16 @@ import {
 
 type EditorTarget = string | null | undefined;
 type ConnectionSecurity = 'secure' | 'private' | 'insecure' | 'invalid' | null;
+
+/** Why a typed pairing code did not parse, for the message under the field. */
+function pairingFailure(code: string): string {
+  try {
+    parsePairingCode(code);
+    return '';
+  } catch (cause) {
+    return cause instanceof Error ? cause.message : String(cause);
+  }
+}
 
 export function DaemonPickerSheet({
   onDismiss,
@@ -201,6 +212,7 @@ function DaemonEditor({
   const daemon = useDaemon();
   const [name, setName] = useState(profile?.name ?? '');
   const [address, setAddress] = useState(profile?.address ?? '');
+  const [pairingCode, setPairingCode] = useState('');
   const [token, setToken] = useState('');
   const [revealed, setRevealed] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -208,18 +220,40 @@ function DaemonEditor({
   const [localError, setLocalError] = useState<string | null>(null);
   const addressInput = useRef<TextInput>(null);
   const tokenInput = useRef<TextInput>(null);
-  const security = useMemo<ConnectionSecurity>(() => {
-    if (!address.trim()) return null;
+  /**
+   * What a parsed pairing code contributed: the address to dial and the pin.
+   *
+   * Both are derived from the code, never typed, so they disappear the moment
+   * the code stops parsing — a stale pin paired with a freshly typed address
+   * would check the wrong identity.
+   */
+  const pairing = useMemo(() => {
+    if (!pairingCode.trim()) return null;
     try {
-      const normalized = normalizeDaemonAddress(address);
+      const parsed = parsePairingCode(pairingCode);
+      return {
+        address: relayUrl(parsed),
+        relay: parsed.relay,
+        fingerprint: parsed.fingerprint,
+        parsed,
+      };
+    } catch {
+      return null;
+    }
+  }, [pairingCode]);
+  const effectiveAddress = pairing?.address ?? address;
+  const security = useMemo<ConnectionSecurity>(() => {
+    if (!effectiveAddress.trim()) return null;
+    try {
+      const normalized = normalizeDaemonAddress(effectiveAddress);
       if (normalized.startsWith('wss://')) return 'secure';
       return isPrivateDaemonAddress(normalized) ? 'private' : 'insecure';
     } catch {
       return 'invalid';
     }
-  }, [address]);
+  }, [effectiveAddress]);
   const canSave = Boolean(
-    address.trim()
+    effectiveAddress.trim()
       && (profile || token.trim())
       && security !== 'invalid'
       && security !== 'insecure'
@@ -229,10 +263,26 @@ function DaemonEditor({
 
   async function save() {
     if (!canSave) return;
+    if (pairingCode.trim() && !pairing) {
+      // A code was typed but does not parse: refuse rather than fall back to
+      // connecting to the typed address without a pin.
+      setLocalError(t('pairing.parse_failed', { error: pairingFailure(pairingCode) }));
+      return;
+    }
     setSaving(true);
     setLocalError(null);
     try {
-      const result = await daemon.saveProfile({ name, address, token }, profile?.id);
+      const result = await daemon.saveProfile(
+        {
+          name,
+          address: effectiveAddress,
+          token,
+          ...(pairing
+            ? { relay: pairing.relay, fingerprint: pairing.fingerprint }
+            : {}),
+        },
+        profile?.id,
+      );
       await Haptics.notificationAsync(
         result.connected
           ? Haptics.NotificationFeedbackType.Success
@@ -305,6 +355,44 @@ function DaemonEditor({
         </View>
         <View style={[styles.separator, { backgroundColor: theme.separator }]} />
         <View style={styles.formRow}>
+          <Text style={[styles.fieldLabel, { color: theme.text }]}>
+            {t('pairing.code_label')}
+          </Text>
+          <TextInput
+            accessibilityLabel={t('pairing.code_label')}
+            autoCapitalize="none"
+            autoCorrect={false}
+            clearButtonMode="while-editing"
+            editable={!saving && !removing}
+            multiline
+            onChangeText={(value) => {
+              setPairingCode(value);
+              setLocalError(null);
+            }}
+            placeholder={t('pairing.code_placeholder')}
+            placeholderTextColor={theme.textTertiary}
+            selectionColor={NativeTint}
+            spellCheck={false}
+            style={[styles.rowInput, styles.codeInput, { color: theme.text }]}
+            value={pairingCode}
+          />
+        </View>
+        {pairingCode.trim() ? (
+          <Text style={[styles.helperText, { color: theme.textTertiary }]}>
+            {pairing
+              ? `${t(relayUrl(pairing.parsed).startsWith('wss://') ? 'pairing.relay_scheme_wss' : 'pairing.relay_scheme_ws')} · ${relayUrl(pairing.parsed)}`
+              : t('pairing.parse_failed', { error: pairingFailure(pairingCode) })}
+          </Text>
+        ) : (
+          <Text style={[styles.helperText, { color: theme.textTertiary }]}>
+            {t('pairing.code_hint')}
+          </Text>
+        )}
+        <Text style={[styles.helperText, styles.oneTime, { color: theme.textTertiary }]}>
+          {t('pairing.one_time_notice')}
+        </Text>
+        <View style={[styles.separator, { backgroundColor: theme.separator }]} />
+        <View style={styles.formRow}>
           <Text style={[styles.fieldLabel, { color: theme.text }]}>Address</Text>
           <TextInput
             ref={addressInput}
@@ -312,7 +400,7 @@ function DaemonEditor({
             autoCapitalize="none"
             autoCorrect={false}
             clearButtonMode="while-editing"
-            editable={!saving && !removing}
+            editable={!saving && !removing && !pairing}
             inputMode="url"
             keyboardType="url"
             onChangeText={(value) => {
@@ -325,8 +413,11 @@ function DaemonEditor({
             returnKeyType="next"
             selectionColor={NativeTint}
             spellCheck={false}
-            style={[styles.rowInput, { color: theme.text }]}
-            value={address}
+            style={[
+              styles.rowInput,
+              { color: pairing ? theme.textTertiary : theme.text },
+            ]}
+            value={pairing ? pairing.address : address}
           />
         </View>
         <View style={[styles.separator, { backgroundColor: theme.separator }]} />
@@ -536,6 +627,10 @@ const styles = StyleSheet.create({
     paddingVertical: 11,
     textAlign: Platform.select({ ios: 'right', default: 'left' }),
   },
+  /** The code is long and monospaced; wrap it rather than scrolling a line. */
+  codeInput: { fontFamily: 'Menlo', fontSize: 12.5, lineHeight: 17, textAlign: 'left' },
+  helperText: { fontSize: 11.5, lineHeight: 16, paddingHorizontal: 16, paddingTop: 2 },
+  oneTime: { paddingBottom: 8 },
   tokenInput: { paddingRight: 2 },
   revealButton: { alignItems: 'center', height: 44, justifyContent: 'center', width: 42 },
   separator: { height: StyleSheet.hairlineWidth, marginLeft: 12 },

@@ -2,6 +2,21 @@ export interface DaemonProfile {
   id: string;
   name: string;
   address: string;
+  /**
+   * The relay this profile was paired through, when it came from a pairing
+   * code. Stored for display and diagnostics; the address is what a connection
+   * dials.
+   */
+  relay?: string;
+  /**
+   * The daemon fingerprint the pairing code named, 16 lowercase hex characters.
+   *
+   * Kept so a later connection still checks the daemon's identity. The session
+   * id is deliberately **not** stored: it changes on every daemon start, and a
+   * saved value would be dialed long after it stopped meaning anything —
+   * a failure that looks like a network fault.
+   */
+  fingerprint?: string;
   createdAt: number;
   updatedAt: number;
   lastConnectedAt: number | null;
@@ -11,6 +26,8 @@ export interface DaemonProfileInput {
   name: string;
   address: string;
   token?: string;
+  relay?: string;
+  fingerprint?: string;
 }
 
 export function normalizeDaemonAddress(
@@ -55,6 +72,10 @@ export function normalizeDaemonProfile(
     id,
     name,
     address,
+    // Replaced rather than merged: a profile edited away from a pairing code
+    // must not keep pinning the identity of the daemon it no longer names.
+    ...(input.relay ? { relay: input.relay } : {}),
+    ...(input.fingerprint ? { fingerprint: input.fingerprint.toLowerCase() } : {}),
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
     lastConnectedAt: existing?.lastConnectedAt ?? null,

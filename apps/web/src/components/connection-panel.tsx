@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
+import { parsePairingCode, relayUrl, relayScheme, type PairingCode } from '@waku/client/pairing'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { StartupScreen } from '@/components/startup-screen'
@@ -8,11 +9,14 @@ import { useDaemon } from '@/lib/daemon-context'
 import { useI18n } from '@/lib/i18n'
 import wakuAppIconUrl from '../../../../website/public/app-icon.png'
 
-export function ConnectionPanel({ title }: { title?: string } = {}) {
-  const { t } = useI18n()
+type ConnectMode = 'address' | 'pairing'
+
+export function ConnectionPanel({ title }: { title?: string } = {}) {  const { t } = useI18n()
   const { config, phase, error, connect } = useDaemon()
   useDocumentTitle(title)
+  const [mode, setMode] = useState<ConnectMode>('address')
   const [address, setAddress] = useState(config?.address ?? '')
+  const [pairingCode, setPairingCode] = useState('')
   const [token, setToken] = useState(config?.token ?? '')
   const [tokenRevealed, setTokenRevealed] = useState(false)
   const [remember, setRemember] = useState(config?.remember ?? false)
@@ -24,6 +28,9 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
     setToken(config.token)
     setTokenRevealed(false)
     setRemember(config.remember)
+    // A stored connection that carries a pin was made from a pairing code, so
+    // the panel opens on that tab rather than pretending it was an address.
+    if (config.fingerprint) setMode('pairing')
   }, [config])
 
   if (phase === 'booting' || (phase === 'connecting' && config)) {
@@ -33,6 +40,35 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
   async function submit(event: FormEvent) {
     event.preventDefault()
     setLocalError(null)
+    if (mode === 'pairing') {
+      let parsed: PairingCode
+      try {
+        parsed = parsePairingCode(pairingCode)
+      } catch (cause) {
+        // A code that does not parse is refused here rather than connected to
+        // without a pin, which is the whole attack this prevents.
+        setLocalError(
+          t('pairing.parse_failed', {
+            error: cause instanceof Error ? cause.message : String(cause),
+          }),
+        )
+        return
+      }
+      try {
+        // The scheme comes from the rule, never from the code: a code able to
+        // name `ws://` would be one an attacker rewrites to strip transport
+        // encryption while the fingerprint check still passed.
+        await connect({
+          address: relayUrl(parsed),
+          token,
+          remember,
+          fingerprint: parsed.fingerprint,
+        })
+      } catch (cause) {
+        setLocalError(cause instanceof Error ? cause.message : String(cause))
+      }
+      return
+    }
     try {
       await connect({ address, token, remember })
     } catch (cause) {
@@ -58,18 +94,65 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
 
         <section className="mt-6 rounded-[13px] bg-[var(--raised)] p-5">
           <form className="space-y-4" onSubmit={submit}>
-            <label className="grid gap-1.5 sm:grid-cols-[120px_1fr] sm:items-center">
-              <span className="text-[12px] font-medium">{t('daemon.websocket_url')}</span>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                className="bg-card"
-                inputMode="url"
-                placeholder="wss://waku.example.com"
-                value={address}
-                onChange={(event) => setAddress(event.target.value)}
-              />
-            </label>
+            <div className="flex gap-1 rounded-lg bg-[var(--inset)] p-1" role="tablist">
+              {(['address', 'pairing'] as const).map((option) => (
+                <button
+                  aria-selected={mode === option}
+                  className={`flex-1 rounded-md px-3 py-1.5 text-[11.5px] font-medium transition-colors ${
+                    mode === option
+                      ? 'bg-background text-[var(--text)] shadow-sm'
+                      : 'text-[var(--text-tertiary)] hover:text-[var(--text-secondary)]'
+                  }`}
+                  key={option}
+                  role="tab"
+                  type="button"
+                  onClick={() => {
+                    setMode(option)
+                    setLocalError(null)
+                  }}
+                >
+                  {option === 'pairing' ? t('pairing.code_label') : t('daemon.websocket_url')}
+                </button>
+              ))}
+            </div>
+
+            {mode === 'address' ? (
+              <label className="grid gap-1.5 sm:grid-cols-[120px_1fr] sm:items-center">
+                <span className="text-[12px] font-medium">{t('daemon.websocket_url')}</span>
+                <Input
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  className="bg-card"
+                  inputMode="url"
+                  placeholder="wss://waku.example.com"
+                  value={address}
+                  onChange={(event) => setAddress(event.target.value)}
+                />
+              </label>
+            ) : (
+              <div className="grid gap-1.5">
+                <label className="text-[12px] font-medium" htmlFor="daemon-pairing-code">
+                  {t('pairing.code_label')}
+                </label>
+                <Input
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  className="bg-card font-mono text-[12px]"
+                  id="daemon-pairing-code"
+                  placeholder={t('pairing.code_placeholder')}
+                  spellCheck={false}
+                  value={pairingCode}
+                  onChange={(event) => setPairingCode(event.target.value)}
+                />
+                <p className="text-[10.5px] leading-4 text-[var(--text-tertiary)]">
+                  {t('pairing.code_hint')}
+                </p>
+                {pairingCode.trim() ? <PairingSchemeHint code={pairingCode} /> : null}
+                <p className="text-[10.5px] leading-4 text-[var(--text-tertiary)]">
+                  {t('pairing.one_time_notice')}
+                </p>
+              </div>
+            )}
             <div className="grid gap-1.5 sm:grid-cols-[120px_1fr] sm:items-center">
               <label className="text-[12px] font-medium" htmlFor="daemon-connection-token">
                 {t('daemon.token')}
@@ -135,4 +218,38 @@ export function ConnectionPanel({ title }: { title?: string } = {}) {
       </div>
     </main>
   )
+}
+
+/**
+ * Tells the user whether the relay will be dialed over TLS, before they submit.
+ *
+ * The scheme is derived from the code's relay host, never read from the code,
+ * so this is the one place a user can see which of the two rules applied —
+ * useful when a self-hosted relay on the same machine legitimately uses `ws`.
+ */
+function PairingSchemeHint({ code }: { code: string }) {
+  const { t } = useI18n()
+  let text: string | null = null
+  try {
+    const parsed = parsePairingCode(code)
+    text = t(relayScheme(parsed) === 'ws' ? 'pairing.relay_scheme_ws' : 'pairing.relay_scheme_wss')
+  } catch {
+    // A code that does not parse gets its error from submit; a scheme hint
+    // alongside it would be noise.
+    text = null
+  }
+  if (!text) return null
+  return (
+    <p className="text-[10.5px] leading-4 text-[var(--text-tertiary)]">
+      {text} · <span className="font-mono">{safeRelayUrl(code)}</span>
+    </p>
+  )
+}
+
+function safeRelayUrl(code: string): string {
+  try {
+    return relayUrl(parsePairingCode(code))
+  } catch {
+    return ''
+  }
 }

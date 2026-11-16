@@ -2691,3 +2691,38 @@ composer_ui.send_to_working:
   en: Send to working agent
 daemon.title:
   en: Daemons
+
+pairing.code_label:
+  en: Pairing code
+pairing.code_placeholder:
+  en: waku://relay.example.com:443/session#0123456789abcdef
+pairing.code_hint:
+  en: Paste the full code the daemon showed, including the part after.
+pairing.parse_failed:
+  en: "That is not a pairing code: %{error}"
+pairing.token_hint:
+  en: The token is separate from the pairing code. The code proves which daemon you reached; the token proves you may use it.
+pairing.one_time_notice:
+  en: A pairing code works until that daemon restarts. If the connection stops working, ask for a fresh code.
+pairing.mismatch_title:
+  en: This daemon is not the one it claims to be
+pairing.mismatch_body:
+  en: The code names a specific daemon, but the machine that answered proved a different identity. Something between you and it may be impersonating the daemon. The connection was closed and nothing was sent.
+pairing.sas_title:
+  en: Compare these numbers on both screens
+pairing.sas_body:
+  en: Both devices show the same twelve digits when nobody is sitting in the middle. If they differ, someone is relaying this conversation and you should disconnect.
+pairing.sas_confirmed:
+  en: I checked, they match
+pairing.sas_mismatch:
+  en: They do not match - disconnect
+pairing.relay_scheme_ws:
+  en: Unencrypted (same machine)
+pairing.relay_scheme_wss:
+  en: Encrypted
+pairing.not_configured:
+  en: This daemon is not configured to dial a relay, so it has no pairing code.
+pairing.copy_code:
+  en: Copy code
+pairing.code_copied:
+  en: Copied

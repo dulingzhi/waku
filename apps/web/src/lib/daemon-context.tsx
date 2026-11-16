@@ -30,6 +30,15 @@ interface DaemonContextValue {
   config: ConnectionConfig | null
   phase: ConnectionPhase
   error: string | null
+  /**
+   * The short authentication string for the live connection, or null when
+   * there is none.
+   *
+   * Exposed because comparing it on both screens is the only check that
+   * catches a relay running one handshake per side. A UI that never shows it
+   * has the mechanism on paper and not in practice.
+   */
+  authenticationString: string | null
   connect: (config: ConnectionConfig) => Promise<void>
   reconnect: () => Promise<void>
   disconnect: () => void
@@ -64,6 +73,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       const next = new WakuClient({
         address: normalized.address,
         token: normalized.token,
+        expectedFingerprint: normalized.fingerprint,
       })
       setClient(next)
       try {
@@ -155,6 +165,9 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
     config,
     phase,
     error,
+    // Read from the live client rather than stored: the string belongs to one
+    // handshake, and the client already drops it when the connection does.
+    authenticationString: phase === 'connected' ? (client?.authenticationString ?? null) : null,
     connect: open,
     reconnect,
     disconnect,

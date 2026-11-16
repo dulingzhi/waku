@@ -1318,3 +1318,21 @@ common.optional: 可选
 daemon.add_short: 添加
 composer_ui.send_to_working: 发送给工作中的智能体
 daemon.title: 守护进程
+
+pairing.code_label: 配对码
+pairing.code_placeholder: waku://relay.example.com:443/session#0123456789abcdef
+pairing.code_hint: 粘贴 daemon 显示的完整配对码，包括最后的那一段。
+pairing.parse_failed: "这不是配对码：%{error}"
+pairing.token_hint: 令牌和配对码是两件事。配对码证明你连到了哪个 daemon，令牌证明你有权使用它。
+pairing.one_time_notice: 配对码在 daemon 重启后失效。如果连不上了，请重新获取一个新的配对码。
+pairing.mismatch_title: 这个 daemon 不是它声称的那个
+pairing.mismatch_body: 配对码指定了某个 daemon，但响应的机器证明的是另一个身份。你与它之间可能有东西在冒充这个 daemon。连接已关闭，没有发送任何内容。
+pairing.sas_title: 在两块屏幕上核对这些数字
+pairing.sas_body: 没有中间人时，两台设备显示同样的十二位数字。如果不一样，说明有人在转发这段对话，请断开连接。
+pairing.sas_confirmed: 我已核对，一致
+pairing.sas_mismatch: 不一致，断开连接
+pairing.relay_scheme_ws: 未加密（本机）
+pairing.relay_scheme_wss: 已加密
+pairing.not_configured: 这个 daemon 没有配置 relay，因此没有配对码。
+pairing.copy_code: 复制配对码
+pairing.code_copied: 已复制

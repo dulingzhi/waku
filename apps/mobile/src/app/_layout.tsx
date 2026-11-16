@@ -20,6 +20,7 @@ import {
   type HeaderActionSpec,
 } from "@/components/screen-header";
 import { TaskDrawerHost, useTaskDrawer } from "@/components/task-drawer";
+import { SasGate } from "@/components/sas-gate";
 import { DaemonProvider, useDaemon } from "@/lib/daemon-context";
 import { I18nProvider, useI18n } from "@/lib/i18n-context";
 import { RuntimeProvider } from "@/lib/runtime-context";
@@ -84,6 +85,10 @@ export default function RootLayout() {
                 <TaskDrawerHost>
                   <AppNavigator />
                 </TaskDrawerHost>
+                {/* Outside the drawer and navigator so the comparison cannot be
+                 * navigated away from, and above every screen so it is shown
+                 * once per connection rather than per route. */}
+                <SasGate />
                 <StatusBar style="auto" />
               </ThemeProvider>
             </RuntimeProvider>

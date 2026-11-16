@@ -1370,3 +1370,21 @@ common.optional: 任意
 daemon.add_short: 追加
 composer_ui.send_to_working: 作業中のエージェントに送信
 daemon.title: デーモン
+
+pairing.code_label: ペアリングコード
+pairing.code_placeholder: waku://relay.example.com:443/session#0123456789abcdef
+pairing.code_hint: daemon が表示したコードを、最後の部分まで含めて貼り付けてください。
+pairing.parse_failed: "ペアリングコードではありません：%{error}"
+pairing.token_hint: トークンとペアリングコードは別物です。コードはどの daemon に届いたかを、トークンは使ってよいかを証明します。
+pairing.one_time_notice: ペアリングコードは daemon が再起動すると無効になります。つながらなくなったら新しいコードを取得してください。
+pairing.mismatch_title: この daemon は名乗っているものではありません
+pairing.mismatch_body: コードは特定の daemon を指していますが、応答したマシンは別の身元を証明しました。間に何かが daemon を装っている可能性があります。接続は閉じられ、何も送信されていません。
+pairing.sas_title: 両方の画面でこの数字を照合してください
+pairing.sas_body: 中間者がいなければ、二台は同じ十二桁を表示します。違う場合は誰かがこの会話を中継しています。切断してください。
+pairing.sas_confirmed: 確認しました、一致しています
+pairing.sas_mismatch: 一致しません - 切断
+pairing.relay_scheme_ws: 暗号化なし（同一マシン）
+pairing.relay_scheme_wss: 暗号化済み
+pairing.not_configured: この daemon は relay を設定していないため、ペアリングコードはありません。
+pairing.copy_code: コードをコピー
+pairing.code_copied: コピーしました

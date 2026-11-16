@@ -63,6 +63,14 @@ interface DaemonContextValue extends ConnectionStatus {
   profiles: DaemonProfile[];
   activeProfile: DaemonProfile | null;
   client: WakuClient | null;
+  /**
+   * The short authentication string for the live connection, or null.
+   *
+   * Comparing this on both screens is the only check that catches a relay
+   * running one handshake per side, so a screen must display it rather than
+   * merely have access to it.
+   */
+  authenticationString: string | null;
   saveProfile: (
     input: DaemonProfileInput,
     id?: string,
@@ -216,6 +224,9 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       const next = new WakuClient({
         address: profile.address,
         token,
+        // A profile created from a pairing code pins the daemon's identity on
+        // every later connection, not just the first one.
+        expectedFingerprint: profile.fingerprint,
         randomUUID: Crypto.randomUUID,
         webSocketFactory:
           Platform.OS === "web" ? undefined : createNativeDaemonSocket,
@@ -414,6 +425,11 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
         profiles,
         activeProfile,
         client,
+        // Read from the live client: the string belongs to one handshake and
+        // the client already drops it when the connection does.
+        authenticationString: status.phase === "connected"
+          ? (client?.authenticationString ?? null)
+          : null,
         phase: status.phase,
         error: status.error,
         outage: status.outage,
