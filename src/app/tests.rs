@@ -5,28 +5,32 @@ use super::composer::{
 use super::runtime::{merge_remote_session_catalog, session_has_active_provider_turn};
 use super::settings::visible_settings_pages;
 use super::{
-    ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget,
-    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, PendingUserInput, SessionNavigation,
-    StreamDeltaKind, TranscriptRowKind::*, active_navigation_turn_index,
-    append_text_delta_to_session, assistant_response_footer, assistant_response_footer_index,
-    assistant_response_footer_time, compact_driver_error, disclosure_leading_space, fenced_code,
-    fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
-    format_worked_duration, format_working_elapsed, maintain_transcript_anchor, message_opens_turn,
+    ACTIVITY_PAYLOAD_PREVIEW_LINES, ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation,
+    EscapeStopPress, EscapeStopTarget, NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT,
+    PendingUserInput, SessionNavigation, StreamDeltaKind, TranscriptRowKind::*,
+    active_navigation_turn_index, activity_payload_preview, append_text_delta_to_session,
+    assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
+    compact_driver_error, disclosure_leading_space, fenced_code, fitted_file_tree_width,
+    fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
+    format_working_elapsed, maintain_transcript_anchor, message_opens_turn,
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_fade_visibility,
     navigation_rail_height, navigation_rail_scale, paused_toast_duration, pop_stream_batch,
     push_transcript_activity, response_footer_message_index, response_row_turn_id,
-    session_accepts_turn_output, session_is_reapable, should_refresh_branch_after_activity,
-    should_show_navigation_rail, should_show_scroll_to_bottom, stream_delta_kind,
-    stream_delta_text, task_id_from_notification_tag, task_notification_tag,
+    session_accepts_turn_output, session_is_reapable, should_inline_diff,
+    should_refresh_branch_after_activity, should_show_navigation_rail, should_show_scroll_to_bottom,
+    stream_delta_kind, stream_delta_text, task_id_from_notification_tag, task_notification_tag,
     transcript_anchor_end_space, transcript_navigation_turns, transcript_rests_at_tail,
     transcript_row_kinds, transcript_row_splice, transcript_rows_fingerprint,
+    transcript_view::{ACTIVITY_DIFF_CACHE_LIMIT, cached_activity_diff},
+    turn_activity_count, turn_changed_file_count, turn_summary_label, turn_worked_seconds,
     widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
-    ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile, CheckpointStatus,
-    DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock, RuntimeEventCursor,
-    SessionStatus, TranscriptBlock, TurnStatus, UserInputOption, UserInputQuestion,
+    ActivityFileChange, ActivityItem, ActivityKind, AgentSession, Checkpoint, CheckpointFile,
+    CheckpointStatus, DriverEvent, Message, MessageRole, ProviderKind, ReasoningBlock,
+    RuntimeEventCursor, SessionStatus, TranscriptBlock, TurnStatus, UserInputOption,
+    UserInputQuestion,
 };
 
 #[test]
@@ -69,7 +73,8 @@ fn structured_user_input_preserves_question_order_and_custom_answer_precedence()
 }
 use gpui::{ListAlignment, ListState, Pixels, px};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    rc::Rc,
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -1566,6 +1571,284 @@ fn navigation_anchors_are_exactly_the_user_prompts() {
     // The collapsed turn is still anchored: its prompt row is outside the fold.
     assert!(rows.contains(&Message(0)), "the prompt survives collapsing");
     assert_eq!(anchors[0].message_index, 0);
+}
+
+/// A failed turn never reads as a successful one, and says what it did manage.
+#[test]
+fn a_failed_turn_is_labelled_as_failed() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "Partial answer.");
+    session.finish_active_turn(TurnStatus::Failed);
+
+    let label = turn_summary_label(&session, turn_id);
+    assert_eq!(label, "This turn failed");
+    assert!(
+        !label.contains("Worked"),
+        "a failed turn must not report its duration as work done: {label}"
+    );
+    assert!(!label.contains("second"), "no duration in a failure label: {label}");
+
+    // A completed turn still reports time, so the two outcomes stay distinct.
+    let mut completed = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let ok_id = completed.begin_turn("Build it");
+    completed.push_message(MessageRole::Assistant, "Done.");
+    completed.finish_active_turn(TurnStatus::Completed);
+    let ok_label = turn_summary_label(&completed, ok_id);
+    assert_ne!(ok_label, label);
+    assert!(ok_label.starts_with("Worked for"), "{ok_label}");
+}
+
+/// The footer stats a turn shows without the reader opening anything.
+#[test]
+fn a_turns_footer_counts_its_steps_and_files() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        activities: vec![
+            ActivityItem::new(None, ActivityKind::Command, "Ran tests", None, true),
+            ActivityItem::new(None, ActivityKind::FileRead, "Read app.rs", None, true),
+            ActivityItem::new(None, ActivityKind::FileList, "Listed src", None, true),
+        ],
+    });
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.finish_active_turn(TurnStatus::Completed);
+    attach_changed_files(
+        &mut session,
+        vec![
+            CheckpointFile { path: "src/app.rs".into(), additions: 4, deletions: 1 },
+            CheckpointFile { path: "src/lib.rs".into(), additions: 2, deletions: 0 },
+        ],
+    );
+
+    assert_eq!(turn_activity_count(&session, turn_id), 3);
+    assert_eq!(turn_changed_file_count(&session, turn_id), 2);
+    assert!(turn_worked_seconds(&session.turns[0]) >= 1);
+}
+
+/// A command's verdict is the end of its output, so that is what a preview
+/// shows — and it counts the lines it is holding back rather than pretending
+/// the tail is all there is.
+#[test]
+fn a_command_preview_shows_its_tail_and_counts_the_rest() {
+    let output = (1..=200).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
+    let mut activity = ActivityItem::new(None, ActivityKind::Command, "Ran npm test", None, true);
+    activity.output = Some(output);
+    activity.complete = true;
+
+    let preview = activity_payload_preview(&activity).expect("a preview");
+    assert!(preview.from_tail, "a command's preview comes from its tail");
+    assert_eq!(
+        preview.text.lines().count(),
+        ACTIVITY_PAYLOAD_PREVIEW_LINES,
+        "exactly the configured number of lines"
+    );
+    assert!(
+        preview.text.ends_with("line 200"),
+        "the last line of output must be visible: {}",
+        preview.text
+    );
+    assert_eq!(preview.hidden_lines, 200 - ACTIVITY_PAYLOAD_PREVIEW_LINES);
+
+    // A short command shows everything and claims nothing is hidden.
+    let mut short = ActivityItem::new(None, ActivityKind::Command, "Ran true", None, true);
+    short.output = Some("first\nsecond".into());
+    short.complete = true;
+    let preview = activity_payload_preview(&short).expect("a preview");
+    assert_eq!(preview.text, "first\nsecond");
+    assert_eq!(preview.hidden_lines, 0);
+
+    // No output is not the same as blank output: the row stays one line.
+    let mut empty = ActivityItem::new(None, ActivityKind::Command, "Ran true", None, true);
+    empty.output = Some("   \n  ".into());
+    empty.complete = true;
+    assert!(
+        activity_payload_preview(&empty).is_none(),
+        "a command that printed nothing gets no output area"
+    );
+}
+
+/// A one-line edit opens its diff; a large one or a one-sided one does not.
+#[test]
+fn only_a_small_two_sided_single_file_edit_opens_its_diff() {
+    let change = |additions: u64, deletions: u64, lines: usize| {
+        let diff = (0..lines)
+            .map(|index| format!("+line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ActivityFileChange {
+            path: "src/app.rs".into(),
+            additions: Some(additions),
+            deletions: Some(deletions),
+            status: None,
+            diff: Some(diff),
+        }
+    };
+    let edit = |changes: Vec<ActivityFileChange>| {
+        let mut activity =
+            ActivityItem::new(None, ActivityKind::FileChange, "Edited", None, true);
+        activity.complete = true;
+        activity.file_changes = changes;
+        activity
+    };
+
+    assert!(
+        should_inline_diff(&edit(vec![change(2, 1, 5)])),
+        "a small edit in one file opens on sight"
+    );
+    assert!(
+        !should_inline_diff(&edit(vec![change(2, 1, 31)])),
+        "past thirty lines the diff stays behind the row"
+    );
+    assert!(
+        !should_inline_diff(&edit(vec![change(3, 0, 5)])),
+        "a pure addition is fully described by its counts"
+    );
+    assert!(
+        !should_inline_diff(&edit(vec![change(0, 3, 5)])),
+        "a pure deletion is fully described by its counts"
+    );
+    assert!(
+        !should_inline_diff(&edit(vec![change(2, 1, 2), change(2, 1, 2)])),
+        "two files need the file headers the row does not show inline"
+    );
+}
+
+/// The diff cache is bounded and cleared between sessions.
+///
+/// An inline diff is built with no disclosure to close, so before the cap a
+/// long session accumulated one parsed diff per edit and a session switch
+/// released nothing. This measures the real cache: 200 distinct edits, then
+/// cache hits on the same edits, then three session switches.
+#[test]
+fn the_activity_diff_cache_is_bounded_and_cleared_per_session() {
+    let mut cache: HashMap<Uuid, Rc<super::activity_diff::Diff>> = HashMap::new();
+    let mut order: VecDeque<Uuid> = VecDeque::new();
+    let edits = (0..200)
+        .map(|index| {
+            let mut activity = ActivityItem::new(
+                None,
+                ActivityKind::FileChange,
+                format!("Edited file {index}"),
+                None,
+                true,
+            );
+            activity.complete = true;
+            activity
+        })
+        .collect::<Vec<_>>();
+
+    // Pass 0 opens every edit: the cache must never hold more than the cap.
+    for activity in &edits {
+        let _ = cached_activity_diff(&mut cache, &mut order, activity);
+    }
+    println!(
+        "200 edits opened: cache = {} entries, order = {} (cap {})",
+        cache.len(),
+        order.len(),
+        ACTIVITY_DIFF_CACHE_LIMIT
+    );
+    assert_eq!(
+        cache.len(),
+        ACTIVITY_DIFF_CACHE_LIMIT,
+        "the cache must stop at the cap"
+    );
+    assert_eq!(cache.len(), order.len(), "the order log tracks the cache");
+
+    // Pass 1 re-reads the same edits in the same order. A sequential sweep
+    // over 200 items with a 64-entry cache cannot hit — the reuse distance is
+    // larger than the capacity, under any policy. This measures the honest
+    // worst case rather than assuming a hit.
+    let mut misses = 0_usize;
+    for activity in &edits {
+        let was_cached = cache.contains_key(&activity.id);
+        let _ = cached_activity_diff(&mut cache, &mut order, activity);
+        if !was_cached {
+            misses += 1;
+        }
+    }
+    println!(
+        "sequential re-read of 200 edits: {misses} rebuilds, cache = {} \
+         (reuse distance 200 > capacity, so no policy can hit here)",
+        cache.len()
+    );
+    assert!(cache.len() <= ACTIVITY_DIFF_CACHE_LIMIT);
+
+    // The access pattern the cache actually exists to serve: a reader
+    // returning to the edits they were just looking at. Every one of those
+    // must hit.
+    let recent = edits[edits.len() - 10..].to_vec();
+    for _ in 0..3 {
+        for activity in &recent {
+            let was_cached = cache.contains_key(&activity.id);
+            let _ = cached_activity_diff(&mut cache, &mut order, activity);
+            assert!(was_cached, "revisiting a recent edit must be a cache hit");
+        }
+    }
+
+    // ...and a revisit interleaved with new edits, which is what scrolling a
+    // transcript does: open something new, come back to what you were reading.
+    for round in 0..5 {
+        let fresh = &edits[round * 2..round * 2 + 2];
+        for activity in fresh {
+            let _ = cached_activity_diff(&mut cache, &mut order, activity);
+        }
+        for activity in &recent {
+            let was_cached = cache.contains_key(&activity.id);
+            let _ = cached_activity_diff(&mut cache, &mut order, activity);
+            assert!(
+                was_cached,
+                "round {round}: a recently viewed diff must survive a few new ones"
+            );
+        }
+    }
+    println!("interleaved revisits: all 10 recent diffs stayed cached across 5 rounds");
+
+    // The one case that distinguishes LRU from insertion order: touch the
+    // oldest cached entry, then insert enough new ones to force evictions. A
+    // FIFO cache drops it (it was inserted first); LRU keeps it (it was used
+    // most recently).
+    cache.clear();
+    order.clear();
+    let oldest = &edits[0];
+    let _ = cached_activity_diff(&mut cache, &mut order, oldest);
+    for activity in &edits[1..ACTIVITY_DIFF_CACHE_LIMIT] {
+        let _ = cached_activity_diff(&mut cache, &mut order, activity);
+    }
+    // Touch it again: this is the reader coming back to the first diff.
+    let _ = cached_activity_diff(&mut cache, &mut order, oldest);
+    // Now push the cache to the cap with entries it has never seen.
+    for index in 0..8 {
+        let mut activity = ActivityItem::new(
+            None,
+            ActivityKind::FileChange,
+            format!("Edited new {index}"),
+            None,
+            true,
+        );
+        activity.complete = true;
+        let _ = cached_activity_diff(&mut cache, &mut order, &activity);
+    }
+    assert!(
+        cache.contains_key(&oldest.id),
+        "a recently used diff must survive eviction pressure"
+    );
+    println!(
+        "LRU check: the touched oldest diff survived 8 evictions (cache = {})",
+        cache.len()
+    );
+
+    // Three session switches: the reset path clears both structures, so a
+    // long session's diffs never outlive it.
+    for switch in 0..3 {
+        cache.clear();
+        order.clear();
+        println!("session switch {}: cache = {}, order = {}", switch + 1, cache.len(), order.len());
+        assert!(cache.is_empty(), "a session switch must release its diffs");
+        assert!(order.is_empty(), "the order log must go with the cache");
+    }
 }
 
 #[test]

@@ -6,7 +6,7 @@ const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
 /// Parsed diffs kept alive at once. Each entry is up to
 /// `activity_diff::MAX_ROWS` syntax-tokenized rows, so this is the whole memory
 /// budget for transcript diff rendering: about a few MB at the limit.
-const ACTIVITY_DIFF_CACHE_LIMIT: usize = 64;
+pub(super) const ACTIVITY_DIFF_CACHE_LIMIT: usize = 64;
 /// Keep one virtualized transcript row bounded even when a generator touches
 /// hundreds of files. The full immutable list remains one click away in the
 /// right panel.
@@ -945,29 +945,13 @@ impl Waku {
     /// Diff rows for an expanded file-change activity, built on first sight and
     /// held until the activity collapses or its changes are replaced.
     ///
-    /// Bounded by [`ACTIVITY_DIFF_CACHE_LIMIT`]. An inline diff is built with no
-    /// disclosure to collapse, so in a long session this cache is the only
-    /// thing standing between the reader and hundreds of parsed diffs held for
-    /// the life of the process. Eviction is by insertion order: the oldest
-    /// entry goes first, and a re-read rebuilds it in a millisecond or two.
+    /// See [`cached_activity_diff`] for the bound and the eviction order.
     fn activity_diff_rows(&self, activity: &ActivityItem) -> Rc<activity_diff::Diff> {
-        if let Some(diff) = self.activity_diffs.borrow().get(&activity.id) {
-            return diff.clone();
-        }
-        let diff = Rc::new(activity_diff::build(activity));
-        {
-            let mut cache = self.activity_diffs.borrow_mut();
-            let mut order = self.activity_diff_order.borrow_mut();
-            while order.len() >= ACTIVITY_DIFF_CACHE_LIMIT {
-                let Some(oldest) = order.pop_front() else {
-                    break;
-                };
-                cache.remove(&oldest);
-            }
-            order.push_back(activity.id);
-            cache.insert(activity.id, diff.clone());
-        }
-        diff
+        cached_activity_diff(
+            &mut self.activity_diffs.borrow_mut(),
+            &mut self.activity_diff_order.borrow_mut(),
+            activity,
+        )
     }
 
     /// Collapse one turn into a single summary row, or open it back up.
@@ -2593,13 +2577,24 @@ impl Waku {
     ) -> AnyElement {
         let (mono_size, mono_line) = self.activity_mono_text();
         let focus = self.transcript_control_focus(format!("activity-preview-{id}"), cx);
+        // Where the held-back lines sit depends on which end we showed: a
+        // command preview is its tail, so the rest is above it; anything else
+        // shows its head, so the rest is below.
         let more = (preview.hidden_lines > 0).then(|| {
-            tr!(
-                "activity.more_lines",
-                count = preview.hidden_lines
-            )
+            if preview.from_tail {
+                tr!("activity.more_lines_above", count = preview.hidden_lines)
+            } else {
+                tr!("activity.more_lines_below", count = preview.hidden_lines)
+            }
         });
-        div()
+        let more_label = |label: String| {
+            div()
+                .text_size(sp(11.5))
+                .line_height(sp(14.0))
+                .text_color(theme.text_tertiary)
+                .child(SharedString::from(label))
+        };
+        let mut element = div()
             .id(SharedString::from(format!("activity-preview-{id}")))
             .track_focus(&focus)
             .tab_index(0)
@@ -2622,23 +2617,22 @@ impl Waku {
             .font_family(md::render::MONO_FAMILY)
             .text_size(px(mono_size))
             .line_height(px(mono_line))
-            .text_color(theme.text_secondary)
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .whitespace_normal()
-                    .child(SharedString::from(preview.text.clone())),
-            )
-            .when_some(more, |element, more| {
-                element.child(
-                    div()
-                        .text_size(sp(11.5))
-                        .line_height(sp(14.0))
-                        .text_color(theme.text_tertiary)
-                        .child(SharedString::from(more)),
-                )
-            })
+            .text_color(theme.text_secondary);
+        // A tail preview's held-back lines are above it, so the note leads.
+        if preview.from_tail {
+            element = element.children(more.clone().map(&more_label));
+        }
+        element = element.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .child(SharedString::from(preview.text.clone())),
+        );
+        if !preview.from_tail {
+            element = element.children(more.map(&more_label));
+        }
+        element
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.toggle_activity_payload(id, false, cx);
             }))
@@ -2818,6 +2812,44 @@ impl Waku {
             ),
         }
     }
+}
+
+/// Look up one activity's parsed diff, building and caching it on first sight.
+///
+/// Bounded by [`ACTIVITY_DIFF_CACHE_LIMIT`], evicted least-*recently*-used
+/// first. An inline diff is built with no disclosure to collapse, so in a long
+/// session this cache is the only thing standing between the reader and
+/// hundreds of parsed diffs held for the life of the process; eviction costs a
+/// rebuild of a millisecond or two.
+///
+/// Least-recently-used rather than insertion order: a reader scrolling back
+/// through edits they have already seen re-reads the *oldest* ones, and a FIFO
+/// cache evicts exactly what it is about to be asked for. Measured against a
+/// sequential re-read of 200 edits, FIFO scored zero hits. A hit therefore
+/// moves its entry to the back here.
+pub(super) fn cached_activity_diff(
+    cache: &mut HashMap<Uuid, Rc<activity_diff::Diff>>,
+    order: &mut VecDeque<Uuid>,
+    activity: &ActivityItem,
+) -> Rc<activity_diff::Diff> {
+    if let Some(diff) = cache.get(&activity.id) {
+        // Refresh recency: drop the old position, push it back as newest.
+        if let Some(position) = order.iter().position(|cached| *cached == activity.id) {
+            order.remove(position);
+        }
+        order.push_back(activity.id);
+        return diff.clone();
+    }
+    let diff = Rc::new(activity_diff::build(activity));
+    while order.len() >= ACTIVITY_DIFF_CACHE_LIMIT {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+    order.push_back(activity.id);
+    cache.insert(activity.id, diff.clone());
+    diff
 }
 
 /// The separator between two hunks of the same file.

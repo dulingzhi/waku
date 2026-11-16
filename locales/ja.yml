@@ -342,6 +342,8 @@ activity.tool_name: ツール
 activity.mcp_server: MCP サーバー
 activity.output: 出力
 activity.more_lines: "… 残り %{count} 行"
+activity.more_lines_above: "… 上に残り %{count} 行"
+activity.more_lines_below: "… 下に残り %{count} 行"
 activity.image_output: 画像出力
 activity.open_file: ファイルを開く
 activity.search_for: "%{query} を検索"

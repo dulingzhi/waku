@@ -666,6 +666,10 @@ activity.output:
   en: Output
 activity.more_lines:
   en: "… %{count} more lines"
+activity.more_lines_above:
+  en: "… %{count} earlier lines"
+activity.more_lines_below:
+  en: "… %{count} more lines"
 activity.image_output:
   en: Image output
 activity.open_file:
