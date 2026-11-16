@@ -312,4 +312,50 @@ mod tests {
             "the id must be hex: {first}"
         );
     }
+
+    /// The session-id rule exists twice on purpose, and this is what keeps the
+    /// two copies equal.
+    ///
+    /// `waku-relay` deliberately does not depend on `waku-protocol`: a relay
+    /// that linked the sealing code would be one refactor from holding a key.
+    /// So `waku_relay::parse_path` and `pairing::is_valid_session_id` each
+    /// restate the rule, and nothing in either crate can compare them. This
+    /// crate depends on both, which makes it the only place a drift can be
+    /// caught before a user meets it as "the daemon reconnects forever with a
+    /// four-character error in a log".
+    ///
+    /// The third copy lives in `packages/waku-client/src/pairing.ts`; the
+    /// cross-language vectors cover the values that are shown to a user, and
+    /// `isValidSessionId` is compared there against this same set.
+    #[test]
+    fn the_session_id_rule_matches_the_relay() {
+        // Every case here is one a caller could plausibly produce: a generated
+        // id, a typed one, a translated one, and the boundaries.
+        let cases = [
+            "",
+            "a",
+            "abc123",
+            "a-b_c",
+            "0123456789abcdef0123456789abcdef",
+            &"a".repeat(waku_protocol::pairing::MAX_SESSION_ID_LEN),
+            &"a".repeat(waku_protocol::pairing::MAX_SESSION_ID_LEN + 1),
+            "a/b",
+            "a b",
+            "a?b",
+            "a#b",
+            "a.b",
+            "session-ünïcode",
+        ];
+
+        for case in cases {
+            let ours = waku_protocol::pairing::is_valid_session_id(case);
+            // The relay exposes the same decision through its path parser,
+            // which is the only public form it has.
+            let theirs = waku_relay::parse_path(&format!("/{case}/daemon")).is_ok();
+            assert_eq!(
+                ours, theirs,
+                "session id {case:?}: pairing says {ours}, relay says {theirs}"
+            );
+        }
+    }
 }
