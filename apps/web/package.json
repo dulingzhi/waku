@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "deploy": "bun run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "bun test --isolate",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
