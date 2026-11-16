@@ -16,6 +16,8 @@ import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
+import { authenticationString } from './pairing';
+
 /** `record.rs:23-28`. */
 const NONCE_LEN = 12;
 const TAG_LEN = 16;
@@ -136,15 +138,27 @@ export class SessionKeys {
    * client can pin what it saw.
    */
   readonly peerEd25519: Uint8Array | null;
+  /**
+   * The transcript both sides hashed, kept so the short authentication string
+   * can be derived from it (`record.rs:77-83`).
+   *
+   * Not a secret: it is a digest of public keys that crossed the wire. Retained
+   * rather than recomputed because recomputing needs both sides' ephemeral
+   * keys, and the point of the string is to be checkable after the handshake
+   * has already consumed them.
+   */
+  readonly transcriptHash: Uint8Array;
 
   private constructor(
     clientToServer: Uint8Array,
     serverToClient: Uint8Array,
     peerEd25519: Uint8Array | null,
+    transcriptHash: Uint8Array,
   ) {
     this.clientToServer = clientToServer;
     this.serverToClient = serverToClient;
     this.peerEd25519 = peerEd25519;
+    this.transcriptHash = transcriptHash;
   }
 
   /**
@@ -162,11 +176,29 @@ export class SessionKeys {
       hkdf(sha256, ikm, transcriptHash, C2S_INFO, KEY_LEN),
       hkdf(sha256, ikm, transcriptHash, S2C_INFO, KEY_LEN),
       null,
+      transcriptHash,
     );
   }
 
   private withPeerEd25519(peer: Uint8Array): SessionKeys {
-    return new SessionKeys(this.clientToServer, this.serverToClient, peer);
+    return new SessionKeys(
+      this.clientToServer,
+      this.serverToClient,
+      peer,
+      this.transcriptHash,
+    );
+  }
+
+  /**
+   * The short authentication string a user compares once
+   * (`SessionKeys::authentication_string`, `record.rs:118`).
+   *
+   * **Both sides must be shown this value.** It is the only check that covers
+   * the connection actually in progress, rather than the daemon's identity,
+   * which the pairing fingerprint already covers.
+   */
+  authenticationString(): string {
+    return authenticationString(this.transcriptHash);
   }
 
   /** A sealer for records travelling in `direction`. */

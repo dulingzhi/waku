@@ -177,11 +177,48 @@ fn main() {
          \"clientHello\": \"{}\",\n    \
          \"serverHello\": \"{}\",\n    \
          \"clientToServer\": \"{}\",\n    \
-         \"serverToClient\": \"{}\"\n  }}\n",
+         \"serverToClient\": \"{}\"\n  }},\n",
         hex(&client_hello),
         hex(&server_hello),
         key_fingerprint(&client_keys, Direction::ClientToServer),
         key_fingerprint(&client_keys, Direction::ServerToClient),
+    ));
+
+    // --- pairing ---------------------------------------------------------
+    // Deterministic and fully reproducible, unlike the handshake group above:
+    // every input here is a fixed key, so the whole group can be regenerated
+    // and diffed.
+    //
+    // The fingerprint is what a pairing code carries, and the authentication
+    // string is what a user compares after the handshake. Both are shown to a
+    // person, so a drift between implementations is not a crash — it is a
+    // correct pairing rejected, or worse, an attacker's handshake accepted.
+    let pairing_public = PublicKey::from(&secret(0x12)).to_bytes();
+    // Successive bytes rather than one repeated value: a uniform transcript
+    // renders every digit the same, which would hide a wrong grouping or an
+    // off-by-one in the byte the digit came from.
+    let mut auth_transcript = [0_u8; 32];
+    for (index, byte) in auth_transcript.iter_mut().enumerate() {
+        *byte = (index as u8).wrapping_mul(7).wrapping_add(3);
+    }
+
+    out.push_str(&format!(
+        "  \"pairing\": {{\n    \
+         \"ed25519Public\": \"{}\",\n    \
+         \"fingerprint\": \"{}\",\n    \
+         \"transcriptHash\": \"{}\",\n    \
+         \"authenticationString\": \"{}\",\n    \
+         \"renderedCode\": \"{}\"\n  }}\n",
+        hex(&pairing_public),
+        waku_protocol::pairing::fingerprint_of(&pairing_public),
+        hex(&auth_transcript),
+        waku_protocol::pairing::authentication_string(&auth_transcript),
+        waku_protocol::pairing::PairingCode {
+            relay: "relay.example.test:443".into(),
+            session_id: "0123456789abcdef0123456789abcdef".into(),
+            fingerprint: waku_protocol::pairing::fingerprint_of(&pairing_public),
+        }
+        .render(),
     ));
 
     out.push('}');

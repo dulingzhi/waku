@@ -11,6 +11,7 @@
     "./composer-autocomplete": "./src/composer-autocomplete.ts",
     "./fuzzy-search": "./src/fuzzy-search.ts",
     "./provider-probe-cache": "./src/provider-probe-cache.ts",
+    "./pairing": "./src/pairing.ts",
     "./record": "./src/record.ts",
     "./protocol": "./src/generated/index.ts"
   },

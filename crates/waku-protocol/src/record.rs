@@ -73,6 +73,14 @@ pub struct SessionKeys {
     /// X25519 key on the daemon's side. Surfaced so a first-time client can pin
     /// what it saw in the pairing code.
     peer_key: Option<[u8; 32]>,
+    /// The transcript both sides hashed, kept so the short authentication
+    /// string can be derived from it.
+    ///
+    /// Not a secret: it is a digest of public keys that crossed the wire. It is
+    /// retained rather than recomputed because recomputing needs both sides'
+    /// ephemeral keys, and the point of the string is to be checkable after the
+    /// handshake has already consumed them.
+    transcript_hash: [u8; 32],
 }
 
 impl SessionKeys {
@@ -93,7 +101,22 @@ impl SessionKeys {
             client_to_server,
             server_to_client,
             peer_key: None,
+            transcript_hash: *transcript_hash,
         }
+    }
+
+    /// The short authentication string a user compares once.
+    ///
+    /// Derived from the handshake transcript, never from a session key. Two
+    /// ends that completed the same handshake show the same digits; a relay
+    /// that ran one handshake per side shows two different ones, which is the
+    /// attack this catches and a key hash would not.
+    ///
+    /// **Both sides must be shown this value.** It is the only check that
+    /// covers the connection actually in progress, rather than the daemon's
+    /// identity, which the pairing fingerprint already covers.
+    pub fn authentication_string(&self) -> String {
+        crate::pairing::authentication_string(&self.transcript_hash)
     }
 
     fn with_peer_key(mut self, peer: [u8; 32]) -> Self {
@@ -844,6 +867,50 @@ mod tests {
             handshake::accept(&daemon_static, &daemon_signing, &client_hello).unwrap();
         let client_keys = client.finish(&server_hello, None).unwrap();
         (client_keys, daemon_keys)
+    }
+
+    #[test]
+    fn both_ends_show_the_same_authentication_string() {
+        // The entire value of the string: two people looking at two screens
+        // must see the same digits after an honest handshake, or they would
+        // reject a connection that is fine.
+        let (client_keys, daemon_keys) = complete_handshake();
+        assert_eq!(
+            client_keys.authentication_string(),
+            daemon_keys.authentication_string()
+        );
+    }
+
+    #[test]
+    fn a_different_handshake_shows_different_digits() {
+        // This is what catches a relay running one handshake per side: it
+        // produces two independent handshakes, so the two screens disagree even
+        // though both connections are individually sound. Everything else in
+        // the record layer passes in that attack; this does not.
+        let (first_client, _) = complete_handshake();
+        let (second_client, _) = complete_handshake();
+        assert_ne!(
+            first_client.authentication_string(),
+            second_client.authentication_string(),
+            "two independent handshakes must not show the same string"
+        );
+    }
+
+    #[test]
+    fn the_authentication_string_is_not_derived_from_the_session_key() {
+        // A key hash would be reproducible from a key an attacker had already
+        // recovered and would not be bound to what was negotiated. The string
+        // must move when the transcript moves, even if the agreements do not.
+        let transcript_a = [1_u8; 32];
+        let transcript_b = [2_u8; 32];
+        let ikm = [7_u8; 99];
+        let keys_a = SessionKeys::derive(&ikm, &transcript_a);
+        let keys_b = SessionKeys::derive(&ikm, &transcript_b);
+        assert_ne!(
+            keys_a.authentication_string(),
+            keys_b.authentication_string(),
+            "the string must follow the transcript"
+        );
     }
 
     #[test]

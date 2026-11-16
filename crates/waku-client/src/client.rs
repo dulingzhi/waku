@@ -136,17 +136,12 @@ impl DaemonClient {
             Self::connect_via_relay_with_identity(&parsed.relay, &parsed.session_id, token, None)?;
 
         let proven = client.daemon_signing_key();
-        let actual = waku_protocol::pairing::fingerprint_of(&proven);
-        if actual != parsed.fingerprint {
+        if let Err(error) = pairing_fingerprint_matches(&parsed.fingerprint, &proven) {
             // Drop the connection before returning: a client that stayed
             // connected to an unverified daemon would be one request away from
             // handing it the token.
             client.shutdown();
-            anyhow::bail!(
-                "the daemon at this pairing code is not the one it claims: \
-                 expected fingerprint {}, got {actual}",
-                parsed.fingerprint
-            );
+            return Err(error);
         }
         Ok(client)
     }
@@ -391,6 +386,28 @@ impl DaemonClient {
     }
 }
 
+/// Whether `proven` is the key a pairing code names.
+///
+/// Takes the code's fingerprint and the key the handshake proved, and is the
+/// only place that decision is made. Split out from
+/// [`DaemonClient::connect_with_pairing_code`] so it can be tested without a
+/// socket: the interesting cases are all "this key, that code", and a network
+/// would only add the relay's timing on top.
+///
+/// **Compares the whole fingerprint, not a prefix.** A check that stopped early
+/// would accept a daemon whose key shares the first characters of the real one,
+/// which is exactly what an attacker grinding a key would aim for.
+fn pairing_fingerprint_matches(fingerprint: &str, proven: &[u8; 32]) -> anyhow::Result<()> {
+    let actual = waku_protocol::pairing::fingerprint_of(proven);
+    if actual != fingerprint {
+        anyhow::bail!(
+            "the daemon at this pairing code is not the one it claims: \
+             expected fingerprint {fingerprint}, got {actual}"
+        );
+    }
+    Ok(())
+}
+
 fn daemon_url(address: &str) -> anyhow::Result<String> {
     let normalized = if address.starts_with("ws://") || address.starts_with("wss://") {
         address.to_owned()
@@ -558,5 +575,43 @@ mod tests {
             daemon_url("wss://waku.example.test/old?ignored=1").unwrap(),
             "wss://waku.example.test/v1"
         );
+    }
+
+    /// A pairing code is accepted only when it names the key the handshake
+    /// proved.
+    ///
+    /// This is `connect_with_pairing_code`'s decision, without a socket: the
+    /// function under test is the comparison, and a network would only add the
+    /// relay's reconnect timing on top of it. The end-to-end path is covered
+    /// separately by the relay round trip.
+    #[test]
+    fn the_pairing_check_accepts_only_the_key_the_handshake_proved() {
+        let proven = [0x3a_u8; 32];
+        let right = waku_protocol::pairing::fingerprint_of(&proven);
+
+        assert!(
+            pairing_fingerprint_matches(&right, &proven).is_ok(),
+            "a code naming the proven key must be accepted"
+        );
+
+        // Every character position must matter: a check that compared a prefix
+        // would accept a key that shares only that prefix.
+        for index in 0..right.len() {
+            let mut wrong = right.clone();
+            let replacement = if wrong.as_bytes()[index] == b'0' {
+                "1"
+            } else {
+                "0"
+            };
+            wrong.replace_range(index..=index, replacement);
+            assert_ne!(wrong, right, "the mutation at {index} must change the code");
+            assert!(
+                pairing_fingerprint_matches(&wrong, &proven).is_err(),
+                "a code differing at position {index} must be refused"
+            );
+        }
+
+        // And a different key must not be accepted under the right code.
+        assert!(pairing_fingerprint_matches(&right, &[0x3b_u8; 32]).is_err());
     }
 }

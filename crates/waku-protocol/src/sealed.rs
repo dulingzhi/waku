@@ -209,6 +209,20 @@ impl<S: Read + Write> SealedConnection<S> {
         self.keys.sealer(direction)
     }
 
+    /// The short authentication string for this connection.
+    ///
+    /// Both ends of a completed handshake produce the same digits. A user
+    /// compares them once, which is what catches a relay that ran one handshake
+    /// per side — such a relay produces two different strings and no amount of
+    /// correct-looking traffic hides it.
+    ///
+    /// The pairing fingerprint checks *who* the daemon is; this checks *which
+    /// connection* is in progress. Both are needed, and neither substitutes for
+    /// the other.
+    pub fn authentication_string(&self) -> String {
+        self.keys.authentication_string()
+    }
+
     /// The underlying socket, for setting timeouts and config.
     pub fn socket_mut(&mut self) -> &mut tungstenite::WebSocket<S> {
         &mut self.socket

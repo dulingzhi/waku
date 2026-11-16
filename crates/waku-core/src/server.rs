@@ -834,6 +834,19 @@ where
             }
         },
     };
+    // The connection is sealed, so both ends now hold the same short
+    // authentication string. It is logged here — before any message is
+    // exchanged — because its whole purpose is for a person to compare it
+    // against what their client shows, and a value reported after the fact
+    // would be reported after the traffic it was meant to authenticate.
+    //
+    // This is not a secret: it is a digest of public keys both sides already
+    // exchanged. It is short enough to read across a room, which is exactly the
+    // length an attacker running one handshake per side cannot match.
+    waku_protocol::diagnostics::log(format!(
+        "waku-daemon pairing code: {}",
+        sealed.authentication_string()
+    ));
     let hello = match read_sealed_client_message(&mut sealed)? {
         Some(hello) => hello,
         None => return Ok(()),

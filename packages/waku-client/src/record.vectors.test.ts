@@ -2,6 +2,14 @@ import { describe, expect, test } from 'bun:test';
 
 import vectors from './record.vectors.json';
 import {
+  authenticationString,
+  fingerprintOf,
+  isValidSessionId,
+  pairingFingerprintMatches,
+  parsePairingCode,
+  renderPairingCode,
+} from './pairing';
+import {
   agreementBytes,
   ClientHandshake,
   Opener,
@@ -194,8 +202,56 @@ describe('cross-language vectors', () => {
   });
 });
 
-describe('cross-language handshake', () => {
+describe('cross-language pairing vectors', () => {
   /**
+   * Fully deterministic, unlike the handshake group: every input is a fixed
+   * key, so this group regenerates and diffs cleanly.
+   */
+  test('the fingerprint of a daemon key matches', () => {
+    expect(fingerprintOf(fromHex(vectors.pairing.ed25519Public)))
+      .toBe(vectors.pairing.fingerprint);
+  });
+
+  test('the authentication string matches', () => {
+    // Both ends show this to a person. A drift is not a crash: it is a correct
+    // pairing rejected, or an attacker's handshake accepted.
+    expect(authenticationString(fromHex(vectors.pairing.transcriptHash)))
+      .toBe(vectors.pairing.authenticationString);
+  });
+
+  test('the rendered code matches byte for byte', () => {
+    expect(renderPairingCode({
+      relay: 'relay.example.test:443',
+      sessionId: '0123456789abcdef0123456789abcdef',
+      fingerprint: fingerprintOf(fromHex(vectors.pairing.ed25519Public)),
+    })).toBe(vectors.pairing.renderedCode);
+  });
+
+  test('the rendered code parses back to the same parts', () => {
+    const parsed = parsePairingCode(vectors.pairing.renderedCode);
+    expect(parsed.relay).toBe('relay.example.test:443');
+    expect(parsed.sessionId).toBe('0123456789abcdef0123456789abcdef');
+    expect(parsed.fingerprint).toBe(vectors.pairing.fingerprint);
+    // And rendering it again is the same string: render/parse are inverses.
+    expect(renderPairingCode(parsed)).toBe(vectors.pairing.renderedCode);
+  });
+
+  test('the pin check accepts the vector key and refuses another', () => {
+    const key = fromHex(vectors.pairing.ed25519Public);
+    expect(() => pairingFingerprintMatches(vectors.pairing.fingerprint, key)).not.toThrow();
+    const other = new Uint8Array(key);
+    other[0] = (other[0] ?? 0) ^ 0xff;
+    expect(() => pairingFingerprintMatches(vectors.pairing.fingerprint, other))
+      .toThrow(/not the one it claims/);
+  });
+
+  test('the session id in the vector code is one the relay accepts', () => {
+    const parsed = parsePairingCode(vectors.pairing.renderedCode);
+    expect(isValidSessionId(parsed.sessionId)).toBe(true);
+  });
+});
+
+describe('cross-language handshake', () => {  /**
    * The full handshake vector: the daemon's half of one real exchange, plus
    * the keys both sides derived.
    *
