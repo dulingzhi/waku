@@ -1851,6 +1851,60 @@ fn the_activity_diff_cache_is_bounded_and_cleared_per_session() {
     }
 }
 
+/// The turn's stats are stated, not hidden behind hover.
+///
+/// "Was that turn slow?" is a question a reader asks while scanning, so the
+/// duration, step count and file count come from data available without any
+/// interaction. This pins the inputs the row renders from.
+#[test]
+fn a_turn_states_its_stats_without_being_hovered() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        activities: vec![
+            ActivityItem::new(None, ActivityKind::Command, "Ran tests", None, true),
+            ActivityItem::new(None, ActivityKind::FileChange, "Edited", None, true),
+        ],
+    });
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.finish_active_turn(TurnStatus::Completed);
+    attach_changed_files(
+        &mut session,
+        vec![CheckpointFile { path: "src/app.rs".into(), additions: 3, deletions: 1 }],
+    );
+
+    // Everything the always-visible stats row prints is available with no
+    // hover state, no disclosure and no expansion.
+    let duration = format_worked_duration(turn_worked_seconds(&session.turns[0]));
+    let steps = turn_activity_count(&session, turn_id);
+    let files = turn_changed_file_count(&session, turn_id);
+    assert!(!duration.is_empty(), "a settled turn always has a duration");
+    assert_eq!(steps, 2, "both activities are counted");
+    assert_eq!(files, 1, "the checkpoint's files are counted");
+}
+
+/// The turn summary row states a failure instead of a duration, and its
+/// collapsed summary carries the same verdict.
+#[test]
+fn a_failed_turn_summary_never_reports_success() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.transcript_blocks.push(TranscriptBlock {
+        after_message: 1,
+        turn_id: Some(turn_id),
+        activities: vec![ActivityItem::new(None, ActivityKind::Command, "Ran tests", None, true)],
+    });
+    session.push_message(MessageRole::Assistant, "Partial.");
+    session.finish_active_turn(TurnStatus::Failed);
+
+    assert_eq!(turn_summary_label(&session, turn_id), "This turn failed");
+    // A failed turn still shows what it did, by default.
+    let rows = folded_transcript_row_kinds(&session, &HashSet::new());
+    assert_eq!(rows, vec![Message(0), TurnBlock(0), Message(1), ResponseFooter(turn_id, 1)]);
+}
+
 #[test]
 fn a_settled_turn_shows_all_of_its_work_with_the_answer() {
     let project_id = Uuid::new_v4();

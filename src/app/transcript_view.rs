@@ -1452,7 +1452,7 @@ impl Waku {
         };
         let copied = self.copied_message_feedback.contains_key(&message.id);
         let action = self.assistant_message_action_for_message(message_index);
-        let force_visible = self
+        let hovered = self
             .hovered_response_row
             .is_some_and(|(hovered_turn_id, _)| hovered_turn_id == turn_id);
         let group_name = SharedString::from(format!("assistant-response-footer-{turn_id}"));
@@ -1466,6 +1466,13 @@ impl Waku {
         if let Some(changed_files) = self.render_changed_files_row(turn_id, theme, cx) {
             column = column.child(div().w_full().mb(px(3.0)).child(changed_files));
         }
+        // The turn's stats are always on screen: "was this turn slow?" and "did
+        // it do much?" are questions a reader asks without hovering anything.
+        // The actions beside them stay behind hover, because a row of buttons
+        // under every response is noise.
+        if let Some(stats) = self.render_turn_stats_row(turn_id, theme) {
+            column = column.child(stats);
+        }
         column
             .child(render_message_footer(
                 theme,
@@ -1474,13 +1481,76 @@ impl Waku {
                 copy_content,
                 copied,
                 group_name,
-                force_visible,
+                hovered,
                 false,
                 action,
                 None,
                 cx.entity().downgrade(),
             ))
             .into_any_element()
+    }
+
+    /// The turn's duration, step count and file count, always visible.
+    ///
+    /// The old summary row carried the duration but only appeared for a folded
+    /// turn; a reader asking "was that turn unusually slow?" had no answer on
+    /// screen. This is the answer, and it costs one line of tertiary text.
+    fn render_turn_stats_row(&self, turn_id: Uuid, theme: &Theme) -> Option<AnyElement> {
+        let session = self.selected_session()?;
+        let turn = session.turns.iter().find(|turn| turn.id == turn_id)?;
+        if turn.status == TurnStatus::Running {
+            // The live turn already closes with "Working for Ns"; two clocks
+            // would disagree with each other.
+            return None;
+        }
+        let mut parts = Vec::with_capacity(3);
+        if turn.status == TurnStatus::Failed {
+            parts.push(tr!("transcript.turn_failed").to_string());
+        } else if turn.status == TurnStatus::Interrupted {
+            parts.push(tr!(
+                "transcript.you_stopped_after",
+                duration = format_worked_duration(turn_worked_seconds(turn))
+            )
+            .to_string());
+        } else {
+            parts.push(
+                tr!(
+                    "transcript.worked_for",
+                    duration = format_worked_duration(turn_worked_seconds(turn))
+                )
+                .to_string(),
+            );
+        }
+        let steps = turn_activity_count(session, turn_id);
+        if steps > 0 {
+            parts.push(tr!("transcript.step_count", count = steps).to_string());
+        }
+        let files = turn_changed_file_count(session, turn_id);
+        if files > 0 {
+            parts.push(tr!("transcript.file_count", count = files).to_string());
+        }
+        let failed = turn.status == TurnStatus::Failed;
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(4.0))
+                .text_size(sp(12.5))
+                .line_height(sp(14.0))
+                .text_color(if failed {
+                    theme.danger
+                } else {
+                    theme.text_ghost
+                })
+                .when(failed, |element| {
+                    element.child(icon("icons/x.svg", 10.0, theme.danger))
+                })
+                .child(SharedString::from(parts.join(" · ")))
+                .into_any_element(),
+        )
     }
 
     pub(super) fn toggle_changed_files(
