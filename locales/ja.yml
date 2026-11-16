@@ -341,6 +341,7 @@ activity.arguments: 引数
 activity.tool_name: ツール
 activity.mcp_server: MCP サーバー
 activity.output: 出力
+activity.more_lines: "… 残り %{count} 行"
 activity.image_output: 画像出力
 activity.open_file: ファイルを開く
 activity.search_for: "%{query} を検索"
@@ -965,6 +966,13 @@ common.copy_named: "%{name} をコピー"
 
 transcript.worked: 完了
 transcript.worked_for: 作業時間 %{duration}
+transcript.turn_failed: このターンは完了しませんでした
+transcript.turn_running: 実行中
+transcript.row_failed: 失敗
+transcript.step_count: "%{count} ステップ"
+transcript.file_count: "%{count} ファイル"
+transcript.collapse_turn: このターンを畳む
+transcript.expand_turn: このターンを開く
 transcript.you_stopped_after: "%{duration} 後にタスクを停止しました"
 transcript.working_for: 作業中 · %{duration}
 transcript.thinking: 思考中

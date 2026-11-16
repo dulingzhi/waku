@@ -664,6 +664,8 @@ activity.mcp_server:
   en: MCP server
 activity.output:
   en: Output
+activity.more_lines:
+  en: "… %{count} more lines"
 activity.image_output:
   en: Image output
 activity.open_file:
@@ -1883,6 +1885,20 @@ transcript.worked:
   en: Worked
 transcript.worked_for:
   en: Worked for %{duration}
+transcript.turn_failed:
+  en: This turn failed
+transcript.turn_running:
+  en: Running
+transcript.row_failed:
+  en: Failed
+transcript.step_count:
+  en: "%{count} steps"
+transcript.file_count:
+  en: "%{count} files"
+transcript.collapse_turn:
+  en: Collapse this turn
+transcript.expand_turn:
+  en: Open this turn
 transcript.you_stopped_after:
   en: You stopped after %{duration}
 transcript.working_for:

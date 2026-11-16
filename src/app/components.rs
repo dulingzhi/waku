@@ -1552,6 +1552,84 @@ pub(super) fn activity_preview(activity: &ActivityItem) -> String {
     detail.to_owned()
 }
 
+/// Lines of a payload shown before the reader asks for all of it.
+///
+/// The tail, not the head: a command's verdict — a test summary, an error
+/// stack, an exit reason — is at the end of its output, and the head is
+/// usually progress noise.
+pub(super) const ACTIVITY_PAYLOAD_PREVIEW_LINES: usize = 8;
+
+/// The payload preview for an activity the reader has not opened.
+///
+/// `None` means there is nothing worth showing: a row whose whole story is
+/// already in its title (a read, a search) stays one line. An empty output is
+/// `None` too — a command that printed nothing is not the same as one that
+/// printed blank lines, and rendering an empty box for it would say otherwise.
+pub(super) fn activity_payload_preview(activity: &ActivityItem) -> Option<ActivityPayloadPreview> {
+    if !matches!(activity.kind, ActivityKind::Command) {
+        // A tool's output is often the answer (a grep's hits, a test report).
+        // For anything that is not a shell run, the head is the informative
+        // part; the tail of an arbitrary tool response is usually noise.
+        let output = activity.output.as_deref().map(str::trim)?;
+        if output.is_empty() {
+            return None;
+        }
+        let lines = output.lines().collect::<Vec<_>>();
+        let shown = lines.iter().take(ACTIVITY_PAYLOAD_PREVIEW_LINES).collect::<Vec<_>>();
+        return Some(ActivityPayloadPreview {
+            text: shown.iter().map(|line| line.to_string()).collect::<Vec<_>>().join("\n"),
+            hidden_lines: lines.len().saturating_sub(shown.len()),
+            from_tail: false,
+        });
+    }
+    let output = activity.output.as_deref().map(str::trim)?;
+    if output.is_empty() {
+        return None;
+    }
+    let lines = output.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(ACTIVITY_PAYLOAD_PREVIEW_LINES);
+    Some(ActivityPayloadPreview {
+        text: lines[start..].join("\n"),
+        hidden_lines: start,
+        from_tail: true,
+    })
+}
+
+/// A payload preview: the text, how many lines it is holding back, and which
+/// end of the output it took.
+pub(super) struct ActivityPayloadPreview {
+    pub(super) text: String,
+    pub(super) hidden_lines: usize,
+    pub(super) from_tail: bool,
+}
+
+/// Whether a file change is small enough to show inline without being asked.
+///
+/// All three must hold: one file, at most [`INLINE_DIFF_MAX_LINES`] rows, and a
+/// change that both adds and removes. A one-line edit is exactly the case where
+/// a click to see it feels like friction, while a pure addition or deletion is
+/// fully described by its file row and its `+`/`-` counts.
+///
+/// Reads only cached fields: `additions`/`deletions` are computed when the
+/// activity arrives and `diff` is already a normalized string, so this costs a
+/// length check rather than a parse.
+pub(super) fn should_inline_diff(activity: &ActivityItem) -> bool {
+    const INLINE_DIFF_MAX_LINES: usize = 30;
+    let [change] = activity.file_changes.as_slice() else {
+        return false;
+    };
+    let Some(diff) = change.diff.as_deref() else {
+        return false;
+    };
+    let (Some(additions), Some(deletions)) = (change.additions, change.deletions) else {
+        return false;
+    };
+    additions > 0
+        && deletions > 0
+        && !diff.is_empty()
+        && diff.lines().count() <= INLINE_DIFF_MAX_LINES
+}
+
 #[cfg(test)]
 mod message_time_tests {
     use super::*;

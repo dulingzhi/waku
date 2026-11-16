@@ -2519,9 +2519,8 @@ impl Waku {
             self.message_edit = None;
         }
         if selected {
-            self.activities_expanded.clear();
-            self.expanded_activity_items.clear();
-            self.expanded_turns.clear();
+            self.collapsed_turns.clear();
+            self.expanded_payloads.clear();
             self.expanded_changed_files.clear();
             self.transcript_control_focuses.borrow_mut().clear();
             self.splice_transcript_rows_after_visibility_change(&previous_kinds);
@@ -3292,9 +3291,8 @@ impl Waku {
             });
         self.submission_preparations.insert(session_id);
         if selected {
-            self.activities_expanded.clear();
-            self.expanded_activity_items.clear();
-            self.expanded_turns.clear();
+            self.collapsed_turns.clear();
+            self.expanded_payloads.clear();
             self.expanded_changed_files.clear();
             self.transcript_control_focuses.borrow_mut().clear();
             self.message_edit = None;

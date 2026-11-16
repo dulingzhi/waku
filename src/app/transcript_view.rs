@@ -3,6 +3,10 @@ use super::*;
 use base64::Engine as _;
 
 const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
+/// Parsed diffs kept alive at once. Each entry is up to
+/// `activity_diff::MAX_ROWS` syntax-tokenized rows, so this is the whole memory
+/// budget for transcript diff rendering: about a few MB at the limit.
+const ACTIVITY_DIFF_CACHE_LIMIT: usize = 64;
 /// Keep one virtualized transcript row bounded even when a generator touches
 /// hundreds of files. The full immutable list remains one click away in the
 /// right panel.
@@ -861,18 +865,13 @@ impl Waku {
         cx.notify();
     }
 
-    pub(super) fn toggle_activities(
-        &mut self,
-        block_index: usize,
-        current: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_block_disclosure(block_index, cx, |this| {
-            this.activities_expanded.insert(block_index, !current);
-        });
-    }
-
-    pub(super) fn toggle_activity_item(&mut self, id: Uuid, current: bool, cx: &mut Context<Self>) {
+    /// Open or close one activity's long payload — a command's full output, a
+    /// tool's raw arguments.
+    ///
+    /// Deliberately not "show the row": every row is on screen already. The
+    /// payload shows a preview (the tail of a command, its subject otherwise),
+    /// and this is the reader asking for all of it.
+    pub(super) fn toggle_activity_payload(&mut self, id: Uuid, current: bool, cx: &mut Context<Self>) {
         let block_index = self
             .selected_transcript_blocks()
             .iter()
@@ -881,13 +880,18 @@ impl Waku {
             return;
         };
         self.toggle_block_disclosure(block_index, cx, |this| {
-            this.expanded_activity_items.insert(id, !current);
             if current {
+                this.expanded_payloads.remove(&id);
                 // Collapsed: the rows would only be rebuilt from the same
                 // changes if it reopens, so do not keep them alive for every
                 // edit the session ever made.
                 this.activity_diffs.borrow_mut().remove(&id);
+                this.activity_diff_order
+                    .borrow_mut()
+                    .retain(|cached| *cached != id);
                 this.activity_diff_viewports.borrow_mut().remove(&id);
+            } else {
+                this.expanded_payloads.insert(id);
             }
         });
     }
@@ -940,31 +944,50 @@ impl Waku {
 
     /// Diff rows for an expanded file-change activity, built on first sight and
     /// held until the activity collapses or its changes are replaced.
+    ///
+    /// Bounded by [`ACTIVITY_DIFF_CACHE_LIMIT`]. An inline diff is built with no
+    /// disclosure to collapse, so in a long session this cache is the only
+    /// thing standing between the reader and hundreds of parsed diffs held for
+    /// the life of the process. Eviction is by insertion order: the oldest
+    /// entry goes first, and a re-read rebuilds it in a millisecond or two.
     fn activity_diff_rows(&self, activity: &ActivityItem) -> Rc<activity_diff::Diff> {
         if let Some(diff) = self.activity_diffs.borrow().get(&activity.id) {
             return diff.clone();
         }
         let diff = Rc::new(activity_diff::build(activity));
-        self.activity_diffs
-            .borrow_mut()
-            .insert(activity.id, diff.clone());
+        {
+            let mut cache = self.activity_diffs.borrow_mut();
+            let mut order = self.activity_diff_order.borrow_mut();
+            while order.len() >= ACTIVITY_DIFF_CACHE_LIMIT {
+                let Some(oldest) = order.pop_front() else {
+                    break;
+                };
+                cache.remove(&oldest);
+            }
+            order.push_back(activity.id);
+            cache.insert(activity.id, diff.clone());
+        }
         diff
     }
 
-    pub(super) fn toggle_turn_fold(
+    /// Collapse one turn into a single summary row, or open it back up.
+    ///
+    /// The inverse of the old default: a turn is laid out in full until the
+    /// reader asks for it to take less room, and the choice is theirs alone.
+    pub(super) fn toggle_turn_collapsed(
         &mut self,
         turn_id: Uuid,
-        expanded: bool,
+        collapsed: bool,
         cx: &mut Context<Self>,
     ) {
         self.pin_transcript_for_disclosure();
         let scroll_top = self.active_transcript_rows().logical_scroll_top();
         let previous_kinds = self.transcript_row_kinds.borrow().clone();
         let anchor_kind = previous_kinds.get(scroll_top.item_ix).copied();
-        if expanded {
-            self.expanded_turns.remove(&turn_id);
+        if collapsed {
+            self.collapsed_turns.remove(&turn_id);
         } else {
-            self.expanded_turns.insert(turn_id);
+            self.collapsed_turns.insert(turn_id);
         }
         self.transcript_anchor_following.set(false);
         self.splice_transcript_rows_after_visibility_change(&previous_kinds);
@@ -972,10 +995,12 @@ impl Waku {
         let next_kinds = self.transcript_row_kinds.borrow();
         let anchored_target =
             anchor_kind.and_then(|kind| next_kinds.iter().position(|candidate| *candidate == kind));
+        // Opening a turn back up removes the summary row from under the
+        // pointer, so fall back to the row that replaced it.
         let target = anchored_target.or_else(|| {
             next_kinds
                 .iter()
-                .position(|kind| *kind == TranscriptRowKind::TurnFold(turn_id))
+                .position(|kind| *kind == TranscriptRowKind::TurnCollapsed(turn_id))
         });
         drop(next_kinds);
         if let Some(item_ix) = target {
@@ -1239,7 +1264,7 @@ impl Waku {
                 })
             }
             TranscriptRowKind::TurnBlock(_)
-            | TranscriptRowKind::TurnFold(_)
+            | TranscriptRowKind::TurnCollapsed(_)
             | TranscriptRowKind::ResponseFooter(_, _)
             | TranscriptRowKind::ChangedFiles(_)
             | TranscriptRowKind::WorkingIndicator => false,
@@ -1372,7 +1397,9 @@ impl Waku {
                     self.render_activities_row(&block.activities, block_index, &theme, window, cx)
                 })
                 .unwrap_or_else(|| div().into_any_element()),
-            TranscriptRowKind::TurnFold(turn_id) => self.render_turn_fold_row(turn_id, &theme, cx),
+            TranscriptRowKind::TurnCollapsed(turn_id) => {
+                self.render_turn_collapsed_row(turn_id, &theme, cx)
+            }
             TranscriptRowKind::ResponseFooter(turn_id, message_index) => {
                 self.render_response_footer_row(turn_id, message_index, &theme, cx)
             }
@@ -1744,55 +1771,117 @@ impl Waku {
         Some(card.into_any_element())
     }
 
-    /// Settled reasoning, tool activity, and interim assistant commentary are
-    /// folded into a compact divider while the terminal response stays visible.
-    pub(super) fn render_turn_fold_row(
+    /// One collapsed turn: its summary standing in for everything the turn
+    /// produced, with the way back open.
+    ///
+    /// This row exists only because the reader collapsed the turn. It is
+    /// deliberately heavier than a tool row — a filled surface and a border,
+    /// not bare text — so a wall of collapsed turns reads as "content is here"
+    /// rather than as an empty stretch of transcript.
+    pub(super) fn render_turn_collapsed_row(
         &self,
         turn_id: Uuid,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let expanded = self.expanded_turns.contains(&turn_id);
-        let label = self
-            .selected_session()
-            .map(|session| turn_fold_label(session, turn_id))
+        let session = self.selected_session();
+        let label = session
+            .map(|session| turn_summary_label(session, turn_id))
             .unwrap_or_else(|| tr!("transcript.worked"));
+        let failed = session
+            .and_then(|session| session.turns.iter().find(|turn| turn.id == turn_id))
+            .is_some_and(|turn| turn.status == TurnStatus::Failed);
+        let steps = session.map_or(0, |session| turn_activity_count(session, turn_id));
+        let files = session.map_or(0, |session| turn_changed_file_count(session, turn_id));
+        let stats = {
+            let mut parts = vec![format_worked_duration(
+                session
+                    .and_then(|session| session.turns.iter().find(|turn| turn.id == turn_id))
+                    .map_or(1, turn_worked_seconds),
+            )];
+            if steps > 0 {
+                parts.push(tr!("transcript.step_count", count = steps));
+            }
+            if files > 0 {
+                parts.push(tr!("transcript.file_count", count = files));
+            }
+            parts.join(" · ")
+        };
+        let accent = if failed {
+            theme.danger
+        } else {
+            theme.text_tertiary
+        };
+        let focus = self.transcript_control_focus(format!("turn-collapsed-{turn_id}"), cx);
         div()
             .w_full()
-            .h(px(24.0))
+            .min_w_0()
             .flex()
-            .items_center()
-            .gap(px(10.0))
-            .child(div().h(px(1.0)).flex_1().bg(theme.border))
+            .flex_col()
+            .gap(px(4.0))
             .child(
                 div()
-                    .id(SharedString::from(format!("turn-fold-{turn_id}")))
-                    .h(px(24.0))
-                    .px(px(2.0))
-                    .flex_none()
+                    .id(SharedString::from(format!("turn-collapsed-{turn_id}")))
+                    .track_focus(&focus)
+                    .tab_index(0)
+                    .w_full()
+                    .min_w_0()
+                    .h(px(34.0))
+                    .px(px(10.0))
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(if failed {
+                        theme.danger
+                    } else {
+                        theme.border_strong
+                    })
+                    .bg(theme.overlay)
                     .flex()
                     .items_center()
-                    .gap(px(5.0))
+                    .gap(px(8.0))
                     .cursor_default()
-                    .text_size(sp(13.5))
-                    .line_height(sp(18.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_tertiary)
-                    .child(SharedString::from(label))
+                    .focus_visible(|style| style.border_color(theme.accent))
+                    .hover(|style| style.bg(theme.overlay_strong))
                     .child(icon(
-                        if expanded {
-                            "icons/chevron-down.svg"
+                        if failed {
+                            "icons/x.svg"
                         } else {
                             "icons/chevron-right.svg"
                         },
-                        11.5,
-                        theme.text_tertiary,
+                        12.0,
+                        accent,
                     ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_size(sp(12.5))
+                            .line_height(sp(16.0))
+                            .text_color(if failed { theme.danger } else { theme.text_secondary })
+                            .child(SharedString::from(label)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_size(sp(12.5))
+                            .line_height(sp(16.0))
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(stats)),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_turn_fold(turn_id, expanded, cx);
+                        // `collapsed` is the current state: this row only exists
+                        // while the turn is collapsed, so the click opens it.
+                        this.toggle_turn_collapsed(turn_id, true, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.toggle_turn_collapsed(turn_id, true, cx);
+                            cx.stop_propagation();
+                        }
                     })),
             )
-            .child(div().h(px(1.0)).flex_1().bg(theme.border))
             .into_any_element()
     }
 
@@ -1885,11 +1974,6 @@ impl Waku {
                     )
                 })
         });
-        let expanded = self
-            .activities_expanded
-            .get(&block_index)
-            .copied()
-            .unwrap_or(live_group);
         let live_reasoning_id = (self
             .selected_runtime()
             .is_some_and(|runtime| runtime.stream_phase == Some(StreamPhase::Reasoning))
@@ -1905,65 +1989,14 @@ impl Waku {
                 .map(|activity| activity.id)
         })
         .flatten();
-        let header_title = activity_header_title(activities, live_group, live_reasoning_id);
-        let header_focus =
-            self.transcript_control_focus(format!("activity-toggle-{block_index}"), cx);
-        let cluster = div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
-            .child(
-                div()
-                    .id(SharedString::from(format!("activity-toggle-{block_index}")))
-                    .track_focus(&header_focus)
-                    .tab_index(0)
-                    .w_full()
-                    .min_w_0()
-                    .h(px(26.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(sp(12.5))
-                    .line_height(sp(16.0))
-                    .cursor_default()
-                    .focus_visible(|style| style.text_color(theme.text))
-                    .hover(|style| style.text_color(theme.text))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_secondary)
-                            .child(SharedString::from(header_title)),
-                    )
-                    .child(icon(
-                        if expanded {
-                            "icons/chevron-down.svg"
-                        } else {
-                            "icons/chevron-right.svg"
-                        },
-                        10.0,
-                        theme.text_tertiary,
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_activities(block_index, expanded, cx);
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.toggle_activities(block_index, expanded, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
-            );
-        if !expanded {
-            return cluster.into_any_element();
-        }
         // `Theme::overlay` is 5% alpha and GPUI's `opacity` multiplies it.
         let activity_surface = theme.surface.blend(theme.overlay.opacity(0.7));
         let activity_hover_surface = theme.surface.blend(theme.overlay);
         let activity_active_surface = theme.surface.blend(theme.overlay_strong.opacity(0.72));
+        // No group header and no disclosure: every activity row is on screen,
+        // in the order it happened. The `live_group` flag survives only to let
+        // a running block name what it is doing instead of summarising itself.
+        let _ = (live_group, activity_header_title(activities, live_group, live_reasoning_id));
         let mut items = div()
             .w_full()
             .min_w_0()
@@ -2056,41 +2089,44 @@ impl Waku {
                 .is_some_and(|reasoning| !reasoning.content.trim().is_empty())
                 || !sections.is_empty()
                 || shows_diff;
-            let item_expanded = has_detail
-                && self
-                    .expanded_activity_items
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(reasoning_live);
+            // A payload is open when the reader opened it, or when this row is
+            // the reasoning the model is writing right now — watching a thought
+            // arrive is the point of a live peek.
+            let payload_open = self.expanded_payloads.contains(&id) || reasoning_live;
+            // A small single-file edit opens its diff on sight: hiding a
+            // one-line change behind a click is the complaint, not the fix.
+            let inline_diff = !payload_open
+                && reasoning.is_none()
+                && should_inline_diff(activity);
+            let failed_row = activity.failed;
             let item_focus = self.transcript_control_focus(format!("activity-item-{id}"), cx);
+            // A bare row, not a card. Five tools used to cost five bordered
+            // boxes; the group's own left rule carries the ownership instead,
+            // and the rows read as one run of work.
             let mut item = div()
                 .w_full()
                 .min_w_0()
-                .overflow_hidden()
-                .rounded(px(9.0))
-                .border_1()
-                .border_color(theme.border_strong)
-                .bg(activity_surface)
                 .flex()
                 .flex_col()
+                // A failed row keeps visual weight the successful rows beside
+                // it do not: a 2px danger edge and a danger-tinted hover, never
+                // a filled red surface — a wall of red stops being a signal.
+                .when(failed_row, |element| {
+                    element.border_l_2().border_color(theme.danger)
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!("activity-item-{id}")))
-                        // The parent owns a 1px border on each edge, so a
-                        // 28px row makes the visible activity header 30px.
                         .h(px(28.0))
-                        .px(px(8.0))
+                        .pl(px(8.0))
+                        .pr(px(4.0))
+                        .rounded(px(6.0))
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .rounded_tl(px(8.0))
-                        .rounded_tr(px(8.0))
-                        .when(!item_expanded, |element| {
-                            element.rounded_bl(px(8.0)).rounded_br(px(8.0))
-                        })
                         .text_size(sp(12.5))
                         .line_height(sp(16.0))
-                        .when(has_detail, |element| {
+                        .when(has_detail || inline_diff, |element| {
                             element
                                 .track_focus(&item_focus)
                                 .tab_index(0)
@@ -2102,13 +2138,21 @@ impl Waku {
                         .child(icon(
                             activity_icon(activity.kind),
                             12.0,
-                            theme.text_tertiary,
+                            if failed_row {
+                                theme.danger
+                            } else {
+                                theme.text_tertiary
+                            },
                         ))
                         .child(
                             div()
                                 .flex_none()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text_secondary)
+                                .text_color(if failed_row {
+                                    theme.danger
+                                } else {
+                                    theme.text_secondary
+                                })
                                 .child(SharedString::from(action_label)),
                         )
                         .when(!row_detail.is_empty(), |element| {
@@ -2137,9 +2181,26 @@ impl Waku {
                         })
                         .children(background_badge)
                         .children(open_file_button)
-                        .when(has_detail, |element| {
+                        // State, stated once per row: a failure says so with a
+                        // word and a mark, a running row pulses, a settled one
+                        // stays quiet. Success is the unmarked case — a screen
+                        // of green ticks buries the one row that matters.
+                        .when(failed_row, |element| {
+                            element.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(sp(12.0))
+                                    .line_height(sp(14.0))
+                                    .text_color(theme.danger)
+                                    .child(tr_cow!("transcript.row_failed")),
+                            )
+                        })
+                        .when(!activity.complete && !failed_row, |element| {
+                            element.child(pulse_dot(5.0, theme.accent))
+                        })
+                        .when(has_detail || inline_diff, |element| {
                             element.child(icon(
-                                if item_expanded {
+                                if payload_open {
                                     "icons/chevron-down.svg"
                                 } else {
                                     "icons/chevron-right.svg"
@@ -2148,32 +2209,33 @@ impl Waku {
                                 theme.text_tertiary,
                             ))
                         })
-                        .when(!has_detail && reasoning.is_none(), |element| {
-                            element
-                                .when(activity.failed, |element| {
-                                    element.child(
-                                        icon("icons/x.svg", 10.0, theme.danger).into_any_element(),
-                                    )
-                                })
-                                .when(!activity.complete && !activity.failed, |element| {
-                                    element.child(pulse_dot(5.0, theme.accent))
-                                })
-                        })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if has_detail {
-                                this.toggle_activity_item(id, item_expanded, cx);
+                                this.toggle_activity_payload(id, payload_open, cx);
                             }
                         }))
                         .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                             if has_detail
                                 && matches!(event.keystroke.key.as_str(), "enter" | "space")
                             {
-                                this.toggle_activity_item(id, item_expanded, cx);
+                                this.toggle_activity_payload(id, payload_open, cx);
                                 cx.stop_propagation();
                             }
                         })),
                 );
-            if item_expanded && let Some(reasoning) = reasoning {
+            if inline_diff {
+                let diff = self.activity_diff_rows(activity);
+                if !diff.is_empty() {
+                    item = item.child(self.render_activity_diff(
+                        id,
+                        &diff,
+                        activity_surface,
+                        theme,
+                        cx,
+                    ));
+                }
+            }
+            if payload_open && let Some(reasoning) = reasoning {
                 // Reasoning remains model prose even though it now shares the
                 // activity stream, so keep selectable markdown rather than
                 // presenting it as monospace tool output.
@@ -2267,7 +2329,7 @@ impl Waku {
                         .child(activity_scroll_guard(reasoning_viewport, reasoning_live)),
                 );
             }
-            if item_expanded && shows_diff {
+            if payload_open && shows_diff {
                 let diff = self.activity_diff_rows(activity);
                 if !diff.is_empty() {
                     item = item.child(self.render_activity_diff(
@@ -2279,7 +2341,7 @@ impl Waku {
                     ));
                 }
             }
-            if item_expanded
+            if payload_open
                 && reasoning.is_none()
                 && (!sections.is_empty() || !activity.image_urls.is_empty())
             {
@@ -2493,9 +2555,100 @@ impl Waku {
                 }
                 item = item.child(detail_card);
             }
+            // Not opened, but there is something to see: a command's tail, or
+            // the first lines of anything else. Showing the verdict without the
+            // transcript's asking is the whole point — a test summary that
+            // needs a click was the complaint.
+            if !payload_open
+                && !inline_diff
+                && !failed_row
+                && reasoning.is_none()
+                && let Some(preview) = activity_payload_preview(activity)
+            {
+                item = item.child(self.render_activity_preview(
+                    id,
+                    &preview,
+                    activity_surface,
+                    theme,
+                    cx,
+                ));
+            }
             items = items.child(item);
         }
-        cluster.child(items).into_any_element()
+        items.into_any_element()
+    }
+
+    /// The tail (or head) of a payload the reader has not opened in full.
+    ///
+    /// A fixed-height block with no scrollbar of its own: the transcript already
+    /// scrolls, and a second scroll surface inside a row is what made long
+    /// output unusable on a trackpad. The whole preview is the click target.
+    fn render_activity_preview(
+        &self,
+        id: Uuid,
+        preview: &ActivityPayloadPreview,
+        surface: Hsla,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (mono_size, mono_line) = self.activity_mono_text();
+        let focus = self.transcript_control_focus(format!("activity-preview-{id}"), cx);
+        let more = (preview.hidden_lines > 0).then(|| {
+            tr!(
+                "activity.more_lines",
+                count = preview.hidden_lines
+            )
+        });
+        div()
+            .id(SharedString::from(format!("activity-preview-{id}")))
+            .track_focus(&focus)
+            .tab_index(0)
+            .w_full()
+            .min_w_0()
+            .mt(px(4.0))
+            .ml(px(2.0))
+            .pl(px(10.0))
+            .pr(px(8.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .bg(surface)
+            .overflow_hidden()
+            .cursor_default()
+            .focus_visible(|style| style.bg(theme.overlay_strong))
+            .hover(|style| style.bg(theme.overlay_strong))
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .font_family(md::render::MONO_FAMILY)
+            .text_size(px(mono_size))
+            .line_height(px(mono_line))
+            .text_color(theme.text_secondary)
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .child(SharedString::from(preview.text.clone())),
+            )
+            .when_some(more, |element, more| {
+                element.child(
+                    div()
+                        .text_size(sp(11.5))
+                        .line_height(sp(14.0))
+                        .text_color(theme.text_tertiary)
+                        .child(SharedString::from(more)),
+                )
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_activity_payload(id, false, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.toggle_activity_payload(id, false, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .into_any_element()
     }
 
     /// The diff for an expanded file-change activity.

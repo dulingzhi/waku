@@ -810,10 +810,14 @@ impl Waku {
     }
 
     pub(super) fn reset_visible_state(&mut self) {
-        self.activities_expanded.clear();
-        self.expanded_activity_items.clear();
-        self.expanded_turns.clear();
+        self.collapsed_turns.clear();
+        self.expanded_payloads.clear();
         self.expanded_changed_files.clear();
+        // Parsed diffs belong to the session being left. Without this they
+        // outlive it: an inline diff is built with no disclosure to collapse,
+        // so nothing else ever removes it.
+        self.activity_diffs.borrow_mut().clear();
+        self.activity_diff_order.borrow_mut().clear();
         self.transcript_control_focuses.borrow_mut().clear();
         self.user_message_viewports.borrow_mut().clear();
         self.hovered_response_row = None;

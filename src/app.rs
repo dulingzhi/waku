@@ -30,7 +30,7 @@ use crate::git_branch::BranchSnapshot;
 use crate::input::{ComposerAttachmentPaste, ComposerEvent, ComposerInput, InputEvent, TextInput};
 use crate::md;
 use crate::model::{
-    ActivityItem, ActivityKind, AgentSession, BackgroundWorkEvent, BackgroundWorkItem,
+    ActivityItem, ActivityKind, AgentSession, AgentTurn, BackgroundWorkEvent, BackgroundWorkItem,
     BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
     ContextUsage, DriverEvent, FavoriteModel, Message, MessageAttachment, MessageRole,
     PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
@@ -1325,13 +1325,14 @@ pub struct Waku {
     pending_queue_drains: Vec<Uuid>,
     stream_state_dirty: bool,
     last_stream_save: Instant,
-    /// User expansion overrides keyed by persisted transcript block index.
-    activities_expanded: HashMap<usize, bool>,
-    /// Per-item disclosure overrides. Reasoning starts open while live; tool
-    /// details start closed, so the stored bool must preserve either choice.
-    expanded_activity_items: HashMap<Uuid, bool>,
-    /// Settled turns whose folded work the user has reopened.
-    expanded_turns: HashSet<Uuid>,
+    /// Turns the user collapsed. Empty means every turn is laid out in full:
+    /// collapsing is an explicit request to see less, never a default.
+    collapsed_turns: HashSet<Uuid>,
+    /// Activities whose long payload (command output, arguments) the user
+    /// expanded past its preview. Keyed by activity id, not block index, so a
+    /// row inserted anywhere in the transcript cannot move another activity's
+    /// disclosure state.
+    expanded_payloads: HashSet<Uuid>,
     /// Per-response file cards the user expanded beyond their three-file
     /// preview. Runtime-only, like the other transcript disclosures.
     expanded_changed_files: HashSet<Uuid>,
@@ -1589,7 +1590,13 @@ pub struct Waku {
     /// Positioned, syntax-tokenized diff rows for expanded file-change
     /// activities. Built once when the activity is expanded and dropped when it
     /// collapses or its changes are replaced, so a frame only indexes rows.
+    ///
+    /// Bounded: an inline diff needs no disclosure to build, so without a cap a
+    /// long session would accumulate one parsed diff per edit, and switching
+    /// sessions would not release them. `activity_diff_order` records insertion
+    /// order so the oldest entry can be evicted when the cap is reached.
     activity_diffs: RefCell<HashMap<Uuid, Rc<activity_diff::Diff>>>,
+    activity_diff_order: RefCell<VecDeque<Uuid>>,
     /// Viewports for those diffs. Separate from `activity_scroll_viewports`
     /// because a failed edit shows both its diff and the error it returned.
     activity_diff_viewports: RefCell<HashMap<Uuid, ActivityScrollViewport>>,
@@ -2909,9 +2916,8 @@ impl Waku {
                 pending_queue_drains: Vec::new(),
                 stream_state_dirty: false,
                 last_stream_save: Instant::now(),
-                activities_expanded: HashMap::new(),
-                expanded_activity_items: HashMap::new(),
-                expanded_turns: HashSet::new(),
+                collapsed_turns: HashSet::new(),
+                expanded_payloads: HashSet::new(),
                 expanded_changed_files: HashSet::new(),
                 transcript_control_focuses: RefCell::new(HashMap::new()),
                 session_navigation,
@@ -3052,6 +3058,7 @@ impl Waku {
                 reasoning_window_starts: RefCell::new(HashMap::new()),
                 activity_scroll_viewports: RefCell::new(HashMap::new()),
                 activity_diffs: RefCell::new(HashMap::new()),
+                activity_diff_order: RefCell::new(VecDeque::new()),
                 activity_diff_viewports: RefCell::new(HashMap::new()),
                 markdown_link_handler,
                 transcript_selection: TranscriptSelection::default(),
