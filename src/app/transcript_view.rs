@@ -1537,25 +1537,54 @@ impl Waku {
             parts.push(tr!("transcript.file_count", count = files).to_string());
         }
         let failed = turn.status == TurnStatus::Failed;
+        // The provider's own sentence, when there is one. It sits under the
+        // stats rather than inside them because it is prose of unknown length:
+        // joining it with ` · ` would push "2 steps · 3 files" off the line for
+        // any real error message.
+        //
+        // A failed turn with no reason still says it failed — the label above
+        // carries that — so the reader is never told the turn succeeded.
+        let reason = failed
+            .then(|| turn_failure_reason(session, turn_id))
+            .flatten();
         Some(
             div()
                 .w_full()
                 .min_w_0()
                 .flex()
-                .items_center()
-                .gap(px(6.0))
+                .flex_col()
+                .gap(px(2.0))
                 .px(px(4.0))
-                .text_size(sp(12.5))
-                .line_height(sp(14.0))
-                .text_color(if failed {
-                    theme.danger
-                } else {
-                    theme.text_ghost
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(sp(12.5))
+                        .line_height(sp(14.0))
+                        .text_color(if failed {
+                            theme.danger
+                        } else {
+                            theme.text_ghost
+                        })
+                        .when(failed, |element| {
+                            element.child(icon("icons/x.svg", 10.0, theme.danger))
+                        })
+                        .child(SharedString::from(parts.join(" · "))),
+                )
+                .when_some(reason, |element, reason| {
+                    element.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_size(sp(12.0))
+                            .line_height(sp(16.0))
+                            .text_color(theme.text_secondary)
+                            .child(SharedString::from(reason)),
+                    )
                 })
-                .when(failed, |element| {
-                    element.child(icon("icons/x.svg", 10.0, theme.danger))
-                })
-                .child(SharedString::from(parts.join(" · ")))
                 .into_any_element(),
         )
     }

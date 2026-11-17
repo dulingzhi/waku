@@ -1260,12 +1260,13 @@ impl Waku {
         session_id: Uuid,
         status: TurnStatus,
         outcome: crate::analytics::TurnOutcome,
+        failure_reason: Option<String>,
     ) -> Option<(Uuid, usize)> {
         let event = self.active_turn_finished_event(session_id, outcome);
         let result = self
             .state
             .session_mut(session_id)?
-            .finish_active_turn(status);
+            .finish_active_turn(status, failure_reason);
         if result.is_some()
             && let Some(event) = event
         {
@@ -3490,12 +3491,15 @@ impl Waku {
                 let message = tr!("errors.start_agent", error = error);
                 if let Some(session) = self.state.session_mut(session_id) {
                     session.status = SessionStatus::Failed;
-                    session.push_message(MessageRole::Assistant, message);
+                    session.push_message(MessageRole::Assistant, message.clone());
                 }
                 self.finish_active_turn_with_analytics(
                     session_id,
                     TurnStatus::Failed,
                     crate::analytics::TurnOutcome::StartFailed,
+                    // The same sentence the user just saw, so a reopened session
+                    // says why rather than only that it failed.
+                    Some(message),
                 );
             }
         }

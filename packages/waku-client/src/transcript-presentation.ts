@@ -329,6 +329,27 @@ export function turnWorkedSeconds(turn: AgentSession['turns'][number]) {
   return Math.max(1, (turn.completed_at ?? Math.floor(Date.now() / 1_000)) - turn.started_at)
 }
 
+/**
+ * Why a settled turn failed, when the provider said.
+ *
+ * Separate from {@link turnSummaryLabel}: that is a heading, this is the
+ * sentence under it. A screen with room for both should show both; one with room
+ * for a line should use the label, which is always present.
+ *
+ * `null` for a failed turn is a real state rather than a bug — some providers
+ * end a failed turn without a reason — and the label still reports the failure,
+ * so the reader is never told the turn succeeded.
+ *
+ * Blank strings are treated as absent: a driver that reports `" "` would
+ * otherwise render an empty second line, which reads as a rendering fault rather
+ * than as "no reason given".
+ */
+export function turnFailureReason(turn: AgentSession['turns'][number]): string | null {
+  if (turn.status !== 'failed') return null
+  const reason = turn.failure_reason?.trim()
+  return reason ? reason : null
+}
+
 /** How many tool activities a turn ran. */
 export function turnActivityCount(session: AgentSession, turnId: string) {
   return session.transcript_blocks

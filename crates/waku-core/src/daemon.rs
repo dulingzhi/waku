@@ -2142,7 +2142,7 @@ mod tests {
     fn client_projection_cannot_replace_a_daemon_checkpoint() {
         let mut existing = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
         existing.begin_turn("change it");
-        existing.finish_active_turn(crate::model::TurnStatus::Completed);
+        existing.finish_active_turn(crate::model::TurnStatus::Completed, None);
         let checkpoint = Checkpoint {
             turn_count: 1,
             git_ref: "refs/waku/canonical".into(),
@@ -2191,7 +2191,7 @@ mod tests {
         session.provider_cursor = Some(ProviderResumeCursor::Codex {
             thread_id: "thread".into(),
         });
-        session.finish_active_turn(crate::model::TurnStatus::Completed);
+        session.finish_active_turn(crate::model::TurnStatus::Completed, None);
 
         assert!(validate_message_rewind(&session, 1).is_ok());
 

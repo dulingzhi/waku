@@ -12,6 +12,7 @@ import {
   turnActivityCount,
   turnAnswerStart,
   turnChangedFileCount,
+  turnFailureReason,
   turnSummaryLabel,
 } from '@waku/client/transcript-presentation';
 
@@ -80,6 +81,7 @@ export type TranscriptRow =
       turnId: string | null;
       turn: AgentTurn;
       label: string;
+      reason: string | null;
       steps: number;
       files: number;
       topGap: number;
@@ -375,7 +377,7 @@ export function findActivityBlock(
 export type TranscriptPipelineRow =
   | { kind: 'message'; key: string; turnId: string | null; message: Message; footerTimestamp: number | null }
   | { kind: 'activities'; key: string; turnId: string | null; block: TranscriptBlock; blockIndex: number; live: boolean }
-  | { kind: 'collapsed'; key: string; turnId: string | null; turn: AgentTurn; label: string; steps: number; files: number }
+  | { kind: 'collapsed'; key: string; turnId: string | null; turn: AgentTurn; label: string; reason: string | null; steps: number; files: number }
   | { kind: 'changed'; key: string; turnId: string | null; checkpoint: Checkpoint };
 
 interface TaggedRow {
@@ -495,6 +497,7 @@ export function buildTranscriptPipeline(
         turnId: anchorTurn.id,
         turn: anchorTurn,
         label: turnSummaryLabel(anchorTurn),
+        reason: turnFailureReason(anchorTurn),
         steps: turnActivityCount(session, anchorTurn.id),
         files: turnChangedFileCount(session, anchorTurn.id),
       });
@@ -514,6 +517,7 @@ export function buildTranscriptPipeline(
             turnId: turn.id,
             turn,
             label: turnSummaryLabel(turn),
+            reason: turnFailureReason(turn),
             steps: turnActivityCount(session, turn.id),
             files: turnChangedFileCount(session, turn.id),
           });

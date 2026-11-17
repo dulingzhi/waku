@@ -2,4 +2,18 @@
 import type { Checkpoint } from "./Checkpoint";
 import type { TurnStatus } from "./TurnStatus";
 
-export type AgentTurn = { id: string, turn_count: number, status: TurnStatus, provider_turn_started: boolean, provider_resume_at?: string | null, started_at: number, completed_at: number | null, checkpoint: Checkpoint | null, };
+export type AgentTurn = { id: string, turn_count: number, status: TurnStatus, provider_turn_started: boolean, provider_resume_at?: string | null, started_at: number, completed_at: number | null, checkpoint: Checkpoint | null,
+/**
+ * Why this turn did not succeed, when the provider said.
+ *
+ * `None` is a real answer, not missing data: some providers finish a failed
+ * turn without a reason — Claude emits `TurnFinished { summary: None }` and
+ * records the failure locally — and inventing one would be worse than
+ * showing a generic message. Every reader must handle both.
+ *
+ * Captured when the turn settles and persisted with it, so reopening a
+ * session still says why it failed. It is the provider's own sentence where
+ * there is one; the truncated `last_driver_error` is the fallback, because
+ * that text is shaped for a toast rather than for a record.
+ */
+failure_reason?: string | null, };

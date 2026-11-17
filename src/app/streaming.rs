@@ -611,6 +611,18 @@ impl Waku {
                     },
                 );
                 let previous_kinds = self.snapshot_selected_transcript_rows(session_id);
+                // Captured here, before the line below clears it. The provider's
+                // own `summary` is the first choice because it is written for a
+                // reader; `last_driver_error` is shaped for a toast and is only
+                // the fallback. Both are gone by the time the turn settles, so
+                // this is the last moment either exists.
+                let failure_reason = if success {
+                    None
+                } else {
+                    summary
+                        .clone()
+                        .or_else(|| runtime.last_driver_error.clone())
+                };
                 runtime.last_driver_error = None;
                 // A settled turn moved the account's rate-limit needles; ask
                 // that provider's plan meter to refresh once its backoff
@@ -690,6 +702,7 @@ impl Waku {
                     } else {
                         crate::analytics::TurnOutcome::Failed
                     },
+                    failure_reason,
                 );
                 runtime.pending_permission = None;
                 runtime.pending_user_input = None;
@@ -780,7 +793,7 @@ impl Waku {
                     session.status = SessionStatus::Failed;
                     session.updated_at = unix_time();
                     if needs_fallback {
-                        session.push_message(MessageRole::Assistant, failure_message);
+                        session.push_message(MessageRole::Assistant, failure_message.clone());
                     }
                     true
                 } else {
@@ -792,6 +805,7 @@ impl Waku {
                             session_id,
                             TurnStatus::Failed,
                             crate::analytics::TurnOutcome::ProcessExited,
+                            Some(failure_message),
                         )
                         .is_some();
                 if finished_turn {

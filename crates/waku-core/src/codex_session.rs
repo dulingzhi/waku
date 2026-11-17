@@ -314,6 +314,7 @@ fn parse_session_history(response: &Value) -> ProviderSessionHistory {
             started_at,
             completed_at,
             checkpoint: None,
+            failure_reason: None,
         });
 
         for item in native_turn

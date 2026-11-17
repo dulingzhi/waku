@@ -136,6 +136,7 @@ export const TranscriptRowView = memo(function TranscriptRowView({
         <CollapsedTurnRow
           files={row.files}
           label={row.label}
+          reason={row.reason}
           steps={row.steps}
           turnId={row.turn.id}
           failed={row.turn.status === 'failed'}
@@ -155,6 +156,7 @@ export const TranscriptRowView = memo(function TranscriptRowView({
  */
 function CollapsedTurnRow({
   label,
+  reason,
   steps,
   files,
   failed,
@@ -162,6 +164,7 @@ function CollapsedTurnRow({
   onToggle,
 }: {
   label: string;
+  reason: string | null;
   steps: number;
   files: number;
   failed: boolean;
@@ -176,45 +179,49 @@ function CollapsedTurnRow({
     ...(files > 0 ? [t('transcript.file_count', { count: files })] : []),
   ].join(' · ');
   return (
-    <Pressable
-      accessibilityHint={t('transcript.expand_turn')}
-      accessibilityLabel={label}
-      accessibilityRole="button"
-      accessibilityState={{ expanded: false }}
-      hitSlop={{ top: 6, bottom: 6 }}
-      onPress={() => keepTop(() => onToggle(turnId))}
-      style={({ pressed }) => [
-        styles.collapsedRow,
-        {
-          backgroundColor: theme.overlay,
-          borderColor: failed ? theme.danger : theme.borderStrong,
-          opacity: pressed ? 0.7 : 1,
-        },
-      ]}>
-      <AppSymbol
-        name={failed
-          ? { ios: 'exclamationmark.triangle', android: 'warning', web: 'warning' }
-          : { ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
-        size={12}
-        tintColor={failed ? theme.danger : theme.textTertiary}
-      />
-      <Text
-        numberOfLines={1}
-        style={[styles.collapsedLabel, { color: failed ? theme.danger : theme.textSecondary }]}>
-        {label}
-      </Text>
-      {stats.length > 0 && (
-        <Text numberOfLines={1} style={[styles.collapsedStats, { color: theme.textTertiary }]}>
-          {stats}
+    <View style={styles.collapsedStack}>
+      <Pressable
+        accessibilityHint={t('transcript.expand_turn')}
+        accessibilityLabel={label}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: false }}
+        hitSlop={{ top: 6, bottom: 6 }}
+        onPress={() => keepTop(() => onToggle(turnId))}
+        style={({ pressed }) => [
+          styles.collapsedRow,
+          {
+            backgroundColor: theme.overlay,
+            borderColor: failed ? theme.danger : theme.borderStrong,
+            opacity: pressed ? 0.7 : 1,
+          },
+        ]}>
+        <AppSymbol
+          name={failed
+            ? { ios: 'exclamationmark.triangle', android: 'warning', web: 'warning' }
+            : { ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
+          size={12}
+          tintColor={failed ? theme.danger : theme.textTertiary}
+        />
+        <Text
+          numberOfLines={1}
+          style={[styles.collapsedLabel, { color: failed ? theme.danger : theme.textSecondary }]}>
+          {label}
         </Text>
-      )}
-      <Text numberOfLines={1} style={[styles.collapsedHint, { color: theme.textGhost }]}>
-        {t('transcript.expand_turn')}
-      </Text>
-    </Pressable>
+        {stats.length > 0 && (
+          <Text numberOfLines={1} style={[styles.collapsedStats, { color: theme.textTertiary }]}>
+            {stats}
+          </Text>
+        )}
+        <Text numberOfLines={1} style={[styles.collapsedHint, { color: theme.textGhost }]}>
+          {t('transcript.expand_turn')}
+        </Text>
+      </Pressable>
+      {reason ? (
+        <Text style={[styles.collapsedReason, { color: theme.textSecondary }]}>{reason}</Text>
+      ) : null}
+    </View>
   );
 }
-
 const UserBubble = memo(
   UserBubbleInner,
   (previous, next) =>
@@ -488,6 +495,11 @@ const styles = StyleSheet.create({
   collapsedLabel: { flexShrink: 0, fontSize: 12.5, fontWeight: '600' },
   collapsedStats: { flexShrink: 1, fontSize: 12.5 },
   collapsedHint: { flexShrink: 0, fontSize: 11 },
+  // The reason sits under the row rather than inside it: the row is a button
+  // whose label must stay one line, and a real error message would push the
+  // stats off it.
+  collapsedStack: { gap: 4 },
+  collapsedReason: { fontSize: 12, lineHeight: 16, paddingHorizontal: 10 },
   changedCard: {
     borderRadius: Radius.medium,
     borderWidth: StyleSheet.hairlineWidth,

@@ -47,6 +47,7 @@ import {
   turnActivityCount,
   turnAnswerStart,
   turnChangedFileCount,
+  turnFailureReason,
   turnSummaryLabel,
   turnWorkedSeconds,
   userMessageRewindTurnCount,
@@ -963,36 +964,46 @@ function TurnCollapsedRow({
   onOpen: () => void
 }) {
   const failed = turn.status === 'failed'
+  const reason = turnFailureReason(turn)
   const stats = [
     formatDuration(turnWorkedSeconds(turn), t),
     ...(steps > 0 ? [t('transcript.step_count', { count: steps })] : []),
     ...(files > 0 ? [t('transcript.file_count', { count: files })] : []),
   ].join(' · ')
   return (
-    <button
-      aria-expanded={false}
-      className={cn(
-        'flex h-[34px] w-full min-w-0 items-center gap-2 rounded-[9px] border bg-[var(--overlay)] px-2.5 text-left outline-none',
-        'hover:bg-[var(--overlay-strong)] focus-visible:ring-1 focus-visible:ring-ring',
-        failed ? 'border-destructive' : 'border-[var(--border-strong)]',
-      )}
-      onClick={onOpen}
-      type="button"
-    >
-      <WakuIcon
-        className={cn('size-3 shrink-0', failed ? 'text-destructive' : 'text-[var(--text-tertiary)]')}
-        name={failed ? 'alert' : 'chevronRight'}
-      />
-      <span
+    <div className="flex w-full min-w-0 flex-col gap-0.5">
+      <button
+        aria-expanded={false}
         className={cn(
-          'shrink-0 text-[12.5px] font-medium',
-          failed ? 'text-destructive' : 'text-[var(--text-secondary)]',
+          'flex h-[34px] w-full min-w-0 items-center gap-2 rounded-[9px] border bg-[var(--overlay)] px-2.5 text-left outline-none',
+          'hover:bg-[var(--overlay-strong)] focus-visible:ring-1 focus-visible:ring-ring',
+          failed ? 'border-destructive' : 'border-[var(--border-strong)]',
         )}
+        onClick={onOpen}
+        type="button"
       >
-        {turnSummaryLabel(turn, t)}
-      </span>
-      <span className="min-w-0 flex-1 truncate text-[12.5px] text-[var(--text-tertiary)]">{stats}</span>
-    </button>
+        <WakuIcon
+          className={cn('size-3 shrink-0', failed ? 'text-destructive' : 'text-[var(--text-tertiary)]')}
+          name={failed ? 'alert' : 'chevronRight'}
+        />
+        <span
+          className={cn(
+            'shrink-0 text-[12.5px] font-medium',
+            failed ? 'text-destructive' : 'text-[var(--text-secondary)]',
+          )}
+        >
+          {turnSummaryLabel(turn, t)}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12.5px] text-[var(--text-tertiary)]">{stats}</span>
+      </button>
+      {/* Under the row rather than inside it: a real error message would push
+          the stats off the line, and the row is a button whose label should stay
+          one line. Absent for a failed turn with no reason — the label above
+          still says it failed. */}
+      {reason ? (
+        <p className="px-2.5 text-[12px] leading-[16px] text-[var(--text-secondary)]">{reason}</p>
+      ) : null}
+    </div>
   )
 }
 

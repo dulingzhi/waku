@@ -814,6 +814,19 @@ pub struct AgentTurn {
     pub completed_at: Option<u64>,
     #[serde(default)]
     pub checkpoint: Option<Checkpoint>,
+    /// Why this turn did not succeed, when the provider said.
+    ///
+    /// `None` is a real answer, not missing data: some providers finish a failed
+    /// turn without a reason — Claude emits `TurnFinished { summary: None }` and
+    /// records the failure locally — and inventing one would be worse than
+    /// showing a generic message. Every reader must handle both.
+    ///
+    /// Captured when the turn settles and persisted with it, so reopening a
+    /// session still says why it failed. It is the provider's own sentence where
+    /// there is one; the truncated `last_driver_error` is the fallback, because
+    /// that text is shaped for a toast rather than for a record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
 }
 
 /// How full the provider's context window is, from the latest main-thread
@@ -1338,6 +1351,7 @@ impl AgentSession {
                 started_at,
                 completed_at: Some(completed_at),
                 checkpoint: None,
+                failure_reason: None,
             });
         }
     }
@@ -1364,6 +1378,7 @@ impl AgentSession {
             started_at: now,
             completed_at: None,
             checkpoint: None,
+            failure_reason: None,
         });
         self.messages.push(
             Message::new_for_turn(MessageRole::User, prompt, id)
@@ -1391,6 +1406,7 @@ impl AgentSession {
             started_at: now,
             completed_at: None,
             checkpoint: None,
+            failure_reason: None,
         });
         self.last_reply_at = Some(now);
         self.updated_at = now;
@@ -1438,6 +1454,7 @@ impl AgentSession {
             started_at: now,
             completed_at: None,
             checkpoint: None,
+            failure_reason: None,
         });
         let mut prompt = Message::new_for_turn(MessageRole::User, message, turn_id);
         prompt.id = message_id;
@@ -1522,7 +1539,11 @@ impl AgentSession {
             .count()
     }
 
-    pub fn finish_active_turn(&mut self, status: TurnStatus) -> Option<(Uuid, usize)> {
+    pub fn finish_active_turn(
+        &mut self,
+        status: TurnStatus,
+        failure_reason: Option<String>,
+    ) -> Option<(Uuid, usize)> {
         let turn = self
             .turns
             .last_mut()
@@ -1530,6 +1551,14 @@ impl AgentSession {
         let completed_at = unix_time();
         turn.status = status;
         turn.completed_at = Some(completed_at);
+        // A reason on a turn that succeeded would be a lie the UI could render.
+        // The caller is expected to pass `None` there, and this keeps a future
+        // caller from recording one by accident.
+        turn.failure_reason = if status == TurnStatus::Completed {
+            None
+        } else {
+            failure_reason
+        };
         let result = (turn.id, turn.turn_count);
         self.last_reply_at = Some(completed_at);
         Some(result)
@@ -4322,7 +4351,7 @@ mod tests {
         // A follow-up prompt unwinds only itself.
         let first = session.begin_turn("first");
         session.push_message(MessageRole::Assistant, "done");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         session.set_title_from_prompt("first");
         let follow_up = session.begin_turn("second");
         let follow_up_submitted_at = session.last_reply_at;
@@ -4353,7 +4382,7 @@ mod tests {
             turn_id: Some(first_turn),
             activities: Vec::new(),
         });
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
 
         let second_turn = session.begin_turn("second");
         session.push_message(MessageRole::Assistant, "second answer");
@@ -4362,7 +4391,7 @@ mod tests {
             turn_id: Some(second_turn),
             activities: Vec::new(),
         });
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
 
         session.truncate_after_turn(1);
 
@@ -4387,10 +4416,10 @@ mod tests {
 
         let first_turn = session.begin_turn("first");
         let first_message = session.push_message(MessageRole::Assistant, "first answer");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         session.begin_turn("second");
         session.push_message(MessageRole::Assistant, "second answer");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
 
         let fork = session
             .fork_through_turn(
@@ -4428,7 +4457,7 @@ mod tests {
 
         session.begin_turn("first");
         session.push_message(MessageRole::Assistant, "first answer");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         session
             .queued_messages
             .push(QueuedMessage::new("after you finish, also…"));
@@ -4535,12 +4564,12 @@ mod tests {
 
         session.begin_turn("first");
         session.mark_active_turn_provider_started();
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         session.begin_turn("failed locally");
-        session.finish_active_turn(TurnStatus::Failed);
+        session.finish_active_turn(TurnStatus::Failed, None);
         session.begin_turn("third");
         session.mark_active_turn_provider_started();
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
 
         assert_eq!(session.provider_turns_after(1), 1);
         assert_eq!(session.provider_turns_after(2), 1);
@@ -4755,7 +4784,7 @@ mod tests {
         let project = Project::from_path(PathBuf::from("/tmp/waku"));
         let mut session = AgentSession::new(project.id, ProviderKind::Codex);
         session.begin_turn("Build it");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         let mut serialized = serde_json::to_value(Checkpoint {
             turn_count: 1,
             git_ref: "refs/waku/test".into(),
@@ -4796,7 +4825,7 @@ mod tests {
         let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
         session.begin_turn("first");
         session.push_message(MessageRole::Assistant, "done");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         session.status = SessionStatus::Idle;
         let turn_id = Uuid::new_v4();
         let message_id = Uuid::new_v4();

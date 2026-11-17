@@ -24,8 +24,8 @@ use super::{
     transcript_navigation_turns, transcript_rests_at_tail, transcript_row_kinds,
     transcript_row_splice, transcript_rows_fingerprint,
     transcript_view::{ACTIVITY_DIFF_CACHE_LIMIT, cached_activity_diff},
-    turn_activity_count, turn_changed_file_count, turn_summary_label, turn_worked_seconds,
-    widened_panel_width_for_file_editor, widened_panel_width_for_review,
+    turn_activity_count, turn_changed_file_count, turn_failure_reason, turn_summary_label,
+    turn_worked_seconds, widened_panel_width_for_file_editor, widened_panel_width_for_review,
 };
 use crate::git_branch::BranchEntry;
 use crate::model::{
@@ -461,7 +461,7 @@ fn conversation_navigation_preview_uses_each_prompt_and_latest_response() {
     session.begin_turn("  First\n\nprompt  ");
     session.push_message(MessageRole::Assistant, "Interim update");
     session.push_message(MessageRole::Assistant, "Final answer");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     session.begin_turn("Second prompt");
     let rows = [Message(0), Message(1), Message(2), Message(3)];
 
@@ -505,7 +505,7 @@ fn conversation_navigation_preview_does_not_change_during_a_running_turn() {
     assert_eq!(before, during);
     assert_eq!(during[0].response, "");
 
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     let completed = transcript_navigation_turns(&session, &rows);
     assert_eq!(completed[0].response, "Partial response");
 }
@@ -669,7 +669,7 @@ fn settling_an_anchored_turn_splices_without_resetting_its_prompt() {
     let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     session.begin_turn("hi");
     session.push_message(MessageRole::Assistant, "Hello.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     let turn_id = session.begin_turn("give me a quick overview");
     session.status = SessionStatus::Working;
@@ -699,7 +699,7 @@ fn settling_an_anchored_turn_splices_without_resetting_its_prompt() {
     });
 
     session.status = SessionStatus::Idle;
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     let settled = folded_transcript_row_kinds(&session, &HashSet::new());
     let (range, new_count) = transcript_row_splice(&running, &settled)
         .expect("settlement folds the live work and removes its working row");
@@ -740,7 +740,7 @@ fn only_the_turn_opening_prompt_is_a_rewind_boundary() {
     // A steer the provider folded into the live turn.
     session.push_user_message_with_presentation("actually, also this", None, Vec::new());
     session.push_message(MessageRole::Assistant, "answer");
-    session.finish_active_turn(TurnStatus::Interrupted);
+    session.finish_active_turn(TurnStatus::Interrupted, None);
     session.begin_turn("second prompt");
 
     assert!(message_opens_turn(&session.messages, 0));
@@ -907,7 +907,7 @@ fn idle_reaping_releases_finished_sessions_but_never_a_running_turn() {
 
     let mut failed = AgentSession::new(project_id, ProviderKind::Codex);
     failed.begin_turn("failed turn");
-    failed.finish_active_turn(TurnStatus::Failed);
+    failed.finish_active_turn(TurnStatus::Failed, None);
     failed.status = SessionStatus::Failed;
     assert!(session_is_reapable(Some(&failed), stale, false));
 
@@ -1029,7 +1029,7 @@ fn row_kinds_and_row_count_describe_the_same_rows() {
         ],
     });
     session.push_message(MessageRole::Assistant, "Done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     let kinds = folded_transcript_row_kinds(&session, &HashSet::new());
     // The work the agent did must be reachable by index, not just counted.
@@ -1072,7 +1072,7 @@ fn changed_files_attach_to_the_response_footer() {
     let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     let first_turn = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     attach_changed_files(
         &mut session,
         vec![CheckpointFile {
@@ -1115,7 +1115,7 @@ fn response_hover_owns_every_response_row_but_not_the_prompt() {
         )],
     });
     session.push_message(MessageRole::Assistant, "Done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     assert_eq!(response_row_turn_id(&session, Message(0)), None);
     for row in [
@@ -1146,7 +1146,7 @@ fn changed_files_remain_visible_when_an_interrupted_turn_has_no_answer() {
         )],
     });
     session.push_message(MessageRole::Assistant, "");
-    session.finish_active_turn(TurnStatus::Interrupted);
+    session.finish_active_turn(TurnStatus::Interrupted, None);
     attach_changed_files(
         &mut session,
         vec![CheckpointFile {
@@ -1173,7 +1173,7 @@ fn changed_files_surface_appears_only_for_a_ready_nonempty_checkpoint() {
     let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     attach_changed_files(&mut session, Vec::new());
     assert!(
@@ -1209,7 +1209,7 @@ fn checkpoint_completion_invalidates_the_cached_transcript_rows() {
     let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     let before = transcript_rows_fingerprint(&session, &HashSet::new());
 
     attach_changed_files(
@@ -1284,7 +1284,7 @@ fn the_row_fingerprint_moves_whenever_the_rows_do() {
         )],
     });
     base.push_message(MessageRole::Assistant, "Done. The change is ready.");
-    base.finish_active_turn(TurnStatus::Completed);
+    base.finish_active_turn(TurnStatus::Completed, None);
 
     let settled = HashSet::new();
     // Both states, because a mutation inside the fold only moves rows once the
@@ -1405,7 +1405,7 @@ fn nothing_is_hidden_by_default() {
         )],
     });
     session.push_message(MessageRole::Assistant, "Done. The change is ready.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     let anchors = session
         .transcript_blocks
@@ -1459,7 +1459,7 @@ fn an_answerless_turn_still_shows_its_work() {
         )],
     });
     session.push_message(MessageRole::Assistant, "");
-    session.finish_active_turn(TurnStatus::Failed);
+    session.finish_active_turn(TurnStatus::Failed, None);
 
     let by_default = folded_transcript_row_kinds(&session, &HashSet::new());
     assert_eq!(by_default, vec![Message(0), TurnBlock(0), Message(1)]);
@@ -1497,7 +1497,7 @@ fn settling_a_turn_only_swaps_the_indicator_for_the_footer() {
         "a live turn closes with the working indicator: {running:?}"
     );
 
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     session.status = SessionStatus::Idle;
     let settled = folded_transcript_row_kinds(&session, &HashSet::new());
 
@@ -1535,10 +1535,10 @@ fn navigation_anchors_are_exactly_the_user_prompts() {
         )],
     });
     session.push_message(MessageRole::Assistant, "Done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     let _second = session.begin_turn("One more thing");
     session.push_message(MessageRole::Assistant, "Also done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     let rows = folded_transcript_row_kinds(&session, &HashSet::from([first]));
     let anchors = transcript_navigation_turns(&session, &rows);
@@ -1572,7 +1572,7 @@ fn a_failed_turn_is_labelled_as_failed() {
     let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Partial answer.");
-    session.finish_active_turn(TurnStatus::Failed);
+    session.finish_active_turn(TurnStatus::Failed, None);
 
     let label = turn_summary_label(&session, turn_id);
     assert_eq!(label, "This turn failed");
@@ -1589,7 +1589,7 @@ fn a_failed_turn_is_labelled_as_failed() {
     let mut completed = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
     let ok_id = completed.begin_turn("Build it");
     completed.push_message(MessageRole::Assistant, "Done.");
-    completed.finish_active_turn(TurnStatus::Completed);
+    completed.finish_active_turn(TurnStatus::Completed, None);
     let ok_label = turn_summary_label(&completed, ok_id);
     assert_ne!(ok_label, label);
     assert!(ok_label.starts_with("Worked for"), "{ok_label}");
@@ -1610,7 +1610,7 @@ fn a_turns_footer_counts_its_steps_and_files() {
         ],
     });
     session.push_message(MessageRole::Assistant, "Done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     attach_changed_files(
         &mut session,
         vec![
@@ -1880,7 +1880,7 @@ fn a_turn_states_its_stats_without_being_hovered() {
         ],
     });
     session.push_message(MessageRole::Assistant, "Done.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     attach_changed_files(
         &mut session,
         vec![CheckpointFile {
@@ -1898,6 +1898,78 @@ fn a_turn_states_its_stats_without_being_hovered() {
     assert!(!duration.is_empty(), "a settled turn always has a duration");
     assert_eq!(steps, 2, "both activities are counted");
     assert_eq!(files, 1, "the checkpoint's files are counted");
+}
+
+/// A failure reason is recorded and reaches the reader.
+///
+/// The provider's own sentence is preferred over `last_driver_error` because it
+/// is written for a person; the driver text is shaped for a toast. This pins the
+/// storage half — that the sentence survives settling and is available later,
+/// which is what makes a reopened session explain itself.
+#[test]
+fn a_failed_turn_keeps_the_reason_the_provider_gave() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "Partial.");
+    session.finish_active_turn(
+        TurnStatus::Failed,
+        Some("provider exited before a response was produced".into()),
+    );
+
+    assert_eq!(
+        turn_failure_reason(&session, turn_id).as_deref(),
+        Some("provider exited before a response was produced")
+    );
+    // The label stays a heading; the reason is separate prose so a long message
+    // cannot push the stats off the line.
+    assert_eq!(turn_summary_label(&session, turn_id), "This turn failed");
+}
+
+/// A failed turn with no reason is a real state, not a bug.
+///
+/// Claude finishes a failed turn with `summary: None` and records the failure
+/// locally, so the reason genuinely does not exist. The label must still say the
+/// turn failed — the reader is never told it succeeded — but there is nothing to
+/// put underneath.
+#[test]
+fn a_failed_turn_without_a_reason_still_reads_as_failed() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "Partial.");
+    session.finish_active_turn(TurnStatus::Failed, None);
+
+    assert_eq!(turn_failure_reason(&session, turn_id), None);
+    assert_eq!(turn_summary_label(&session, turn_id), "This turn failed");
+}
+
+/// A success never carries a reason.
+///
+/// `finish_active_turn` drops one passed alongside `Completed`, so a caller that
+/// gets the outcome wrong cannot make a successful turn display an error. The
+/// alternative — trusting the caller — would put a red sentence under a turn that
+/// worked.
+#[test]
+fn a_completed_turn_drops_any_reason_it_was_given() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "Done.");
+    session.finish_active_turn(TurnStatus::Completed, Some("should not survive".into()));
+
+    assert_eq!(turn_failure_reason(&session, turn_id), None);
+}
+
+/// Whitespace is not a reason.
+///
+/// A driver that reports `" "` would otherwise render an empty second line under
+/// the stats, which reads as a rendering bug rather than as "no reason given".
+#[test]
+fn a_blank_reason_is_treated_as_no_reason() {
+    let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
+    let turn_id = session.begin_turn("Build it");
+    session.push_message(MessageRole::Assistant, "Partial.");
+    session.finish_active_turn(TurnStatus::Failed, Some("   \n  ".into()));
+
+    assert_eq!(turn_failure_reason(&session, turn_id), None);
 }
 
 /// The turn summary row states a failure instead of a duration, and its
@@ -1918,7 +1990,7 @@ fn a_failed_turn_summary_never_reports_success() {
         )],
     });
     session.push_message(MessageRole::Assistant, "Partial.");
-    session.finish_active_turn(TurnStatus::Failed);
+    session.finish_active_turn(TurnStatus::Failed, None);
 
     assert_eq!(turn_summary_label(&session, turn_id), "This turn failed");
     // A failed turn still shows what it did, by default.
@@ -1964,7 +2036,7 @@ fn a_settled_turn_shows_all_of_its_work_with_the_answer() {
         )],
     });
     session.push_message(MessageRole::Assistant, "Done. The change is ready.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     // The turn's real order, with work in place between its text parts — the
     // default presentation of a settled turn.
@@ -2007,7 +2079,7 @@ fn consecutive_trailing_text_parts_all_stay_out_of_the_fold() {
     });
     session.push_message(MessageRole::Assistant, "First half of the answer.");
     session.push_message(MessageRole::Assistant, "Second half of the answer.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
@@ -2040,7 +2112,7 @@ fn a_turn_without_an_answer_folds_completely() {
     });
     // The streaming placeholder never received any text.
     session.push_message(MessageRole::Assistant, "");
-    session.finish_active_turn(TurnStatus::Interrupted);
+    session.finish_active_turn(TurnStatus::Interrupted, None);
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
@@ -2084,7 +2156,7 @@ fn assistant_response_footer_is_owned_by_the_terminal_part_and_copies_the_visibl
     });
     session.push_message(MessageRole::Assistant, "First half of the answer.");
     session.push_message(MessageRole::Assistant, "Second half of the answer.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     session.messages[3].created_at = 100;
     session.turns.last_mut().unwrap().completed_at = Some(200);
 
@@ -2122,7 +2194,7 @@ fn response_footer_follows_trailing_tool_activity() {
             true,
         )],
     });
-    session.finish_active_turn(TurnStatus::Interrupted);
+    session.finish_active_turn(TurnStatus::Interrupted, None);
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
@@ -2144,7 +2216,7 @@ fn assistant_response_footer_treats_a_blank_part_as_work() {
     session.push_message(MessageRole::Assistant, "First text part.");
     session.push_message(MessageRole::Assistant, "  ");
     session.push_message(MessageRole::Assistant, "Final text part.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
@@ -2243,7 +2315,7 @@ fn plain_settled_response_does_not_add_an_empty_work_fold() {
     let mut session = AgentSession::new(project_id, ProviderKind::Codex);
     let turn_id = session.begin_turn("Answer directly");
     session.push_message(MessageRole::Assistant, "The answer.");
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
 
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
@@ -2285,7 +2357,7 @@ fn sidebar_time_labels_prefer_the_live_turn_over_the_last_reply() {
     );
 
     // Settled again: back to how long ago the agent last replied.
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     session.status = SessionStatus::Idle;
     session.last_reply_at = Some(500);
     assert_eq!(session_time_label(&session, 800).as_deref(), Some("5m"));
@@ -2402,7 +2474,7 @@ fn a_busy_turn_pins_the_working_indicator_after_the_last_row() {
 
     // A settled turn swaps the indicator for its final transcript shape.
     session.status = SessionStatus::Working;
-    session.finish_active_turn(TurnStatus::Completed);
+    session.finish_active_turn(TurnStatus::Completed, None);
     session.status = SessionStatus::Idle;
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
@@ -2833,7 +2905,7 @@ fn the_row_fingerprint_is_deterministic_and_order_sensitive() {
             )],
         });
         session.push_message(MessageRole::Assistant, "Done.");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         session
     };
     let fixed_id = Uuid::new_v4();
@@ -2941,7 +3013,7 @@ fn fingerprints_separate_what_renders_differently_and_share_what_does_not() {
                 true,
             )],
         });
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         distinct.push(("growing transcript", session));
     }
 

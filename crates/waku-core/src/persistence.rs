@@ -2174,7 +2174,7 @@ mod tests {
         };
         state.sessions[0].begin_turn("Ask");
         state.sessions[0].push_message(MessageRole::Assistant, "an answer");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         store.save(&mut state).unwrap();
 
         let reopened = store_in(&directory);
@@ -2232,7 +2232,7 @@ mod tests {
                     crate::model::MessageRole::Assistant,
                     format!("answer {index}"),
                 );
-                session.finish_active_turn(crate::model::TurnStatus::Completed);
+                session.finish_active_turn(crate::model::TurnStatus::Completed, None);
                 let id = session.id;
                 state.push_session(session);
                 id
@@ -2364,7 +2364,7 @@ mod tests {
         for turn in 0..20 {
             state.sessions[0].begin_turn(format!("prompt {turn}"));
             state.sessions[0].push_message(MessageRole::Assistant, format!("reply {turn}"));
-            state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+            state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         }
         store.save(&mut state).unwrap();
         assert!(state.sessions[0].messages.len() >= 40);
@@ -2426,7 +2426,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("Ask");
         state.sessions[0].push_message(MessageRole::User, "keep me");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         store.save(&mut state).unwrap();
 
         let reopened = store_in(&directory);
@@ -2464,7 +2464,7 @@ mod tests {
         );
         let id = state.sessions[0].id;
         state.sessions[0].begin_turn("Screenshot");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         state
             .session_mut(id)
             .unwrap()
@@ -2613,7 +2613,7 @@ mod tests {
             app_name: "Safari".into(),
         });
         state.sessions[0].begin_turn("Persist this session");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         state.sessions[0].transcript_blocks.push(TranscriptBlock {
             after_message: 1,
             turn_id: None,
@@ -2694,11 +2694,11 @@ mod tests {
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("First");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let quiet = {
             let mut session = state.new_session(state.projects[0].id, ProviderKind::Codex);
             session.begin_turn("Quiet");
-            session.finish_active_turn(crate::model::TurnStatus::Completed);
+            session.finish_active_turn(crate::model::TurnStatus::Completed, None);
             session
         };
         let quiet_id = quiet.id;
@@ -2718,7 +2718,7 @@ mod tests {
         let active_id = state.sessions[0].id;
         let session = state.session_mut(active_id).unwrap();
         session.begin_turn("Second");
-        session.finish_active_turn(crate::model::TurnStatus::Completed);
+        session.finish_active_turn(crate::model::TurnStatus::Completed, None);
         store.save(&mut state).unwrap();
 
         let quiet_title: String = connection
@@ -2747,7 +2747,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         let id = state.sessions[0].id;
         state.sessions[0].begin_turn("First");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         store.save(&mut state).unwrap();
 
         state.sessions[0].title = "bypassed".into();
@@ -2777,7 +2777,7 @@ mod tests {
         let id = state.sessions[0].id;
         state.sessions[0].begin_turn("Keep this transcript");
         state.sessions[0].push_message(MessageRole::Assistant, "still here");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         store.save(&mut state).unwrap();
 
         let reopened = store_in(&directory);
@@ -2806,7 +2806,7 @@ mod tests {
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("Unmarked");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         state.dirty_sessions.clear();
 
         store.save(&mut state).unwrap();
@@ -3040,7 +3040,7 @@ mod tests {
         state.sessions[0].begin_turn("Ask");
         state.sessions[0].push_message(MessageRole::User, "how do I center a div");
         state.sessions[0].push_message(MessageRole::Assistant, "flexbox");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let expected = state.sessions[0].messages.clone();
         store.save(&mut state).unwrap();
 
@@ -3086,7 +3086,7 @@ mod tests {
         let user_match_id = state.sessions[0].id;
         state.sessions[0].begin_turn("Older user needle at 100%_literal");
         state.sessions[0].push_message(MessageRole::Assistant, "Newer assistant needle");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
 
         let mut assistant_match = AgentSession::new(project_id, ProviderKind::Codex);
         let assistant_match_id = assistant_match.id;
@@ -3095,7 +3095,7 @@ mod tests {
         assistant_match.push_message(MessageRole::Assistant, "Streaming needle");
         assistant_match.messages.last_mut().unwrap().streaming = true;
         assistant_match.push_message(MessageRole::Assistant, "Final assistant needle");
-        assistant_match.finish_active_turn(crate::model::TurnStatus::Completed);
+        assistant_match.finish_active_turn(crate::model::TurnStatus::Completed, None);
         state.sessions.push(assistant_match);
         store.save(&mut state).unwrap();
 
@@ -3160,7 +3160,7 @@ mod tests {
         state.sessions[0].begin_turn("First");
         state.sessions[0].push_message(MessageRole::User, "one");
         state.sessions[0].push_message(MessageRole::Assistant, "two");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         store.save(&mut state).unwrap();
 
         let id = state.sessions[0].id;
@@ -3190,11 +3190,11 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("Keep");
         state.sessions[0].push_message(MessageRole::User, "keep me");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let mut extra = state.new_session(state.projects[0].id, ProviderKind::Codex);
         extra.begin_turn("Remove");
         extra.push_message(MessageRole::User, "delete me");
-        extra.finish_active_turn(crate::model::TurnStatus::Completed);
+        extra.finish_active_turn(crate::model::TurnStatus::Completed, None);
         let removed_id = extra.id;
         state.sessions.push(extra);
         store.save(&mut state).unwrap();
@@ -3222,7 +3222,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("Ask");
         state.sessions[0].push_message(MessageRole::User, "before");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         store.save(&mut state).unwrap();
 
         // Nothing outside the message list changes, so the session JSON is
@@ -3247,7 +3247,7 @@ mod tests {
         state.sessions[0].auto_title = Some("Provider fallback".into());
         state.sessions[0].model = Some("gpt-5.6-luna".into());
         state.sessions[0].begin_turn("Go");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let session = state.sessions[0].clone();
         store.save(&mut state).unwrap();
 
@@ -3295,7 +3295,7 @@ mod tests {
         session.begin_turn("Ask");
         let submitted_at = session.last_reply_at.expect("submission recorded");
         assert_eq!(submitted_at, session.turns.last().unwrap().started_at);
-        session.finish_active_turn(crate::model::TurnStatus::Completed);
+        session.finish_active_turn(crate::model::TurnStatus::Completed, None);
         let replied_at = session.last_reply_at.expect("reply recorded");
         assert!(replied_at >= submitted_at);
 
@@ -3307,7 +3307,7 @@ mod tests {
         // A second turn moves it immediately, before that turn finishes.
         session.begin_turn("Again");
         assert!(session.last_reply_at >= Some(replied_at));
-        session.finish_active_turn(crate::model::TurnStatus::Failed);
+        session.finish_active_turn(crate::model::TurnStatus::Failed, None);
         assert!(session.last_reply_at >= Some(replied_at));
     }
 
@@ -3315,7 +3315,7 @@ mod tests {
     fn last_reply_at_is_derived_for_sessions_stored_without_it() {
         let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
         session.begin_turn("Ask");
-        session.finish_active_turn(crate::model::TurnStatus::Completed);
+        session.finish_active_turn(crate::model::TurnStatus::Completed, None);
         let completed_at = session.turns.last().unwrap().completed_at.unwrap();
 
         // Drop the field, as a session written before it existed would be.
@@ -3342,11 +3342,11 @@ mod tests {
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("First");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let mut second = state.new_session(state.projects[0].id, ProviderKind::Codex);
         second.title = "Newer".into();
         second.begin_turn("Second");
-        second.finish_active_turn(crate::model::TurnStatus::Completed);
+        second.finish_active_turn(crate::model::TurnStatus::Completed, None);
         second.updated_at = state.sessions[0].updated_at + 100;
         state.sessions.push(second);
         store.save(&mut state).unwrap();
@@ -3372,7 +3372,7 @@ mod tests {
         let directory = temporary_directory();
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("Stored");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         store_in(&directory).save(&mut state).unwrap();
 
         // A fresh store reloads and then saves without any edits in between.
@@ -3412,7 +3412,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(&payload)
         );
         state.sessions[0].begin_turn("Screenshot");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let id = state.sessions[0].id;
         state
             .session_mut(id)
@@ -3494,7 +3494,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         let started_id = state.sessions[0].id;
         state.sessions[0].begin_turn("Persist this session");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let draft = state.new_session(state.projects[0].id, ProviderKind::Codex);
         state.selected_session = Some(draft.id);
         state.sessions.push(draft);
@@ -3527,10 +3527,10 @@ mod tests {
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         state.sessions[0].begin_turn("Keep");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let mut extra = state.new_session(state.projects[0].id, ProviderKind::Codex);
         extra.begin_turn("Remove");
-        extra.finish_active_turn(crate::model::TurnStatus::Completed);
+        extra.finish_active_turn(crate::model::TurnStatus::Completed, None);
         let removed_id = extra.id;
         state.sessions.push(extra);
         store.save(&mut state).unwrap();
@@ -3608,7 +3608,7 @@ mod tests {
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
         let id = state.sessions[0].id;
         state.sessions[0].begin_turn("Started");
-        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed);
+        state.sessions[0].finish_active_turn(crate::model::TurnStatus::Completed, None);
         let session = state.session_mut(id).unwrap();
         session.model = Some("gpt-5.6-luna".into());
         session.reasoning_effort = Some("xhigh".into());

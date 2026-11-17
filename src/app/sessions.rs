@@ -1232,6 +1232,8 @@ impl Waku {
                 session_id,
                 TurnStatus::Interrupted,
                 crate::analytics::TurnOutcome::Cancelled,
+                // The user stopped it; there is nothing to explain.
+                None,
             );
         }
         if has_active_turn {

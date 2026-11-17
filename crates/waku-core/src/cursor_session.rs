@@ -93,11 +93,11 @@ mod tests {
         session.begin_turn("first prompt");
         session.mark_active_turn_provider_started();
         session.push_message(MessageRole::Assistant, "first answer");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
         session.begin_turn("second prompt");
         session.mark_active_turn_provider_started();
         session.push_message(MessageRole::Assistant, "second answer");
-        session.finish_active_turn(TurnStatus::Completed);
+        session.finish_active_turn(TurnStatus::Completed, None);
 
         let ProviderResumeCursor::Cursor {
             session_id,

@@ -1228,6 +1228,25 @@ pub(super) fn turn_summary_label(session: &AgentSession, turn_id: Uuid) -> Strin
     }
 }
 
+/// Why a settled turn failed, if the provider said.
+///
+/// Separate from [`turn_summary_label`] because the two answer different
+/// questions: the label is a heading ("This turn failed"), this is the sentence
+/// under it. A caller that has room for both should show both; one that has room
+/// for only a line should use the label, which is always present.
+///
+/// **`None` for a failed turn is a real state**, not a bug: some providers end a
+/// failed turn without a reason. The label still says it failed, so the reader is
+/// never told the turn succeeded — they just do not learn why.
+pub(super) fn turn_failure_reason(session: &AgentSession, turn_id: Uuid) -> Option<String> {
+    session
+        .turns
+        .iter()
+        .find(|turn| turn.id == turn_id)
+        .and_then(|turn| turn.failure_reason.clone())
+        .filter(|reason| !reason.trim().is_empty())
+}
+
 /// How long a turn ran, in whole seconds, never zero.
 pub(super) fn turn_worked_seconds(turn: &AgentTurn) -> u64 {
     turn.completed_at
