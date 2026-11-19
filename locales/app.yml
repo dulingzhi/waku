@@ -944,6 +944,8 @@ permission.agent_asks_for_permission:
   en: The agent is asking for permission
 permission.agent_wants_to:
   en: The agent wants to %{action}
+common.back:
+  en: Back
 common.close:
   en: Close
 common.default:
@@ -2467,6 +2469,8 @@ transcript.show_group:
   en: Shows the whole group
 transcript.open_activity:
   en: Opens the activity list
+transcript.open_diff:
+  en: Opens the file change
 attachment.retry:
   en: Tap to retry
 attachment.no_preview:

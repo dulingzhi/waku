@@ -376,6 +376,9 @@ export function turnChangedFileCount(session: AgentSession, turnId: string) {
  */
 export const ACTIVITY_PAYLOAD_PREVIEW_LINES = 8
 
+/** The same preview under a phone's narrower measure. */
+export const MOBILE_ACTIVITY_PAYLOAD_PREVIEW_LINES = 5
+
 export interface ActivityPayloadPreview {
   text: string
   hiddenLines: number
@@ -388,24 +391,31 @@ export interface ActivityPayloadPreview {
  * `null` means there is nothing worth showing: a row whose whole story is
  * already in its title stays one line, and an empty output is not the same as
  * one that printed blank lines.
+ *
+ * `lines` is the caller's budget, because a phone shows fewer rows before the
+ * preview stops being a glance and starts being the whole output.
  */
-export function activityPayloadPreview(activity: ActivityItem): ActivityPayloadPreview | null {
+export function activityPayloadPreview(
+  activity: ActivityItem,
+  lines: number = ACTIVITY_PAYLOAD_PREVIEW_LINES,
+): ActivityPayloadPreview | null {
   const output = activity.output?.trim()
   if (!output) return null
+  const budget = Math.max(1, Math.floor(lines))
   // The count is taken once when the activity is built, so a preview does not
   // walk a 16k-character output on every frame just to learn how many lines it
   // is not showing. Falling back to counting keeps this correct for a record
   // that predates the field.
   const totalLines = activity.output_line_count ?? output.split('\n').length
   if (activity.kind === 'command') {
-    const start = Math.max(0, totalLines - ACTIVITY_PAYLOAD_PREVIEW_LINES)
+    const start = Math.max(0, totalLines - budget)
     return {
       text: output.split('\n').slice(start).join('\n'),
       hiddenLines: start,
       fromTail: true,
     }
   }
-  const shown = output.split('\n').slice(0, ACTIVITY_PAYLOAD_PREVIEW_LINES)
+  const shown = output.split('\n').slice(0, budget)
   return {
     text: shown.join('\n'),
     hiddenLines: Math.max(0, totalLines - shown.length),

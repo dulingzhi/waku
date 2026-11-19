@@ -486,6 +486,7 @@ permission.agent_asks_for_named_permission: エージェントが %{permission} 
 permission.agent_asks_for_permission: エージェントが権限を求めています
 permission.agent_wants_to: エージェントが次の操作を実行しようとしています：%{action}
 
+common.back: 戻る
 common.close: 閉じる
 common.default: デフォルト
 
@@ -1258,6 +1259,7 @@ transcript.scroll_to_latest: 最新へスクロール
 transcript.open_details: 詳細を開く
 transcript.show_group: グループ全体を表示
 transcript.open_activity: アクティビティ一覧を開く
+transcript.open_diff: このファイルの変更を開く
 attachment.retry: タップして再試行
 attachment.no_preview: プレビューなし
 attachment.close_preview: 画像プレビューを閉じる

@@ -462,6 +462,7 @@ permission.allow_named_permission: 是否授予“%{permission}”权限？
 permission.agent_asks_for_named_permission: 智能体正在请求“%{permission}”权限
 permission.agent_asks_for_permission: 智能体正在请求权限
 permission.agent_wants_to: 智能体想要执行 %{action}
+common.back: 返回
 common.close: 关闭
 common.default: 默认
 composer.no_providers: 请安装或启用一个服务商后再发送
@@ -1206,6 +1207,7 @@ transcript.scroll_to_latest: 滚动到最新
 transcript.open_details: 打开详细信息
 transcript.show_group: 显示整个分组
 transcript.open_activity: 打开活动列表
+transcript.open_diff: 打开此文件改动
 attachment.retry: 轻点重试
 attachment.no_preview: 无预览
 attachment.close_preview: 关闭图片预览

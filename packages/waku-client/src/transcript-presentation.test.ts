@@ -4,6 +4,7 @@ import type { AgentTurn, ActivityItem } from './generated';
 import {
   ACTIVITY_PAYLOAD_PREVIEW_LINES,
   activityPayloadPreview,
+  MOBILE_ACTIVITY_PAYLOAD_PREVIEW_LINES,
   turnFailureReason,
   turnSummaryLabel,
 } from './transcript-presentation';
@@ -133,6 +134,30 @@ describe('activityPayloadPreview', () => {
     // lines, and an empty box would say otherwise.
     expect(activityPayloadPreview(command({ output: '   \n  ' }))).toBeNull()
     expect(activityPayloadPreview(command({ output: null }))).toBeNull()
+  })
+
+  test('a phone-sized budget still takes the tail of a command', () => {
+    // Mobile renders fewer rows, and the row it must keep is the last one:
+    // the summary or the error is at the end, never at the top.
+    const output = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join('\n')
+    const preview = activityPayloadPreview(
+      command({ output, output_line_count: 30 }),
+      MOBILE_ACTIVITY_PAYLOAD_PREVIEW_LINES,
+    )
+
+    expect(preview?.fromTail).toBe(true)
+    expect(preview?.text.split('\n').length).toBe(MOBILE_ACTIVITY_PAYLOAD_PREVIEW_LINES)
+    expect(preview?.text.endsWith('line 30')).toBe(true)
+    // The hidden count follows the budget, so the row's "N earlier lines" is
+    // about the rows this preview did not show, not a fixed constant.
+    expect(preview?.hiddenLines).toBe(30 - MOBILE_ACTIVITY_PAYLOAD_PREVIEW_LINES)
+  })
+
+  test('a budget of one line is honoured rather than treated as no budget', () => {
+    // Guarding the clamp: a caller passing 0 must not produce an empty preview
+    // that reads as "this command said nothing".
+    const output = ['first', 'last'].join('\n')
+    expect(activityPayloadPreview(command({ output }), 0)?.text).toBe('last')
   })
 })
 
