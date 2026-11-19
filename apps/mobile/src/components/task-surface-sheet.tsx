@@ -751,7 +751,7 @@ function ReviewSurface({
                 { borderBottomColor: theme.border },
               ]}
             >
-              <DiffView diff={item.patch} mode="review" />
+              <DiffView diff={item.patch} />
             </View>
           )}
         />

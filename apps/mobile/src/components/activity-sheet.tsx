@@ -106,16 +106,29 @@ export function ActivitySheetHost({
     ? activities.find((activity) => activity.id === selectedId) ?? null
     : null;
 
-  // 0 = the group's list, 1 = one activity's detail.
+  // Three pages: 0 = the group's list, 1 = one activity's detail, 2 = one
+  // file's change read at full height. The change page is a page rather than a
+  // nested modal because a sheet presented over a sheet is the one thing the
+  // native implementations disagree about.
+  const [diffPath, setDiffPath] = useState<string | null>(null);
+  const diffChange = diffPath
+    ? selected?.file_changes?.find((change) => change.path === diffPath) ?? null
+    : null;
+
+  // The snap point the sheet was at before the change page took it full
+  // height, so leaving the page puts the sheet back where the reader had it.
+  const snapIndex = useRef(0);
+  const returnSnap = useRef(0);
+
   const progress = useSharedValue(0);
   const pageWidth = useSharedValue(0);
   const slideStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: -pageWidth.value * progress.value }],
   }));
-  function slideTo(page: 0 | 1) {
+  function slideTo(next: 0 | 1 | 2) {
     progress.value = reducedMotion
-      ? page
-      : withTiming(page, { duration: 260, easing: Easing.bezier(0.32, 0.72, 0.25, 1) });
+      ? next
+      : withTiming(next, { duration: 260, easing: Easing.bezier(0.32, 0.72, 0.25, 1) });
   }
 
   useEffect(() => {
@@ -130,6 +143,21 @@ export function ActivitySheetHost({
     if (target && !block) sheet.current?.dismiss();
   }, [block, target]);
 
+  function openDiff(path: string) {
+    returnSnap.current = snapIndex.current;
+    setDiffPath(path);
+    slideTo(2);
+    // A diff is what a reader wants the whole screen for; a half-height sheet
+    // shows about a dozen rows of it.
+    sheet.current?.expand();
+  }
+
+  function leaveDiff() {
+    setDiffPath(null);
+    slideTo(1);
+    sheet.current?.snapToIndex(returnSnap.current);
+  }
+
   return (
     <ActivitySheetContext.Provider value={open}>
       {children}
@@ -139,9 +167,13 @@ export function ActivitySheetHost({
         enableDynamicSizing={false}
         enablePanDownToClose
         snapPoints={SNAP_POINTS}
+        onChange={(index) => {
+          if (index >= 0) snapIndex.current = index;
+        }}
         onDismiss={() => {
           setTarget(null);
           setSelectedId(null);
+          setDiffPath(null);
         }}>
         <BottomSheetView style={styles.fill}>
           {block ? (
@@ -173,10 +205,21 @@ export function ActivitySheetHost({
                           size={14}
                           tintColor={NativeTint}
                         />
-                        <Text style={[styles.backLabel, { color: NativeTint }]}>Back</Text>
+                        <Text style={[styles.backLabel, { color: NativeTint }]}>
+                          {t('common.back')}
+                        </Text>
                       </Pressable>
-                      <ActivityDetail activity={selected} />
+                      <ActivityDetail activity={selected} onOpenDiff={openDiff} />
                     </>
+                  ) : null}
+                </View>
+                <View style={styles.page}>
+                  {diffChange && selected ? (
+                    <FileChangePage
+                      change={diffChange}
+                      onBack={leaveDiff}
+                      subtitle={activityDisplayTitle(selected, t)}
+                    />
                   ) : null}
                 </View>
               </Animated.View>
@@ -284,14 +327,23 @@ function RowState({ activity, hasDetail }: { activity: ActivityItem; hasDetail: 
 }
 
 /** Page two: everything the desktop shows in an expanded card. */
-function ActivityDetail({ activity }: { activity: ActivityItem }) {
+function ActivityDetail({
+  activity,
+  onOpenDiff,
+}: {
+  activity: ActivityItem;
+  onOpenDiff: (path: string) => void;
+}) {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
+  const { t } = useI18n();
   const reasoning = activity.reasoning ? activity.reasoning.content.trim() : '';
-  const sections = activity.reasoning ? [] : activityDisclosureSections(activity);
+  const sections = activity.reasoning ? [] : activityDisclosureSections(activity, t);
   const changes = activity.file_changes ?? [];
   const images = activity.image_urls ?? [];
-  const title = activity.reasoning ? reasoningTitle(activity) : activityDisplayTitle(activity);
+  const title = activity.reasoning
+    ? reasoningTitle(activity, t)
+    : activityDisplayTitle(activity, t);
   return (
     <ScrollView
       alwaysBounceVertical={false}
@@ -329,7 +381,7 @@ function ActivityDetail({ activity }: { activity: ActivityItem }) {
             />
           ))}
           {changes.map((change) => (
-            <FileChange change={change} key={change.path} />
+            <FileChange change={change} key={change.path} onOpenDiff={onOpenDiff} />
           ))}
           {images.map((url, index) => (
             <Image
@@ -416,32 +468,131 @@ function DetailSection({
   );
 }
 
-function FileChange({ change }: { change: ActivityFileChange }) {
+/**
+ * One changed file, as a row that opens its diff at full height.
+ *
+ * The change itself is never unfolded here: the row names the file and its
+ * size, and the diff lives on the page that can show it. A file the provider
+ * sent no diff for is still a row — the counts and the path are the record of
+ * what happened, and a row that opens nothing is not offered as tappable.
+ */
+function FileChange({
+  change,
+  onOpenDiff,
+}: {
+  change: ActivityFileChange;
+  onOpenDiff: (path: string) => void;
+}) {
   const theme = useTheme();
+  const { t } = useI18n();
   const status = change.status ?? 'modified';
   const statusColor = status === 'added'
     ? theme.success
     : status === 'deleted'
       ? theme.danger
       : theme.warning;
-  const statusWord = status === 'added' ? 'Added' : status === 'deleted' ? 'Deleted' : 'Modified';
-  const diff = change.diff?.trim() ? change.diff : null;
+  const statusWord = status === 'added'
+    ? t('diff.status_added')
+    : status === 'deleted'
+      ? t('diff.status_deleted')
+      : t('diff.modified');
+  const hasDiff = Boolean(change.diff?.trim());
   return (
-    <View style={styles.fileChange}>
-      <View accessible accessibilityLabel={`${statusWord} ${change.path}`} style={styles.fileRow}>
-        <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-        <Text ellipsizeMode="head" numberOfLines={1} style={[styles.filePath, { color: theme.text }]}>
-          {change.path}
+    <Pressable
+      accessibilityHint={hasDiff ? t('transcript.open_diff') : undefined}
+      accessibilityLabel={`${statusWord} ${change.path}`}
+      accessibilityRole={hasDiff ? 'button' : 'text'}
+      disabled={!hasDiff}
+      onPress={() => onOpenDiff(change.path)}
+      style={({ pressed }) => [
+        styles.fileRow,
+        { opacity: pressed && hasDiff ? 0.55 : 1 },
+      ]}>
+      <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+      <Text ellipsizeMode="head" numberOfLines={1} style={[styles.filePath, { color: theme.text }]}>
+        {change.path}
+      </Text>
+      {(change.additions != null || change.deletions != null) && (
+        <Text style={[styles.statusText, styles.stats]}>
+          <Text style={{ color: theme.success }}>+{change.additions ?? 0}</Text>
+          <Text style={{ color: theme.textGhost }}> </Text>
+          <Text style={{ color: theme.danger }}>−{change.deletions ?? 0}</Text>
         </Text>
-        {(change.additions != null || change.deletions != null) && (
-          <Text style={[styles.statusText, styles.stats]}>
-            <Text style={{ color: theme.success }}>+{change.additions ?? 0}</Text>
-            <Text style={{ color: theme.textGhost }}> </Text>
-            <Text style={{ color: theme.danger }}>−{change.deletions ?? 0}</Text>
+      )}
+      {hasDiff ? (
+        <AppSymbol
+          name={{ ios: 'chevron.right', android: 'chevron_right', web: 'chevron_right' }}
+          size={11}
+          tintColor={theme.textGhost}
+        />
+      ) : null}
+    </Pressable>
+  );
+}
+
+/**
+ * Page three: one file's change, read at full height.
+ *
+ * This page exists because the alternative was reading it inside the detail
+ * page — a code block in a half-height sheet, scrolling sideways for every
+ * long line. Here the header stays put, the diff fills the rest, and the back
+ * row returns to the activity it came from.
+ */
+function FileChangePage({
+  change,
+  subtitle,
+  onBack,
+}: {
+  change: ActivityFileChange;
+  subtitle: string;
+  onBack: () => void;
+}) {
+  const theme = useTheme();
+  const { t } = useI18n();
+  const insets = useSafeAreaInsets();
+  const status = change.status ?? 'modified';
+  const statusColor = status === 'added'
+    ? theme.success
+    : status === 'deleted'
+      ? theme.danger
+      : theme.warning;
+  return (
+    <View style={styles.fill}>
+      <View style={[styles.backRow, styles.diffHeader]}>
+        <Pressable
+          accessibilityLabel={t('common.back')}
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={onBack}
+          style={({ pressed }) => [styles.backButton, { opacity: pressed ? 0.55 : 1 }]}>
+          <AppSymbol
+            name={{ ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' }}
+            size={14}
+            tintColor={NativeTint}
+          />
+          <Text style={[styles.backLabel, { color: NativeTint }]}>{t('common.back')}</Text>
+        </Pressable>
+        <View style={styles.diffCopy}>
+          <Text numberOfLines={1} style={[styles.diffTitle, { color: theme.text }]}>
+            {change.path}
           </Text>
-        )}
+          <Text numberOfLines={1} style={[styles.diffSubtitle, { color: theme.textTertiary }]}>
+            {subtitle}
+          </Text>
+        </View>
+        <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+        <Text style={[styles.statusText, styles.stats]}>
+          <Text style={{ color: theme.success }}>+{change.additions ?? 0}</Text>
+          <Text style={{ color: theme.textGhost }}> </Text>
+          <Text style={{ color: theme.danger }}>−{change.deletions ?? 0}</Text>
+        </Text>
       </View>
-      {diff ? <DiffView diff={diff} /> : null}
+      <ScrollView
+        alwaysBounceVertical={false}
+        contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 8 }}
+        style={styles.fill}>
+        {change.diff?.trim() ? <DiffView diff={change.diff} /> : null}
+      </ScrollView>
     </View>
   );
 }
@@ -494,8 +645,8 @@ function plainReasoning(value: string): string {
 const styles = StyleSheet.create({
   fill: { flex: 1 },
   pagerClip: { flex: 1, overflow: 'hidden' },
-  pagerTrack: { flex: 1, flexDirection: 'row', width: '200%' },
-  page: { width: '50%' },
+  pagerTrack: { flex: 1, flexDirection: 'row', width: '300%' },
+  page: { width: '33.3333%' },
   // ── Page one: the list ──────────────────────────────────────────────────
   listContent: { paddingHorizontal: Spacing.two, paddingTop: 6 },
   row: {
@@ -557,9 +708,28 @@ const styles = StyleSheet.create({
   },
   monoText: { fontFamily: MonoFont, fontSize: 12, lineHeight: 17.5 },
   bodyText: { fontSize: 14.5, lineHeight: 21 },
-  fileChange: { gap: 8 },
-  fileRow: { alignItems: 'center', flexDirection: 'row', gap: 8, minHeight: 24 },
+  fileRow: {
+    alignItems: 'center',
+    borderRadius: Radius.small,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 40,
+    paddingRight: 4,
+  },
   statusDot: { borderRadius: 3, height: 6, width: 6 },
   filePath: { flex: 1, fontFamily: MonoFont, fontSize: 12 },
   image: { borderRadius: Radius.small, height: 240, width: '100%' },
+  // ── Page three: one file's change, full height ──────────────────────────
+  diffHeader: {
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: 'transparent',
+    gap: 8,
+    marginHorizontal: 0,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 6,
+  },
+  backButton: { alignItems: 'center', flexDirection: 'row', gap: 5 },
+  diffCopy: { flex: 1, minWidth: 0 },
+  diffTitle: { fontFamily: MonoFont, fontSize: 12, lineHeight: 17 },
+  diffSubtitle: { fontSize: 11, lineHeight: 15 },
 });

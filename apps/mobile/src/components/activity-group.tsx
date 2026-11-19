@@ -4,6 +4,7 @@ import {
   activityActionLabel,
   activityPayloadPreview,
   activityRowDetail,
+  MOBILE_ACTIVITY_PAYLOAD_PREVIEW_LINES,
 } from '@waku/client/transcript-presentation';
 import { memo } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
@@ -52,7 +53,9 @@ export const ActivityGroup = memo(function ActivityGroup({
       {activities.map((activity) => {
         const action = activityActionLabel(activity, t);
         const detail = activityRowDetail(activity, t);
-        const preview = activity.reasoning ? null : activityPayloadPreview(activity);
+        const preview = activity.reasoning
+          ? null
+          : activityPayloadPreview(activity, MOBILE_ACTIVITY_PAYLOAD_PREVIEW_LINES);
         const failed = activity.failed;
         return (
           <Pressable
@@ -110,7 +113,9 @@ export const ActivityGroup = memo(function ActivityGroup({
             </View>
             {preview && (
               <View style={[styles.preview, { backgroundColor: theme.overlay }]}>
-                <Text numberOfLines={8} style={[styles.previewText, { color: theme.textSecondary }]}>
+                <Text
+                  numberOfLines={MOBILE_ACTIVITY_PAYLOAD_PREVIEW_LINES}
+                  style={[styles.previewText, { color: theme.textSecondary }]}>
                   {preview.text}
                 </Text>
                 {preview.hiddenLines > 0 && (

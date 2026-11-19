@@ -1,86 +1,58 @@
 import { useMemo } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { MonoFont, Radius } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/lib/i18n-context';
 import { parseUnifiedDiff, type DiffLine } from '@/lib/diff-presentation';
 
-/** Colored unified-diff body rendered into an inset code well. */
-export function DiffView({
-  diff,
-  mode = 'well',
-}: {
-  diff: string;
-  mode?: 'well' | 'review';
-}) {
+/**
+ * A diff as a phone can actually read it.
+ *
+ * There used to be a second layout here: an inline strip inside a card that
+ * scrolled sideways. On a phone that form is unusable — a code line is wider
+ * than the screen, so reading one means dragging sideways, and the drag fights
+ * the vertical scroll of the transcript it sits in. Every diff now renders in
+ * this one numbered form, which wraps instead: the reader scrolls one axis,
+ * the way they scroll everything else, and a wide line is never off-screen.
+ *
+ * Context runs are collapsed to three lines either side of a change, because a
+ * phone screen holds about twenty rows and a full file would bury the edit.
+ */
+export function DiffView({ diff }: { diff: string }) {
   const theme = useTheme();
+  const { t } = useI18n();
   const { lines, truncated } = useMemo(
-    () =>
-      parseUnifiedDiff(
-        diff,
-        mode === 'review'
-          ? { contextLines: 3, hidePositionedHunks: true }
-          : undefined,
-      ),
-    [diff, mode],
+    () => parseUnifiedDiff(diff, { contextLines: 3, hidePositionedHunks: true }),
+    [diff],
   );
   if (!lines.length) return null;
-  if (mode === 'review') {
-    return (
-      <View style={styles.reviewLines}>
-        {lines.map((line, index) => (
-          <ReviewDiffRow key={index} line={line} />
-        ))}
-        {truncated ? (
-          <Text
-            style={[
-              styles.reviewTruncated,
-              { color: theme.textTertiary, borderColor: theme.border },
-            ]}
-          >
-            … diff truncated
-          </Text>
-        ) : null}
-      </View>
-    );
-  }
   return (
-    <View style={[styles.well, { backgroundColor: theme.inset, borderColor: theme.border }]}>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        <View style={styles.lines}>
-          {lines.map((line, index) => (
-            <DiffRow key={index} line={line} />
-          ))}
-          {truncated && (
-            <Text style={[styles.truncated, { color: theme.textTertiary }]}>
-              … diff truncated
-            </Text>
-          )}
-        </View>
-      </ScrollView>
+    <View style={styles.lines}>
+      {lines.map((line, index) => (
+        <DiffRow key={index} line={line} />
+      ))}
+      {truncated ? (
+        <Text style={[styles.truncated, { color: theme.textTertiary, borderColor: theme.border }]}>
+          {t('diff.truncated')}
+        </Text>
+      ) : null}
     </View>
   );
 }
 
-function ReviewDiffRow({ line }: { line: DiffLine }) {
+function DiffRow({ line }: { line: DiffLine }) {
   const theme = useTheme();
+  const { t } = useI18n();
   if (line.kind === 'gap' || line.kind === 'hunk') {
+    const hidden = line.hiddenLines ?? 0;
     const label =
       line.kind === 'gap'
-        ? `${line.hiddenLines ?? 0} unmodified ${line.hiddenLines === 1 ? 'line' : 'lines'}`
+        ? t('diff.unmodified_lines', { count: hidden })
         : line.text;
     return (
-      <View style={[styles.reviewRow, { backgroundColor: theme.overlay }]}>
-        <View
-          style={[
-            styles.reviewGutter,
-            { borderColor: theme.border, backgroundColor: theme.overlay },
-          ]}
-        />
-        <Text
-          selectable
-          style={[styles.reviewMeta, { color: theme.textTertiary }]}
-        >
+      <View style={[styles.metaRow, { backgroundColor: theme.overlay }]}>
+        <Text selectable style={[styles.meta, { color: theme.textTertiary }]}>
           {label}
         </Text>
       </View>
@@ -99,88 +71,49 @@ function ReviewDiffRow({ line }: { line: DiffLine }) {
   return (
     <View
       style={[
-        styles.reviewRow,
+        styles.row,
         {
           backgroundColor: background,
           borderLeftColor: changed ? semanticColor : 'transparent',
         },
-      ]}
-    >
+      ]}>
       <View
         style={[
-          styles.reviewGutter,
-          {
-            backgroundColor: changed ? background : 'transparent',
-            borderColor: theme.border,
-          },
-        ]}
-      >
+          styles.gutter,
+          { backgroundColor: changed ? background : 'transparent', borderColor: theme.border },
+        ]}>
         <Text
           style={[
-            styles.reviewLineNumber,
+            styles.lineNumber,
             { color: changed ? semanticColor : theme.textTertiary },
-          ]}
-        >
+          ]}>
           {shownLine ?? ''}
         </Text>
       </View>
-      <Text
-        selectable
-        style={[styles.reviewCode, { color: theme.textSecondary }]}
-      >
+      {/* The marker is not decoration: without it an addition and a deletion
+          differ only in colour, which a reader who cannot separate those hues
+          sees as two identical rows. */}
+      <Text style={[styles.marker, { color: changed ? semanticColor : theme.textGhost }]}>
+        {line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' '}
+      </Text>
+      {/* Wrapping, not sideways scrolling: this column fills the remaining
+          width, so a long line continues on the next row. */}
+      <Text selectable style={[styles.code, { color: theme.textSecondary }]}>
         {line.text || ' '}
       </Text>
     </View>
   );
 }
 
-function DiffRow({ line }: { line: DiffLine }) {
-  const theme = useTheme();
-  if (line.kind === 'hunk') {
-    return (
-      <Text style={[styles.line, styles.hunk, { color: theme.textTertiary }]}>{line.text}</Text>
-    );
-  }
-  const background = line.kind === 'add'
-    ? theme.successSoft
-    : line.kind === 'remove'
-      ? theme.dangerSoft
-      : 'transparent';
-  const color = line.kind === 'add'
-    ? theme.success
-    : line.kind === 'remove'
-      ? theme.danger
-      : theme.textSecondary;
-  const marker = line.kind === 'add' ? '+' : line.kind === 'remove' ? '−' : ' ';
-  return (
-    <View style={[styles.row, { backgroundColor: background }]}>
-      <Text style={[styles.marker, { color }]}>{marker}</Text>
-      <Text style={[styles.line, { color }]}>{line.text || ' '}</Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
-  well: {
-    borderRadius: Radius.small,
-    borderWidth: StyleSheet.hairlineWidth,
-    overflow: 'hidden',
-    paddingVertical: 6,
-  },
-  lines: { minWidth: '100%', paddingHorizontal: 8 },
-  row: { borderRadius: 3, flexDirection: 'row', paddingRight: 10 },
-  marker: { fontFamily: MonoFont, fontSize: 11, lineHeight: 16.5, width: 12 },
-  line: { fontFamily: MonoFont, fontSize: 11, lineHeight: 16.5 },
-  hunk: { fontFamily: MonoFont, fontSize: 10.5, lineHeight: 18, marginVertical: 2 },
-  truncated: { fontSize: 10.5, marginTop: 4 },
-  reviewLines: { minWidth: '100%', overflow: 'hidden' },
-  reviewRow: {
+  lines: { minWidth: '100%', overflow: 'hidden' },
+  row: {
     alignItems: 'stretch',
     borderLeftWidth: 2,
     flexDirection: 'row',
     minHeight: 20,
   },
-  reviewGutter: {
+  gutter: {
     alignItems: 'flex-end',
     borderRightWidth: StyleSheet.hairlineWidth,
     justifyContent: 'flex-start',
@@ -188,28 +121,30 @@ const styles = StyleSheet.create({
     paddingTop: 2,
     width: 42,
   },
-  reviewLineNumber: {
+  lineNumber: {
     fontFamily: MonoFont,
     fontSize: 10.5,
     lineHeight: 17,
   },
-  reviewCode: {
+  code: {
     flex: 1,
+    flexShrink: 1,
+    fontFamily: MonoFont,
+    fontSize: 11.5,
+    lineHeight: 17,
+    paddingHorizontal: 10,
+    paddingVertical: 2,
+  },
+  marker: {
     fontFamily: MonoFont,
     fontSize: 11,
     lineHeight: 17,
-    paddingHorizontal: 10,
-    paddingVertical: 2,
+    paddingTop: 2,
+    width: 14,
   },
-  reviewMeta: {
-    flex: 1,
-    fontFamily: MonoFont,
-    fontSize: 10.5,
-    lineHeight: 17,
-    paddingHorizontal: 10,
-    paddingVertical: 2,
-  },
-  reviewTruncated: {
+  metaRow: { justifyContent: 'center', minHeight: 22, paddingHorizontal: 10, paddingVertical: 2 },
+  meta: { fontFamily: MonoFont, fontSize: 10.5, lineHeight: 16, paddingHorizontal: 2 },
+  truncated: {
     borderTopWidth: StyleSheet.hairlineWidth,
     fontSize: 10.5,
     paddingHorizontal: 12,
