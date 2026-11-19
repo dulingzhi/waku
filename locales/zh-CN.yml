@@ -339,8 +339,6 @@ activity.searched_within_page: 已在网页内搜索
 activity.browsed_page: 已浏览 %{count} 个页面
 activity.browsed_pages: 已浏览 %{count} 个页面
 activity.browsed_web: 已浏览网页
-activity.exit_code: "退出码：%{code}"
-activity.output_with_exit_code: "%{output}\n\n退出码：%{code}"
 activity.run_command: 运行命令
 activity.running_named_command: 正在运行 %{command}
 activity.ran_named_command: 已运行 %{command}
@@ -920,6 +918,7 @@ common.copy_named: 复制%{name}
 transcript.worked: 已完成
 transcript.worked_for: 用时 %{duration}
 transcript.turn_failed: 这一轮没有完成
+transcript.exit_code: 退出码 %{code}
 transcript.turn_running: 进行中
 transcript.row_failed: 失败
 transcript.step_count: "%{count} 步"

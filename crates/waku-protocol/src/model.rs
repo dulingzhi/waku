@@ -2278,6 +2278,25 @@ pub struct ActivityItem {
     /// label without discarding the raw command used by detail views.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_description: Option<String>,
+    /// The command's own exit status, when the provider reported one.
+    ///
+    /// Separate from `output` because the two answer different questions: the
+    /// output says what happened, the code says whether it worked. A reader
+    /// scanning a run of rows needs the second at a glance, and it cannot be got
+    /// from the first without matching a translated sentence — which is what the
+    /// drivers used to require by folding the code into the output text.
+    ///
+    /// `None` for anything that is not a command, and for a command whose
+    /// provider did not report a status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// How many lines `output` holds, counted once when the activity was built.
+    ///
+    /// The preview needs this to say "… 192 earlier lines" without walking the
+    /// output on every frame. `None` when there is no output or the count was
+    /// never taken; a reader that needs the number falls back to counting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_line_count: Option<u64>,
     /// Native model reasoning carried by the same ordered activity stream as
     /// tool work. Generic provider `think` tools can still use the ordinary
     /// activity fields and leave this empty.
@@ -2311,6 +2330,8 @@ impl ActivityItem {
             file_changes: Vec::new(),
             display_target,
             display_description: None,
+            exit_code: None,
+            output_line_count: None,
             reasoning: None,
         }
     }
@@ -2367,6 +2388,16 @@ impl ActivityItem {
 
     pub fn with_image_urls(mut self, image_urls: Vec<String>) -> Self {
         self.image_urls = image_urls;
+        self
+    }
+
+    /// Record the command's exit status.
+    ///
+    /// Separate setter rather than another `tool_activity` parameter: only the
+    /// command-shaped drivers have one, and the others would pass `None` at
+    /// seventeen call sites to say nothing.
+    pub fn with_exit_code(mut self, exit_code: Option<i32>) -> Self {
+        self.exit_code = exit_code;
         self
     }
 
@@ -2461,6 +2492,20 @@ impl ActivityItem {
                 .take()
                 .and_then(normalize_command_activity_output);
         }
+        // Counted here rather than where a preview decides to render, so the
+        // number can never disagree with the text it describes: every path that
+        // replaces `output` goes through this function.
+        //
+        // Measured on the trimmed text because that is what a reader sees —
+        // `normalize_command_activity_output` trims for commands, but a tool
+        // result keeps its own whitespace, and counting raw lines would report
+        // a blank leading line as content.
+        self.output_line_count = self
+            .output
+            .as_deref()
+            .map(str::trim)
+            .filter(|output| !output.is_empty())
+            .map(|output| output.lines().count() as u64);
     }
 }
 
@@ -3568,6 +3613,75 @@ pub fn compact_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The line count is taken where the output is set, and it counts what a
+    /// reader would see.
+    ///
+    /// One place computes it: every path that replaces `output` goes through
+    /// `with_output`, so a preview never has to walk a long output on a frame to
+    /// learn how many lines it is holding back. Counting raw lines instead of
+    /// trimmed ones would report a blank leading line as content.
+    #[test]
+    fn a_command_activity_counts_its_output_lines_once() {
+        let activity = ActivityItem::new(None, ActivityKind::Command, "Ran npm test", None, true)
+            .with_output(Some(
+                (1..=200)
+                    .map(|line| format!("line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+        assert_eq!(activity.output_line_count, Some(200));
+
+        // Whitespace around the output is not content.
+        let padded = ActivityItem::new(None, ActivityKind::Command, "Ran true", None, true)
+            .with_output(Some("\n\n  first\nsecond\n\n".into()));
+        assert_eq!(padded.output_line_count, Some(2));
+
+        // No output at all: no count, so a preview knows there is nothing to say.
+        let empty = ActivityItem::new(None, ActivityKind::Command, "Ran true", None, true);
+        assert_eq!(empty.output_line_count, None);
+
+        // Blank output is the same as none: a command that printed spaces gets no
+        // output area, which is what the preview relies on.
+        let blank = ActivityItem::new(None, ActivityKind::Command, "Ran true", None, true)
+            .with_output(Some("   \n  ".into()));
+        assert_eq!(blank.output, None);
+        assert_eq!(blank.output_line_count, None);
+    }
+
+    /// An exit status arrives as a number, not as text folded into the output.
+    ///
+    /// The drivers used to append a translated "exit code N" sentence to the
+    /// output, which left a row unable to state its verdict without matching that
+    /// sentence. The field carries the number so the row can show it directly.
+    #[test]
+    fn an_activity_carries_its_exit_status_separately() {
+        let succeeded = ActivityItem::new(None, ActivityKind::Command, "Ran npm test", None, true)
+            .with_output(Some("ok".into()))
+            .with_exit_code(Some(0));
+        assert_eq!(succeeded.exit_code, Some(0));
+        assert_eq!(succeeded.output.as_deref(), Some("ok"));
+
+        let failed = ActivityItem::new(None, ActivityKind::Command, "Ran npm test", None, true)
+            .with_exit_code(Some(1));
+        assert_eq!(failed.exit_code, Some(1));
+
+        // Anything that is not a command has no status, and an older record that
+        // never carried one deserializes to none rather than to zero.
+        let tool = ActivityItem::new(None, ActivityKind::Tool, "Looked something up", None, true);
+        assert_eq!(tool.exit_code, None);
+        let legacy: ActivityItem = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(),
+            "kind": "command",
+            "title": "Ran npm test",
+            "detail": null,
+            "complete": true,
+            "failed": false,
+        }))
+        .expect("a record without the new fields must still load");
+        assert_eq!(legacy.exit_code, None);
+        assert_eq!(legacy.output_line_count, None);
+    }
 
     #[test]
     fn legacy_plan_access_mode_loads_as_supervised() {

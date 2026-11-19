@@ -1883,6 +1883,7 @@ fn handle_codex_message(
                     .with_activity_source(Some(item))
                     .with_output(output)
                     .with_image_urls(image_urls)
+                    .with_exit_code(codex_item_exit_code(item))
                     .with_failed(codex_item_failed(item));
                     let _ = events.send(DriverEvent::RichActivity(activity));
                 }
@@ -2323,18 +2324,15 @@ fn codex_item_output(item: &Value) -> Option<String> {
                 .get("aggregatedOutput")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let exit = item.get("exitCode").and_then(Value::as_i64);
-            let text = match (output.trim().is_empty(), exit) {
-                (false, Some(exit)) => tr!(
-                    "activity.output_with_exit_code",
-                    output = output.trim_end(),
-                    code = exit
-                ),
-                (false, None) => output.trim_end().to_owned(),
-                (true, Some(exit)) => tr!("activity.exit_code", code = exit),
-                (true, None) => return None,
-            };
-            non_empty_activity_text(text)
+            // The exit status is NOT folded into this text. It travels as
+            // `ActivityItem::exit_code`, which the row prints beside the label —
+            // and appending a translated sentence here instead would take two of
+            // a preview's eight lines to repeat what the row already says.
+            //
+            // A command that printed nothing therefore has no output, not an
+            // "Exit code: N" line standing in for one. The row still states the
+            // status.
+            non_empty_activity_text(output.trim_end().to_owned())
         }
         _ => None,
     }
@@ -2389,6 +2387,18 @@ fn codex_item_failed(item: &Value) -> bool {
             .get("exitCode")
             .and_then(Value::as_i64)
             .is_some_and(|code| code != 0)
+}
+
+/// The command's exit status as a number, for the row's own metric.
+///
+/// The same `exitCode` that `codex_item_output` folds into the output text, read
+/// separately so the row can state it without pattern-matching a translated
+/// sentence. Values outside `i32` are dropped rather than clamped: a status that
+/// large is not a status.
+fn codex_item_exit_code(item: &Value) -> Option<i32> {
+    item.get("exitCode")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok())
 }
 
 fn format_activity_json(value: &Value) -> Option<String> {
@@ -3524,6 +3534,69 @@ mod tests {
         );
     }
 
+    /// A finished command reaches the row with its status and line count already
+    /// on it.
+    ///
+    /// This drives the same path a real frame takes, so it covers the wiring and
+    /// not just the extraction helper: a future edit that drops the
+    /// `with_exit_code` call would leave the row unable to state its verdict, and
+    /// the helper test would still pass.
+    #[test]
+    fn a_finished_command_activity_carries_its_status_and_line_count() {
+        let thread_id = Mutex::new(Some("thread-1".to_owned()));
+        let turn_id = Mutex::new(Some("turn-9".to_owned()));
+        let turn_ids = Mutex::new(vec!["turn-9".to_owned()]);
+        let pending_rollbacks = Mutex::new(HashMap::new());
+        let pending_steers = Mutex::new(HashMap::new());
+        let background_rpcs = Mutex::new(BackgroundRpcState::default());
+        let goal_rpcs = Mutex::new(GoalRpcState::default());
+        let (goal_commands, _goal_command_rx) = unbounded();
+        let (event_tx, event_rx) = unbounded();
+        let mut stream_state = CodexStreamState::default();
+
+        handle_codex_message(
+            json!({
+                "method": "item/completed", "params": {
+                    "threadId": "thread-1", "turnId": "turn-9", "item": {
+                        "id": "cmd-1", "type": "commandExecution",
+                        "command": "npm test", "cwd": "/tmp/waku",
+                        "status": "completed", "exitCode": 1,
+                        "aggregatedOutput": "FAIL\nTests: 1 failed"
+                    }
+                }
+            }),
+            &thread_id,
+            &turn_id,
+            &turn_ids,
+            &pending_rollbacks,
+            &pending_steers,
+            &background_rpcs,
+            &goal_rpcs,
+            &goal_commands,
+            &event_tx,
+            &mut stream_state,
+        );
+
+        // A command also publishes background work, so the activity is not the
+        // first event on the channel.
+        let activity = loop {
+            match event_rx
+                .try_recv()
+                .expect("a command must publish an activity")
+            {
+                DriverEvent::RichActivity(activity) => break activity,
+                _ => continue,
+            }
+        };
+        assert_eq!(activity.exit_code, Some(1), "the status reaches the row");
+        assert_eq!(
+            activity.output_line_count,
+            Some(2),
+            "the line count is taken where the output is set"
+        );
+        assert!(activity.failed, "a non-zero status marks the row as failed");
+    }
+
     #[test]
     fn mcp_activity_keeps_native_server_and_tool_names() {
         let thread_id = Mutex::new(Some("thread-1".to_owned()));
@@ -3678,6 +3751,32 @@ mod tests {
             assert_eq!(activity.title, expected_title);
             assert_eq!(activity.display_target.as_deref(), Some(expected_target));
         }
+    }
+
+    /// The command's status travels as a number the row can print.
+    ///
+    /// The driver also folds a translated "exit code N" sentence into the output
+    /// text, which a row cannot read without matching a sentence. This extraction
+    /// is what lets the row state its verdict directly.
+    #[test]
+    fn a_command_execution_reports_its_exit_status_as_a_number() {
+        let with = |exit: Value| {
+            codex_item_exit_code(&json!({
+                "type": "commandExecution",
+                "aggregatedOutput": "boom",
+                "exitCode": exit,
+            }))
+        };
+
+        assert_eq!(with(json!(0)), Some(0), "success is a status, not absence");
+        assert_eq!(with(json!(1)), Some(1));
+        assert_eq!(with(json!(127)), Some(127));
+        // A provider that never reported one, and a value that is not a status at
+        // all, both become "no status" rather than a default of zero — a made-up
+        // success would be worse than showing nothing.
+        assert_eq!(with(Value::Null), None);
+        assert_eq!(with(json!("1")), None);
+        assert_eq!(with(json!(9_000_000_000_i64)), None);
     }
 
     #[test]

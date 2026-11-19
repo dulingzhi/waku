@@ -696,10 +696,6 @@ activity.browsed_pages:
   en: Browsed %{count} pages
 activity.browsed_web:
   en: Browsed the web
-activity.exit_code:
-  en: "Exit code: %{code}"
-activity.output_with_exit_code:
-  en: "%{output}\n\nExit code: %{code}"
 activity.run_command:
   en: Run command
 activity.running_named_command:
@@ -1891,6 +1887,8 @@ transcript.worked_for:
   en: Worked for %{duration}
 transcript.turn_failed:
   en: This turn failed
+transcript.exit_code:
+  en: exit %{code}
 transcript.turn_running:
   en: Running
 transcript.row_failed:

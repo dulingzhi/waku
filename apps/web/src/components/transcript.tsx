@@ -1592,6 +1592,20 @@ function ActivityRow({
               <span className="shrink-0 text-destructive">-{fileStats.deletions}</span>
             </>
           )}
+          {/* The status as a number, where the eye lands after the label. A
+              non-zero code is the row's whole verdict, so it takes the danger
+              colour; zero stays quiet rather than green, because a screen of
+              green zeros buries the one that failed. */}
+          {activity.exit_code != null && (
+            <span
+              className={cn(
+                'shrink-0 text-[11px] tabular-nums',
+                activity.exit_code === 0 ? 'text-[var(--text-tertiary)]' : 'text-destructive',
+              )}
+            >
+              {t('transcript.exit_code', { code: activity.exit_code })}
+            </span>
+          )}
           {failedRow && (
             <span className="shrink-0 text-[11px] text-destructive">{t('transcript.row_failed')}</span>
           )}

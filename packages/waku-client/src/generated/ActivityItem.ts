@@ -35,6 +35,27 @@ display_target?: string | null,
  */
 display_description?: string | null,
 /**
+ * The command's own exit status, when the provider reported one.
+ *
+ * Separate from `output` because the two answer different questions: the
+ * output says what happened, the code says whether it worked. A reader
+ * scanning a run of rows needs the second at a glance, and it cannot be got
+ * from the first without matching a translated sentence — which is what the
+ * drivers used to require by folding the code into the output text.
+ *
+ * `None` for anything that is not a command, and for a command whose
+ * provider did not report a status.
+ */
+exit_code?: number | null,
+/**
+ * How many lines `output` holds, counted once when the activity was built.
+ *
+ * The preview needs this to say "… 192 earlier lines" without walking the
+ * output on every frame. `None` when there is no output or the count was
+ * never taken; a reader that needs the number falls back to counting.
+ */
+output_line_count?: number | null,
+/**
  * Native model reasoning carried by the same ordered activity stream as
  * tool work. Generic provider `think` tools can still use the ordinary
  * activity fields and leave this empty.

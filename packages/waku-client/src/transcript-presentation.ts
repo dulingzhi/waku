@@ -392,15 +392,23 @@ export interface ActivityPayloadPreview {
 export function activityPayloadPreview(activity: ActivityItem): ActivityPayloadPreview | null {
   const output = activity.output?.trim()
   if (!output) return null
-  const lines = output.split('\n')
+  // The count is taken once when the activity is built, so a preview does not
+  // walk a 16k-character output on every frame just to learn how many lines it
+  // is not showing. Falling back to counting keeps this correct for a record
+  // that predates the field.
+  const totalLines = activity.output_line_count ?? output.split('\n').length
   if (activity.kind === 'command') {
-    const start = Math.max(0, lines.length - ACTIVITY_PAYLOAD_PREVIEW_LINES)
-    return { text: lines.slice(start).join('\n'), hiddenLines: start, fromTail: true }
+    const start = Math.max(0, totalLines - ACTIVITY_PAYLOAD_PREVIEW_LINES)
+    return {
+      text: output.split('\n').slice(start).join('\n'),
+      hiddenLines: start,
+      fromTail: true,
+    }
   }
-  const shown = lines.slice(0, ACTIVITY_PAYLOAD_PREVIEW_LINES)
+  const shown = output.split('\n').slice(0, ACTIVITY_PAYLOAD_PREVIEW_LINES)
   return {
     text: shown.join('\n'),
-    hiddenLines: lines.length - shown.length,
+    hiddenLines: Math.max(0, totalLines - shown.length),
     fromTail: false,
   }
 }

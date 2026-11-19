@@ -91,6 +91,19 @@ export const ActivityGroup = memo(function ActivityGroup({
                   {t('transcript.row_failed')}
                 </Text>
               )}
+              {/* The status as a number. A non-zero code is the row's whole
+                  verdict, so it takes the danger colour; zero stays quiet
+                  rather than green, because a screen of green zeros buries the
+                  one that failed. */}
+              {activity.exit_code != null && (
+                <Text
+                  style={[
+                    styles.exitCode,
+                    { color: activity.exit_code === 0 ? theme.textTertiary : theme.danger },
+                  ]}>
+                  {t('transcript.exit_code', { code: activity.exit_code })}
+                </Text>
+              )}
               {!activity.complete && !failed && (
                 <View style={[styles.liveDot, { backgroundColor: theme.accent }]} />
               )}
@@ -132,6 +145,7 @@ const styles = StyleSheet.create({
   action: { flexShrink: 0, fontSize: 12.5, fontWeight: '600' },
   detail: { flexShrink: 1, fontSize: 12.5 },
   failed: { flexShrink: 0, fontSize: 11.5 },
+  exitCode: { flexShrink: 0, fontSize: 11, fontVariant: ['tabular-nums'] },
   liveDot: { borderRadius: 3, height: 6, width: 6 },
   preview: {
     borderRadius: 6,

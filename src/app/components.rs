@@ -1566,37 +1566,37 @@ pub(super) const ACTIVITY_PAYLOAD_PREVIEW_LINES: usize = 8;
 /// `None` too — a command that printed nothing is not the same as one that
 /// printed blank lines, and rendering an empty box for it would say otherwise.
 pub(super) fn activity_payload_preview(activity: &ActivityItem) -> Option<ActivityPayloadPreview> {
-    if !matches!(activity.kind, ActivityKind::Command) {
-        // A tool's output is often the answer (a grep's hits, a test report).
-        // For anything that is not a shell run, the head is the informative
-        // part; the tail of an arbitrary tool response is usually noise.
-        let output = activity.output.as_deref().map(str::trim)?;
-        if output.is_empty() {
-            return None;
-        }
-        let lines = output.lines().collect::<Vec<_>>();
-        let shown = lines
-            .iter()
-            .take(ACTIVITY_PAYLOAD_PREVIEW_LINES)
-            .collect::<Vec<_>>();
-        return Some(ActivityPayloadPreview {
-            text: shown
-                .iter()
-                .map(|line| line.to_string())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            hidden_lines: lines.len().saturating_sub(shown.len()),
-            from_tail: false,
-        });
-    }
+    // The count is taken once when the activity is built, so a preview does not
+    // have to walk a 16k-character output on every frame just to learn how many
+    // lines it is not showing. Falling back to counting keeps this correct for
+    // an activity that predates the field.
+    let total_lines = |output: &str| {
+        activity
+            .output_line_count
+            .map(|count| count as usize)
+            .unwrap_or_else(|| output.lines().count())
+    };
     let output = activity.output.as_deref().map(str::trim)?;
     if output.is_empty() {
         return None;
     }
-    let lines = output.lines().collect::<Vec<_>>();
-    let start = lines.len().saturating_sub(ACTIVITY_PAYLOAD_PREVIEW_LINES);
+    if !matches!(activity.kind, ActivityKind::Command) {
+        // A tool's output is often the answer (a grep's hits, a test report).
+        // For anything that is not a shell run, the head is the informative
+        // part; the tail of an arbitrary tool response is usually noise.
+        let shown = output
+            .lines()
+            .take(ACTIVITY_PAYLOAD_PREVIEW_LINES)
+            .collect::<Vec<_>>();
+        return Some(ActivityPayloadPreview {
+            text: shown.join("\n"),
+            hidden_lines: total_lines(output).saturating_sub(shown.len()),
+            from_tail: false,
+        });
+    }
+    let start = total_lines(output).saturating_sub(ACTIVITY_PAYLOAD_PREVIEW_LINES);
     Some(ActivityPayloadPreview {
-        text: lines[start..].join("\n"),
+        text: output.lines().skip(start).collect::<Vec<_>>().join("\n"),
         hidden_lines: start,
         from_tail: true,
     })

@@ -2275,6 +2275,28 @@ impl Waku {
                             )
                         })
                         .children(background_badge)
+                        .when_some(activity.exit_code, |row, code| {
+                            // The status as a number, right where the eye lands
+                            // after the label. A non-zero code is the row's whole
+                            // verdict, so it carries the danger colour; zero is
+                            // stated in the quiet tone rather than in green,
+                            // because a screen of green zeros buries the one row
+                            // that failed.
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(sp(12.0))
+                                    .line_height(sp(14.0))
+                                    .text_color(if code == 0 {
+                                        theme.text_tertiary
+                                    } else {
+                                        theme.danger
+                                    })
+                                    .child(SharedString::from(
+                                        tr!("transcript.exit_code", code = code).to_string(),
+                                    )),
+                            )
+                        })
                         .children(open_file_button)
                         // State, stated once per row: a failure says so with a
                         // word and a mark, a running row pulses, a settled one

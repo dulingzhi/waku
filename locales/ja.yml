@@ -357,8 +357,6 @@ activity.searched_within_page: ウェブページ内を検索しました
 activity.browsed_page: "%{count} ページを閲覧しました"
 activity.browsed_pages: "%{count} ページを閲覧しました"
 activity.browsed_web: ウェブを閲覧しました
-activity.exit_code: "終了コード：%{code}"
-activity.output_with_exit_code: "%{output}\n\n終了コード：%{code}"
 activity.run_command: コマンドを実行
 activity.running_named_command: "%{command} を実行中"
 activity.ran_named_command: "%{command} を実行しました"
@@ -969,6 +967,7 @@ common.copy_named: "%{name} をコピー"
 transcript.worked: 完了
 transcript.worked_for: 作業時間 %{duration}
 transcript.turn_failed: このターンは完了しませんでした
+transcript.exit_code: 終了コード %{code}
 transcript.turn_running: 実行中
 transcript.row_failed: 失敗
 transcript.step_count: "%{count} ステップ"

@@ -1632,6 +1632,48 @@ fn a_turns_footer_counts_its_steps_and_files() {
     assert!(turn_worked_seconds(&session.turns[0]) >= 1);
 }
 
+/// The preview trusts the count the activity recorded instead of walking its
+/// output on every frame.
+///
+/// One place computes it — `with_output` — so the renderer must not recompute it
+/// and must not disagree with it. This pins the contract between the two sides:
+/// a 200-line command reports 192 hidden lines whether the number came from the
+/// stored field or from counting, and the two must be the same number.
+#[test]
+fn a_preview_uses_the_line_count_the_activity_recorded() {
+    let output = (1..=200)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let activity = ActivityItem::new(None, ActivityKind::Command, "Ran npm test", None, true)
+        .with_output(Some(output));
+    assert_eq!(
+        activity.output_line_count,
+        Some(200),
+        "the activity records its own line count"
+    );
+
+    let preview = activity_payload_preview(&activity).expect("a preview");
+    assert_eq!(
+        preview.hidden_lines,
+        200 - ACTIVITY_PAYLOAD_PREVIEW_LINES,
+        "the preview reports the same number the activity stored"
+    );
+
+    // An activity that predates the field still previews correctly: the renderer
+    // falls back to counting rather than showing nothing.
+    let mut legacy = ActivityItem::new(None, ActivityKind::Command, "Ran npm test", None, true);
+    legacy.output = Some(
+        (1..=200)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    assert_eq!(legacy.output_line_count, None, "the count was never taken");
+    let preview = activity_payload_preview(&legacy).expect("a preview");
+    assert_eq!(preview.hidden_lines, 200 - ACTIVITY_PAYLOAD_PREVIEW_LINES);
+}
+
 /// A command's verdict is the end of its output, so that is what a preview
 /// shows — and it counts the lines it is holding back rather than pretending
 /// the tail is all there is.

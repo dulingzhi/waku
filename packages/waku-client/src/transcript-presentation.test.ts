@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { AgentTurn } from './generated';
-import { turnFailureReason, turnSummaryLabel } from './transcript-presentation';
+import type { AgentTurn, ActivityItem } from './generated';
+import {
+  ACTIVITY_PAYLOAD_PREVIEW_LINES,
+  activityPayloadPreview,
+  turnFailureReason,
+  turnSummaryLabel,
+} from './transcript-presentation';
 
 /**
  * A turn's failure reason is the sentence under its heading.
@@ -67,4 +72,82 @@ describe('turnFailureReason', () => {
     expect(turnSummaryLabel(failed)).toBe('This turn failed');
     expect(turnSummaryLabel(failed)).not.toContain('a long explanation');
   });
+});
+
+function command(overrides: Partial<ActivityItem> = {}): ActivityItem {
+  return {
+    id: 'activity-1',
+    source_id: null,
+    kind: 'command',
+    title: 'Ran npm test',
+    tool_name: null,
+    mcp_server: null,
+    detail: null,
+    arguments: null,
+    output: null,
+    image_urls: [],
+    failed: false,
+    complete: true,
+    file_changes: [],
+    display_target: 'npm test',
+    display_description: null,
+    reasoning: null,
+    ...overrides,
+  } as ActivityItem
+}
+
+describe('activityPayloadPreview', () => {
+  test('uses the line count the activity recorded', () => {
+    // The count is taken once when the activity is built, so the preview must
+    // not disagree with it: a renderer that recomputed would be walking a
+    // 16k-character output on every frame.
+    const output = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`).join('\n')
+    const preview = activityPayloadPreview(command({ output, output_line_count: 200 }))
+
+    expect(preview?.fromTail).toBe(true)
+    expect(preview?.hiddenLines).toBe(200 - ACTIVITY_PAYLOAD_PREVIEW_LINES)
+    expect(preview?.text.endsWith('line 200')).toBe(true)
+    expect(preview?.text.split('\n').length).toBe(ACTIVITY_PAYLOAD_PREVIEW_LINES)
+  })
+
+  test('falls back to counting for a record that predates the field', () => {
+    const output = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join('\n')
+    const preview = activityPayloadPreview(command({ output }))
+
+    expect(preview?.hiddenLines).toBe(20 - ACTIVITY_PAYLOAD_PREVIEW_LINES)
+  })
+
+  test('a non-command preview takes the head and counts the rest', () => {
+    const output = Array.from({ length: 20 }, (_, index) => `hit ${index + 1}`).join('\n')
+    const preview = activityPayloadPreview(
+      command({ kind: 'search', output, output_line_count: 20 }),
+    )
+
+    expect(preview?.fromTail).toBe(false)
+    expect(preview?.text.startsWith('hit 1')).toBe(true)
+    expect(preview?.hiddenLines).toBe(20 - ACTIVITY_PAYLOAD_PREVIEW_LINES)
+  })
+
+  test('blank output gets no preview at all', () => {
+    // A command that printed nothing is not the same as one that printed blank
+    // lines, and an empty box would say otherwise.
+    expect(activityPayloadPreview(command({ output: '   \n  ' }))).toBeNull()
+    expect(activityPayloadPreview(command({ output: null }))).toBeNull()
+  })
+})
+
+describe('activity exit status', () => {
+  test('arrives as a number, not as text inside the output', () => {
+    // The drivers used to append a translated "exit code N" sentence to the
+    // output, which left a row unable to state its verdict without matching
+    // that sentence.
+    const failed = command({ output: 'boom', exit_code: 1 })
+    expect(failed.exit_code).toBe(1)
+    expect(failed.output).toBe('boom')
+
+    expect(command({ exit_code: 0 }).exit_code).toBe(0)
+    // Absent from the wire entirely when there is no status: the serializer
+    // omits the key rather than writing null.
+    expect(command().exit_code).toBeUndefined()
+  })
 });
