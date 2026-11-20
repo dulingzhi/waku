@@ -473,7 +473,7 @@ pub fn titlebar_double_click(window: &Window) {
 /// view above active Sidebar vibrancy; GPUI paints clear sidebar chrome and one
 /// translucent interaction layer above it.
 #[cfg(target_os = "macos")]
-pub fn configure_sidebar_material(window: &Window, dark: bool) {
+pub fn configure_sidebar_material(window: &Window, theme: &crate::theme::Theme) {
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSColor, NSView, NSVisualEffectBlendingMode,
@@ -498,7 +498,7 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
         let Some(native_window) = view.window() else {
             return;
         };
-        let background = if dark {
+        let background = if theme.is_dark {
             NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, 0.25)
         } else {
             NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.0)
@@ -523,8 +523,19 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
             return;
         }
 
-        let channel = if dark { 0x18 } else { 0xF3 } as f64 / 255.0;
-        let tint = NSColor::colorWithSRGBRed_green_blue_alpha(channel, channel, channel, 0.92);
+        // The tint is the palette's own sidebar color, not a fixed grey: a
+        // theme with a hue used to get a neutral sidebar here no matter what
+        // `Theme::sidebar` said, so the glass edge disagreed with the rows
+        // drawn on top of it.
+        //
+        // `sidebar` itself is clear on macOS by design — GPUI leaves the
+        // vibrancy visible and this native layer supplies the tint — so the
+        // opaque companion (`sidebar_drag_background`, the same color a drag
+        // preview paints) is what gets tinted here.
+        let tint = theme.sidebar_drag_background;
+        // Vibrancy shows through the sidebar; keep it a wash rather than a
+        // flat fill so the material still reads as material.
+        let tint = tint.opacity(0.92);
 
         SIDEBAR_TINT_VIEW.with_borrow_mut(|slot| {
             let needs_new_view = slot.as_ref().is_none_or(|tint_view| {
@@ -548,14 +559,21 @@ pub fn configure_sidebar_material(window: &Window, dark: bool) {
             }
 
             if let Some(layer) = slot.as_ref().and_then(|tint_view| tint_view.layer()) {
-                layer.setBackgroundColor(Some(&tint.CGColor()));
+                let rgb = tint.to_rgb();
+                let color = NSColor::colorWithSRGBRed_green_blue_alpha(
+                    rgb.r as f64,
+                    rgb.g as f64,
+                    rgb.b as f64,
+                    rgb.a as f64,
+                );
+                layer.setBackgroundColor(Some(&color.CGColor()));
             }
         });
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn configure_sidebar_material(_: &Window, _: bool) {}
+pub fn configure_sidebar_material(_: &Window, _: &crate::theme::Theme) {}
 
 #[cfg(target_os = "macos")]
 pub fn set_sidebar_material_width(window: &Window, width: f32) {

@@ -1395,31 +1395,63 @@ impl Waku {
 
     fn render_appearance_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::current(cx);
-        let selected_theme = self.state.theme;
+        let selected_mode = self.state.color_mode;
+        let selected_palette = self.state.palette.clone();
         let selected_language = self.state.language;
         let weak = cx.entity().downgrade();
-        let theme_handle = self.menu_handle("theme-selector", cx);
-        let theme_selector = dropdown_menu(
-            MenuChip::new("theme-selector")
-                .label(selected_theme.label())
+        let mode_handle = self.menu_handle("color-mode-selector", cx);
+        let mode_selector = dropdown_menu(
+            MenuChip::new("color-mode-selector")
+                .label(selected_mode.label())
                 .outlined()
-                .selected(theme_handle.is_open())
+                .selected(mode_handle.is_open())
                 .w(px(116.0))
                 .justify_between(),
-            "theme-selector-menu",
-            &theme_handle,
+            "color-mode-selector-menu",
+            &mode_handle,
             MenuAlign::BelowRight,
             move |_| {
-                ThemePreference::ALL
+                ColorMode::ALL
                     .into_iter()
-                    .map(|preference| {
+                    .map(|mode| {
                         let weak = weak.clone();
-                        MenuItem::new(preference.label(), move |window, cx| {
+                        MenuItem::new(mode.label(), move |window, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                this.set_theme_preference(preference, window, cx);
+                                this.set_color_mode(mode, window, cx);
                             });
                         })
-                        .selected(preference == selected_theme)
+                        .selected(mode == selected_mode)
+                    })
+                    .collect()
+            },
+        );
+
+        let weak = cx.entity().downgrade();
+        let palette_handle = self.menu_handle("palette-selector", cx);
+        let palette_selector = dropdown_menu(
+            MenuChip::new("palette-selector")
+                .label(crate::theme::palette::label(selected_palette.as_str()))
+                .outlined()
+                .selected(palette_handle.is_open())
+                .w(px(116.0))
+                .justify_between(),
+            "palette-selector-menu",
+            &palette_handle,
+            MenuAlign::BelowRight,
+            move |_| {
+                crate::theme::KNOWN_PALETTES
+                    .into_iter()
+                    .map(|id| {
+                        let weak = weak.clone();
+                        let palette = PaletteId::new(id);
+                        let selected = palette == selected_palette;
+                        MenuItem::new(crate::theme::palette::label(id), move |window, cx| {
+                            let palette = palette.clone();
+                            let _ = weak.update(cx, |this, cx| {
+                                this.set_palette(palette, window, cx);
+                            });
+                        })
+                        .selected(selected)
                     })
                     .collect()
             },
@@ -1537,7 +1569,7 @@ impl Waku {
                                     .text_size(sp(13.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child(tr!("settings.theme")),
+                                    .child(tr!("settings.color_mode")),
                             )
                             .child(
                                 div()
@@ -1545,10 +1577,42 @@ impl Waku {
                                     .text_size(sp(12.5))
                                     .line_height(sp(18.0))
                                     .text_color(theme.text_secondary)
-                                    .child(tr!("settings.theme_description")),
+                                    .child(tr!("settings.color_mode_description")),
                             ),
                     )
-                    .child(theme_selector),
+                    .child(mode_selector),
+            )
+            .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .px(px(20.0))
+                    .py(px(12.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(24.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(sp(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("settings.palette")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(5.0))
+                                    .text_size(sp(12.5))
+                                    .line_height(sp(18.0))
+                                    .text_color(theme.text_secondary)
+                                    .child(tr!("settings.palette_description")),
+                            ),
+                    )
+                    .child(palette_selector),
             )
             .child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border))
             .child(
@@ -2541,17 +2605,22 @@ impl Waku {
             }))
     }
 
-    fn set_theme_preference(
-        &mut self,
-        preference: ThemePreference,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.state.theme == preference {
+    fn set_color_mode(&mut self, mode: ColorMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.color_mode == mode {
             return;
         }
-        self.state.theme = preference;
-        crate::theme::apply_theme_preference(preference, window, cx);
+        self.state.color_mode = mode;
+        crate::theme::apply_appearance(mode, &self.state.palette, window, cx);
+        self.save();
+        cx.notify();
+    }
+
+    fn set_palette(&mut self, palette: PaletteId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.state.palette == palette {
+            return;
+        }
+        self.state.palette = palette;
+        crate::theme::apply_appearance(self.state.color_mode, &self.state.palette, window, cx);
         self.save();
         cx.notify();
     }

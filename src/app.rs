@@ -59,7 +59,7 @@ use crate::persistence::{
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
 use crate::terminal::TerminalView;
-use crate::theme::{Theme, ThemePreference, sp};
+use crate::theme::{ColorMode, PaletteId, Theme, sp};
 use crate::ui::text_field::TextField;
 use crate::ui::{
     MenuChip, ProjectNameSelector, UiAction, activity_icon, activity_noun, contain_scroll,
@@ -2117,7 +2117,7 @@ impl Waku {
                 window.display(cx).and_then(|display| display.uuid().ok()),
             ));
         }
-        crate::theme::apply_theme_preference(state.theme, window, cx);
+        crate::theme::apply_appearance(state.color_mode, &state.palette, window, cx);
         crate::platform::set_sidebar_material_width(window, sidebar_width);
         let project_paths = state
             .projects
@@ -2376,8 +2376,13 @@ impl Waku {
             }
 
             cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
-                if this.state.theme == ThemePreference::System {
-                    crate::theme::apply_theme_preference(this.state.theme, window, cx);
+                if this.state.color_mode == ColorMode::System {
+                    crate::theme::apply_appearance(
+                        this.state.color_mode,
+                        &this.state.palette,
+                        window,
+                        cx,
+                    );
                     cx.notify();
                 }
             })

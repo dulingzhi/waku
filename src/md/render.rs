@@ -2234,7 +2234,9 @@ mod tests {
     fn a_style_change_drops_cached_flats() {
         let view = MarkdownView::new();
         let dark = Palette::from_theme(&Theme::dark());
-        let light = Palette::from_theme(&Theme::light());
+        // Any palette other than `dark` would prove the point; graphite's light
+        // form is the one that exists without inventing a fixture.
+        let light = Palette::from_theme(&crate::theme::palette::graphite(false));
 
         view.sync_style(&dark, &Metrics::BODY);
         let cached = view.flat(0, || {
