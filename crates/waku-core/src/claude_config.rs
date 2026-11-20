@@ -84,8 +84,15 @@ pub fn list_mcp_servers(override_spec: Option<&str>, cwd: Option<&Path>) -> McpC
     };
 
     let mut servers = parse_mcp_list(&stdout);
-    for server in &mut servers {
-        if let Some((scope, _, _)) = describe_mcp_server(override_spec, cwd, &server.name) {
+    // The `get` pass resolves each entry's scope. It used to run one process at
+    // a time, which measured ~9.9s for eight servers — the single biggest cost
+    // on the page, larger than the health-checking `list` it follows. The
+    // processes are independent, so they run concurrently; the same eight took
+    // ~3.6s that way. Results are collected by index, not by completion order,
+    // so a slow server cannot shuffle the list under the cursor.
+    let scopes = describe_mcp_scopes(&binary, cwd, &servers);
+    for (server, scope) in servers.iter_mut().zip(scopes) {
+        if let Some(scope) = scope {
             server.scope = scope;
         }
     }
@@ -93,6 +100,43 @@ pub fn list_mcp_servers(override_spec: Option<&str>, cwd: Option<&Path>) -> McpC
         servers,
         unavailable: None,
     }
+}
+
+/// Resolve every server's scope concurrently, keeping the input order.
+///
+/// A bounded number of workers rather than one thread per server: these are
+/// child processes, and a machine with dozens of configured servers should not
+/// fork all of them at once.
+fn describe_mcp_scopes(
+    binary: &Path,
+    cwd: Option<&Path>,
+    servers: &[McpServerEntry],
+) -> Vec<Option<McpScope>> {
+    const WORKERS: usize = 8;
+    let workers = WORKERS.min(servers.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(vec![None; servers.len()]);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(server) = servers.get(index) else {
+                        break;
+                    };
+                    let Some(stdout) = run_claude(binary, &["mcp", "get", &server.name], cwd).ok()
+                    else {
+                        continue;
+                    };
+                    let (resolved, _, _) = parse_mcp_get(&stdout);
+                    if let Ok(mut results) = results.lock() {
+                        results[index] = Some(resolved);
+                    }
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap_or_default()
 }
 
 /// One line per server: `name: target (transport) - status`.
@@ -974,5 +1018,110 @@ plugin:ida-pro-mcp:idalib:
         assert_eq!(none.name, "p");
         assert!(!none.can_update);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The concurrent scope pass must put each answer on the server it belongs
+    /// to, even when the servers finish in the opposite order.
+    ///
+    /// Workers take arbitrary indices, so filing by completion order would hand
+    /// every row some other row's scope — and the scope is what decides which
+    /// `--scope` a remove uses. A mis-filed `user` where a `project` belonged
+    /// would delete from the wrong config.
+    ///
+    /// The stub makes the *first* server the slow one and every later one fast,
+    /// so completion order is the reverse of input order and a shifted result
+    /// cannot pass by luck. The stub is a `.cmd` on Windows and a shell script
+    /// elsewhere, so the test runs on both.
+    #[test]
+    fn concurrent_scopes_stay_filed_against_their_own_server() {
+        let dir = std::env::temp_dir().join("waku-scope-filing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        #[cfg(windows)]
+        let script = {
+            // `%1`=mcp `%2`=get `%3`=name. `ping` is the portable Windows sleep:
+            // it waits about a second without needing another binary.
+            let script = dir.join("fake-claude.cmd");
+            let body = "\
+@echo off\n\
+if \"%3\"==\"server-0\" (ping -n 2 127.0.0.1 >nul & echo Scope: Project config & exit /b 0)\n\
+if \"%3\"==\"server-1\" (echo Scope: Local config & exit /b 0)\n\
+if \"%3\"==\"server-2\" (echo Scope: Dynamic config & exit /b 0)\n\
+if \"%3\"==\"server-3\" (echo Scope: User config & exit /b 0)\n\
+exit /b 0\n";
+            std::fs::write(&script, body).unwrap();
+            script
+        };
+
+        #[cfg(unix)]
+        let script = {
+            use std::io::Write as _;
+            let script = dir.join("fake-claude");
+            let mut file = std::fs::File::create(&script).unwrap();
+            write!(
+                file,
+                "#!/bin/sh\n\
+                 case \"$3\" in\n\
+                 server-0) sleep 1; echo 'Scope: Project config' ;;\n\
+                 server-1) echo 'Scope: Local config' ;;\n\
+                 server-2) echo 'Scope: Dynamic config' ;;\n\
+                 server-3) echo 'Scope: User config' ;;\n\
+                 esac\n"
+            )
+            .unwrap();
+            drop(file);
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            script
+        };
+
+        let servers: Vec<McpServerEntry> = (0..4)
+            .map(|index| McpServerEntry {
+                name: format!("server-{index}"),
+                scope: McpScope::User,
+                transport: McpTransport::Stdio,
+                target: "cmd".into(),
+                args: Vec::new(),
+                pending_approval: false,
+                health: None,
+                detail: None,
+            })
+            .collect();
+        let results = describe_mcp_scopes(&script, None, &servers);
+        assert_eq!(
+            results,
+            vec![
+                Some(McpScope::Project),
+                Some(McpScope::Local),
+                Some(McpScope::Plugin),
+                Some(McpScope::User),
+            ],
+            "server-0 answers last, so filing by completion order swaps these"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A probe that cannot run must leave its own slot empty.
+    #[test]
+    fn a_failed_scope_probe_leaves_its_slot_empty() {
+        let servers: Vec<McpServerEntry> = (0..3)
+            .map(|index| McpServerEntry {
+                name: format!("server-{index}"),
+                scope: McpScope::User,
+                transport: McpTransport::Stdio,
+                target: "cmd".into(),
+                args: Vec::new(),
+                pending_approval: false,
+                health: None,
+                detail: None,
+            })
+            .collect();
+        let results =
+            describe_mcp_scopes(Path::new("definitely-not-a-real-binary"), None, &servers);
+        assert_eq!(results.len(), servers.len());
+        assert!(
+            results.iter().all(Option::is_none),
+            "a failed probe must leave its own slot empty"
+        );
     }
 }
