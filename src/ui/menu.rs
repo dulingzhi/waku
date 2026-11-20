@@ -42,7 +42,8 @@ actions!(
         SelectPreviousEntry,
         SelectNextTab,
         SelectPreviousTab,
-        ConfirmEntry
+        ConfirmEntry,
+        PromptHistoryPrevious,
     ]
 );
 
@@ -61,6 +62,15 @@ const TRIGGER_GAP: f32 = 4.0;
 /// consumes the keystroke before any `on_key_down` listener above it ever runs.
 const PANEL_FIELD_CONTEXT: &str = "WakuMenu > TextInput";
 
+/// The composer field while prompt history may claim its arrows.
+///
+/// Declared by the composer card only when the caret is on the field's first
+/// row, so `up` recalls instead of moving the caret there. Down is deliberately
+/// *not* bound here: leaving history has to work from any row, and the field
+/// only knows at the moment the key is pressed, so the composer handles Down
+/// through its own key listener.
+pub const PROMPT_HISTORY_CONTEXT: &str = "ComposerPromptHistory > TextInput";
+
 /// Bind the menu's own keys. Called once at startup.
 ///
 /// Must run after [`crate::input::init`]: these share a context depth with the
@@ -75,6 +85,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("tab", SelectNextTab, Some(PANEL_FIELD_CONTEXT)),
         KeyBinding::new("shift-tab", SelectPreviousTab, Some(PANEL_FIELD_CONTEXT)),
         KeyBinding::new("enter", ConfirmEntry, Some(PANEL_FIELD_CONTEXT)),
+        // Prompt history. `up` here beats the field's caret move because this
+        // binding is registered after `crate::input::init` and the context is
+        // deeper, which is the same tie-break the picker's arrows rely on.
+        KeyBinding::new("up", PromptHistoryPrevious, Some(PROMPT_HISTORY_CONTEXT)),
+        KeyBinding::new(
+            "ctrl-p",
+            PromptHistoryPrevious,
+            Some(PROMPT_HISTORY_CONTEXT),
+        ),
     ]);
 }
 

@@ -1044,6 +1044,34 @@ impl TextInput {
         Some((position, layout.line_height()))
     }
 
+    /// Whether the caret sits on the field's first rendered row.
+    ///
+    /// Prompt history uses this to decide what Up means: on the first row
+    /// there is no row above to move to, so Up is free to recall history;
+    /// anywhere else it must keep moving the caret, or a multi-line prompt
+    /// could never be edited on its earlier lines.
+    ///
+    /// A field that has not painted yet has no geometry to consult, and
+    /// reporting `false` keeps the arrow with the field rather than silently
+    /// swapping its meaning during the first frame.
+    pub fn caret_on_first_row(&self) -> bool {
+        let Some(layout) = self
+            .last_layout
+            .as_ref()
+            .filter(|layout| layout.len() == self.content.len())
+        else {
+            return false;
+        };
+        if self.mode == FieldMode::SingleLine {
+            return true;
+        }
+        let Some(position) = layout.position_for_index(self.cursor_offset()) else {
+            return false;
+        };
+        let bounds = layout.bounds();
+        let row = ((position.y - bounds.top()) / layout.line_height()) as usize;
+        row == 0
+    }
     /// Height of each logical line as laid out, so a gutter can put one number
     /// per line even when soft wrap gives a line several visual rows.
     ///
@@ -3007,6 +3035,12 @@ impl ComposerInput {
 
     pub fn content<'a>(&self, cx: &'a App) -> &'a str {
         self.input.read(cx).content()
+    }
+
+    /// Whether the caret sits on the field's first rendered row — the condition
+    /// prompt history uses to decide that Up is free to recall.
+    pub fn caret_on_first_row(&self, cx: &App) -> bool {
+        self.input.read(cx).caret_on_first_row()
     }
 
     /// Caret byte offset, for the autocomplete's trigger detection.

@@ -45,8 +45,9 @@ use crate::md::render::{
     TranscriptSelection,
 };
 use crate::ui::menu::{
-    ConfirmEntry, ContextMenuHandle, DismissMenu, MenuAlign, MenuItem, SelectNextEntry,
-    SelectNextTab, SelectPreviousEntry, SelectPreviousTab, context_menu, dropdown_menu, popover,
+    ConfirmEntry, ContextMenuHandle, DismissMenu, MenuAlign, MenuItem, PromptHistoryPrevious,
+    SelectNextEntry, SelectNextTab, SelectPreviousEntry, SelectPreviousTab, context_menu,
+    dropdown_menu, popover,
 };
 use crate::ui::scrollbar::{self, ScrollbarState};
 use crate::ui::tooltip::Tooltip;
@@ -56,6 +57,7 @@ use crate::persistence::{
     ComposerDraftStore, ComposerDrafts, DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH,
     PersistedState, PersistedWindowState, SidebarGrouping, SidebarOrdering, StateStore,
 };
+
 use crate::query::{Query, QueryCache};
 use crate::review_diff::{Snapshot as ReviewDiffSnapshot, Source as ReviewDiffSource};
 use crate::terminal::TerminalView;
@@ -74,6 +76,7 @@ use crate::{
     ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord, ToggleFpsCounter,
     ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
 };
+pub(crate) use prompt_history::PromptHistoryWalk;
 
 #[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
@@ -1360,6 +1363,12 @@ pub struct Waku {
     sidebar_group_compose_focuses: RefCell<HashMap<SidebarGroup, FocusHandle>>,
     /// Stable keyboard focus for each virtualized project-history reveal row.
     sidebar_show_more_focuses: RefCell<HashMap<SidebarGroup, FocusHandle>>,
+    /// Where an Up/Down walk through the selected project's submitted prompts
+    /// has got to, plus whatever was being written when it started.
+    prompt_history_walk: PromptHistoryWalk,
+    /// Set while a recall is writing the field, so the edit it causes is not
+    /// mistaken for the user typing and does not end the walk.
+    prompt_history_edit_from_recall: bool,
     sidebar_visible: bool,
     sidebar_width: f32,
     right_panel_visible: bool,
@@ -1659,6 +1668,7 @@ mod file_search;
 mod goal_dialog;
 mod image_preview;
 mod project_picker;
+mod prompt_history;
 mod render;
 mod right_panel;
 mod runtime;
@@ -2475,6 +2485,16 @@ impl Waku {
                         }
                     }
                     ComposerEvent::Edited => {
+                        // Typing after a recall ends the walk, because the text
+                        // is the user's own again — but the recall itself also
+                        // arrives here as an edit, and clearing on it would end
+                        // the walk the moment it started. The flag is one-shot
+                        // and consumed by exactly the next edit.
+                        if this.prompt_history_edit_from_recall {
+                            this.prompt_history_edit_from_recall = false;
+                        } else {
+                            this.prompt_history_walk.reset();
+                        }
                         this.schedule_composer_draft_save(cx);
                         cx.notify();
                     }
@@ -2941,6 +2961,8 @@ impl Waku {
                 sidebar_group_header_focuses: RefCell::new(HashMap::new()),
                 sidebar_group_compose_focuses: RefCell::new(HashMap::new()),
                 sidebar_show_more_focuses: RefCell::new(HashMap::new()),
+                prompt_history_walk: PromptHistoryWalk::default(),
+                prompt_history_edit_from_recall: false,
                 sidebar_visible,
                 sidebar_width,
                 right_panel_visible,

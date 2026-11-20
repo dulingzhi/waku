@@ -57,6 +57,92 @@ impl From<MessageAttachment> for ComposerAttachment {
 }
 
 impl Waku {
+    /// The submitted prompts of the project the composer is currently writing
+    /// for, oldest first. Empty when no project is selected, which is why
+    /// every caller degrades to "the arrow is not ours".
+    pub(super) fn prompt_history_entries(&self) -> &[String] {
+        match self.selected_project() {
+            Some(project) => self.state.prompt_history.entries(project.id),
+            None => &[],
+        }
+    }
+
+    /// Remember a prompt that was actually sent.
+    ///
+    /// Recorded from the human-facing text rather than the transport prompt:
+    /// a skill expansion or an injected attachment path would come back as a
+    /// wall of text the user never typed.
+    pub(super) fn record_prompt_history(&mut self, submission: &super::ComposerSubmission) {
+        let Some(project) = self.selected_project().map(|project| project.id) else {
+            return;
+        };
+        let text = submission.human_prompt();
+        if self.state.prompt_history.record(project, &text) {
+            self.prompt_history_walk.reset();
+            self.save();
+        }
+    }
+
+    /// Up: recall one entry older, if the caret is on the field's first row.
+    ///
+    /// `cx.propagate()` hands the keystroke back to the field, which is what
+    /// must happen on every row but the first — otherwise a multi-line prompt
+    /// could no longer be edited on its earlier lines.
+    pub(super) fn recall_previous_prompt(
+        &mut self,
+        _: &crate::ui::menu::PromptHistoryPrevious,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.composer.read(cx).caret_on_first_row(cx) {
+            cx.propagate();
+            return;
+        }
+        let entries = self.prompt_history_entries().to_vec();
+        let current = self.composer.read(cx).content(cx).to_owned();
+        let Some(text) = self.prompt_history_walk.step_back(&entries, &current) else {
+            cx.propagate();
+            return;
+        };
+        self.apply_recalled_prompt(text, window, cx);
+    }
+
+    /// Down: one entry newer while walking, or back to what was being written.
+    ///
+    /// Not a bound action: leaving history has to work from any row, and only
+    /// the field's live geometry knows where the caret is when the key lands.
+    pub(super) fn recall_next_prompt(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.prompt_history_walk.is_walking() {
+            return false;
+        }
+        let entries = self.prompt_history_entries().to_vec();
+        let Some(text) = self.prompt_history_walk.step_forward(&entries) else {
+            return false;
+        };
+        self.apply_recalled_prompt(text, window, cx);
+        true
+    }
+
+    fn apply_recalled_prompt(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Armed before the write, because `set_content` emits `Edited`
+        // synchronously and the subscriber would otherwise read the recall as
+        // the user typing.
+        self.prompt_history_edit_from_recall = true;
+        self.composer.update(cx, |input, cx| {
+            input.set_content(text, cx);
+            // Recall is only useful if it can be edited straight away.
+            input.focus_handle(cx).focus(window, cx);
+        });
+        // Keep the visible draft in step with what the composer now holds, so
+        // switching tasks mid-recall does not strand the old text.
+        self.capture_and_save_current_composer_draft(cx);
+        cx.notify();
+    }
+
     pub(super) fn selected_composer_draft_key(
         &self,
     ) -> Option<crate::persistence::ComposerDraftKey> {

@@ -209,6 +209,10 @@ impl Waku {
         }
         if session_changed {
             self.restore_selected_composer_draft(cx);
+            // A walk through one project's history means nothing in another;
+            // resetting also drops the stash, which belongs to the task being
+            // left rather than the one arriving.
+            self.prompt_history_walk.reset();
             self.sync_user_input_answer(cx);
             self.restore_right_panel_state(session_id, cx);
         } else {

@@ -2170,11 +2170,16 @@ impl Waku {
         let submission = merged_submission(prompt, &mentions)?;
         let display_content = (!attachments.is_empty()).then(|| prompt.trim().to_owned());
         self.discard_current_composer_draft(cx);
-        Some(ComposerSubmission {
+        let submission = ComposerSubmission {
             prompt: submission,
             display_content,
             attachments,
-        })
+        };
+        // Recall is built from what was actually sent, and this is the one
+        // place every send route passes through — Enter, the button, and
+        // steering all land here, so there is no second path to fall behind.
+        self.record_prompt_history(&submission);
+        Some(submission)
     }
 
     pub(super) fn execute_local_composer_command(
@@ -2728,6 +2733,12 @@ impl Waku {
                 None => (None, false),
             };
         let autocomplete_loading = autocomplete.is_some() && !autocomplete_actionable;
+        // History is offered whenever there is something to recall and the
+        // popup is not the thing currently reading the arrows. The row check
+        // happens per keystroke inside the action, not here: the caret moves
+        // between frames and this flag is what the card was built with.
+        let prompt_history_available =
+            autocomplete.is_none() && !self.prompt_history_entries().is_empty();
         // Files dragged in from the OS light the card up as a drop target and
         // stage as attachment chips. The wash arrives pre-blended because a
         // drag-over refinement replaces the card's fill rather than
@@ -2783,11 +2794,43 @@ impl Waku {
                             this.dismiss_autocomplete(cx);
                         }))
                 })
+                // Prompt history claims `up` only when the caret is on the
+                // field's first row, and only when the autocomplete popup is
+                // not already owning the arrows — the two contexts would
+                // otherwise race for the same keystroke, and the popup's
+                // meaning is the one the user is looking at.
+                .when(prompt_history_available, |card| {
+                    card.key_context(crate::ui::menu::PROMPT_HISTORY_CONTEXT)
+                        .on_action(cx.listener(
+                            |this, action: &PromptHistoryPrevious, window, cx| {
+                                this.recall_previous_prompt(action, window, cx);
+                            },
+                        ))
+                })
                 .children(autocomplete)
                 .when(!self.composer_attachments.is_empty(), |card| {
                     card.child(self.render_composer_attachments(cx))
                 })
-                .child(div().pt(px(2.0)).child(self.composer.clone()))
+                .child(
+                    div()
+                        .pt(px(2.0))
+                        // Down leaves history from any row, so it cannot be a
+                        // context binding the way Up is: the field's own Down
+                        // must still move the caret once it is mid-prompt.
+                        // This listener runs before the field's action and only
+                        // takes the key while a walk is in progress.
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if event.keystroke.key.as_str() != "down"
+                                || event.keystroke.modifiers != gpui::Modifiers::default()
+                            {
+                                return;
+                            }
+                            if this.recall_next_prompt(window, cx) {
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .child(self.composer.clone()),
+                )
                 .child(
                     div()
                         .mt(px(8.0))

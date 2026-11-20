@@ -78,6 +78,11 @@ pub struct ShortcutSection {
 /// and every row that uses it resolves through
 /// [`crate::platform::primary_shortcut`] at render time, so this table stores
 /// the neutral form.
+///
+/// Scoped bindings are deliberately absent, and the drift test enforces that
+/// they stay absent: the composer's `up`/`down` prompt-history keys live in
+/// [`crate::ui::menu`] under a key context, not here. Listing a key that only
+/// works inside one focused surface would promise it in the transcript.
 pub const SHORTCUT_SECTIONS: &[ShortcutSection] = &[
     ShortcutSection {
         title_key: "shortcuts.section_general",
