@@ -10,13 +10,15 @@
  *
  * What it deliberately omits, and why:
  *   - `cua_driver_sdk.dll` / `cua-driver-uia.exe` need the GitHub SDK download.
+ *     Computer use therefore starts but has no driver to talk to; every other
+ *     feature works. The files it reads from `resources/` are staged.
  *   - `Waku-<version>-Setup.exe` needs Inno Setup 6.
  *
  * Usage:
  *   bun scripts/package-local.ts
  */
 import { copyFile, mkdir, rm, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const projectRoot = resolve(import.meta.dir, "..");
 const packageName = "waku";
@@ -43,7 +45,6 @@ const archive = join(projectRoot, "dist", `${directoryName}.zip`);
 
 await rm(join(projectRoot, "dist", "staging"), { recursive: true, force: true });
 await mkdir(staging, { recursive: true });
-await mkdir(join(staging, "resources"), { recursive: true });
 
 // The app resolves the daemon next to itself, so both stay side by side.
 const binaries = ["waku.exe", "waku-daemon.exe", "waku_js_repl.exe", "waku_computer_use.exe"];
@@ -51,6 +52,21 @@ for (const binary of binaries) {
   await copyFile(join(release, binary), join(staging, binary));
 }
 await copyFile(join(projectRoot, "LICENSE"), join(staging, "LICENSE"));
+
+// The computer-use files the app reads at runtime. They live in the repository,
+// so staging them costs no download — and leaving them out is not a cosmetic
+// gap: `packaged_file` bails, so a package without them reports the feature as
+// missing from the build rather than as unavailable.
+const resources = join(staging, "resources");
+for (const [source, relative] of [
+  ["resources/computer-use/pi-extension.ts", "computer-use/pi-extension.ts"],
+  ["resources/computer-use/CUA-LICENSE", "computer-use/CUA-LICENSE"],
+  ["resources/computer-use/SKILL.md", "skills/waku-computer-use/SKILL.md"],
+]) {
+  const destination = join(resources, relative);
+  await mkdir(dirname(destination), { recursive: true });
+  await copyFile(join(projectRoot, source), destination);
+}
 
 await rm(archive, { force: true });
 await mkdir(join(projectRoot, "dist"), { recursive: true });
