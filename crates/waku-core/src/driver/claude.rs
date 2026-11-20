@@ -153,6 +153,13 @@ fn configure_stream_command(command: &mut Command, mode: RuntimeMode) {
         // Echoes each user message back, which is how a queued prompt is
         // distinguished from one the agent has started on.
         "--replay-user-messages",
+        // Without this, a subagent's stream carries only its tool_use and
+        // tool_result blocks — enough to see what it ran, never what it said.
+        // With it, its text and thinking blocks arrive too, tagged with the
+        // `parent_tool_use_id` of the call that started it, at every nesting
+        // depth. That is what makes a subagent's conversation readable, and
+        // readable is the precondition for steering one.
+        "--forward-subagent-text",
         // Undocumented, and the whole reason Supervised can mean supervised:
         // without it the CLI decides permissions itself and only reports
         // denials after the fact.
@@ -1767,6 +1774,27 @@ mod tests {
             arguments
                 .windows(2)
                 .any(|arguments| { arguments == ["--thinking-display", "summarized"] })
+        );
+    }
+
+    /// A subagent's conversation is only readable with this flag.
+    ///
+    /// Without it the stream carries a subagent's tool_use and tool_result
+    /// blocks alone: enough to see what it ran, never what it said. Its text and
+    /// thinking blocks arrive only when this is passed, and those are what the
+    /// subagent panel shows and what a steering message would be answering.
+    #[test]
+    fn streaming_command_forwards_subagent_text() {
+        let mut command = Command::new("/usr/bin/true");
+        configure_stream_command(&mut command, RuntimeMode::AutoAcceptEdits);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            arguments.iter().any(|arg| arg == "--forward-subagent-text"),
+            "subagent text and thinking blocks need this flag: {arguments:?}"
         );
     }
 
