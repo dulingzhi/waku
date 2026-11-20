@@ -72,7 +72,20 @@ impl Waku {
     /// Recorded from the human-facing text rather than the transport prompt:
     /// a skill expansion or an injected attachment path would come back as a
     /// wall of text the user never typed.
+    ///
+    /// An attachment-only submission is skipped on purpose. Its "text" is the
+    /// file names, and recalling those would put words in the field while the
+    /// attachments they referred to stayed gone — a prompt that cannot be sent
+    /// is worse than one that is not remembered.
     pub(super) fn record_prompt_history(&mut self, submission: &super::ComposerSubmission) {
+        let has_visible_text = submission.display_content.is_some()
+            || (submission.attachments.is_empty() && !submission.prompt.trim().is_empty());
+        if !super::prompt_history::is_recallable_prompt(
+            has_visible_text,
+            submission.attachments.len(),
+        ) {
+            return;
+        }
         let Some(project) = self.selected_project().map(|project| project.id) else {
             return;
         };

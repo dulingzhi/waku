@@ -9,6 +9,16 @@
 //! field's geometry says whether the arrow is free), so the questionable part —
 //! what the next value should be — is testable without a window.
 
+/// Whether a submission is worth remembering as a recallable prompt.
+///
+/// An attachment-only send is not: its text is the file names, and recalling
+/// those would fill the field with words whose attachments are gone. A send
+/// that had text *and* attachments is remembered, because the text alone is
+/// still something the user can resend.
+pub(super) fn is_recallable_prompt(has_visible_text: bool, attachment_count: usize) -> bool {
+    has_visible_text || attachment_count == 0
+}
+
 /// Where a history walk has got to.
 ///
 /// `stash` is what the user was writing before they started walking. It is
@@ -176,5 +186,16 @@ mod tests {
         let mut walk = PromptHistoryWalk::default();
         assert_eq!(walk.step_forward(&entries), None);
         assert!(!walk.is_walking());
+    }
+
+    #[test]
+    fn only_a_send_with_something_to_resend_is_recallable() {
+        // Plain text: yes.
+        assert!(is_recallable_prompt(true, 0));
+        // Text plus attachments: the text alone can be resent, so yes.
+        assert!(is_recallable_prompt(true, 3));
+        // Attachments with no text: the "prompt" is file names whose files are
+        // gone, so no.
+        assert!(!is_recallable_prompt(false, 1));
     }
 }
