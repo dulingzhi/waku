@@ -14,6 +14,7 @@
 //!   control opens a confirmation rather than acting on one click.
 
 use super::*;
+use waku_client::claude::AvailablePlugin;
 
 /// Which half of the page is showing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -21,6 +22,10 @@ pub(super) enum ClaudeTab {
     #[default]
     Mcp,
     Plugins,
+    /// The plugins the added marketplaces offer, plus the marketplaces
+    /// themselves. Separate from `Plugins` because reading it is expensive:
+    /// the CLI refreshes every marketplace before answering (~10s here).
+    Marketplace,
 }
 
 /// A pending destructive action, held until the user confirms.
@@ -37,6 +42,33 @@ pub(super) enum ClaudeConfirm {
     },
 }
 
+/// The scope an install from the marketplace goes into.
+///
+/// `user` is the CLI's own default and the only scope that makes sense for a
+/// plugin added outside any project: `project` and `local` both point at the
+/// directory the command runs in, and a marketplace plugin is not tied to one.
+///
+/// Always passed explicitly anyway. The page names the scope in its confirmation
+/// text, and relying on a CLI default to agree with that text is exactly how the
+/// uninstall path once reported success while leaving the plugin installed.
+fn plugin_install_scope() -> McpScope {
+    McpScope::User
+}
+
+/// Whether an available plugin matches the marketplace filter.
+///
+/// A case-insensitive substring over name, marketplace and description: with
+/// thousands of entries the user is looking for a name they half remember, and
+/// requiring a prefix match would miss it.
+fn plugin_matches(plugin: &AvailablePlugin, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    plugin.name.to_lowercase().contains(query)
+        || plugin.marketplace.to_lowercase().contains(query)
+        || plugin.description.to_lowercase().contains(query)
+}
+
 impl Waku {
     // ── Loading ────────────────────────────────────────────────────────────
 
@@ -51,7 +83,16 @@ impl Waku {
         }
         let loaded = match self.claude_tab {
             ClaudeTab::Mcp => self.claude_mcp_catalog.is_some(),
-            ClaudeTab::Plugins => self.claude_plugin_catalog.is_some(),
+            ClaudeTab::Plugins => {
+                self.claude_plugin_catalog.is_some() && self.claude_marketplace_catalog.is_some()
+            }
+            // Opening this tab deliberately does not start the expensive
+            // read: the page shows a button for it instead. Only the cheap
+            // plugin list is fetched, because the rows need to know which
+            // plugins are already installed.
+            ClaudeTab::Marketplace => {
+                self.claude_plugin_catalog.is_some() && self.claude_marketplace_catalog.is_some()
+            }
         };
         if loaded {
             return;
@@ -59,7 +100,7 @@ impl Waku {
         self.reload_claude_catalog(cx);
     }
 
-    /// Re-read both catalogs, dropping any read already in flight.
+    /// Re-read the cheap catalogs, dropping any read already in flight.
     pub(super) fn reload_claude_catalog(&mut self, cx: &mut Context<Self>) {
         self.claude_catalog_pending = true;
         self.claude_catalog_generation += 1;
@@ -67,7 +108,7 @@ impl Waku {
         let daemon = self.daemon.client();
         let cwd = self.selected_workspace_path().map(Path::to_path_buf);
         cx.spawn(async move |this, cx| {
-            let (mcp, plugins) = cx
+            let (mcp, plugins, marketplaces) = cx
                 .background_executor()
                 .spawn(async move {
                     let mcp = match daemon.request(
@@ -90,7 +131,17 @@ impl Waku {
                         }
                         _ => None,
                     };
-                    (mcp, plugins)
+                    let marketplaces = match daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::LoadClaudeMarketplaces,
+                    ) {
+                        Ok(waku_client::ResponsePayload::ClaudeMarketplaceCatalog { catalog }) => {
+                            Some(catalog)
+                        }
+                        _ => None,
+                    };
+                    (mcp, plugins, marketplaces)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -103,6 +154,94 @@ impl Waku {
                 }
                 if let Some(catalog) = plugins {
                     this.claude_plugin_catalog = Some(Rc::new(catalog));
+                }
+                if let Some(catalog) = marketplaces {
+                    this.claude_marketplace_catalog = Some(Rc::new(catalog));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Load the full marketplace catalog. Only ever called from the button that
+    /// asks for it, never from a render: this is the ~10s read.
+    fn load_available_plugins(&mut self, cx: &mut Context<Self>) {
+        self.claude_available_pending = true;
+        self.claude_available_generation += 1;
+        let generation = self.claude_available_generation;
+        let daemon = self.daemon.client();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::LoadAvailableClaudePlugins,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.claude_available_generation != generation {
+                    return;
+                }
+                this.claude_available_pending = false;
+                match result {
+                    Ok(waku_client::ResponsePayload::ClaudeAvailablePluginCatalog { catalog }) => {
+                        this.claude_available_catalog = Some(Rc::new(catalog));
+                    }
+                    Err(error) => this.show_toast(error.to_string()),
+                    Ok(_) => this.show_toast(tr!("errors.unexpected_response")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Read one plugin's manifest, then show it under its row.
+    fn load_plugin_details(
+        &mut self,
+        id: String,
+        install_path: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        // Clicking the open row closes it, which needs no read.
+        if self.claude_detail.as_ref().map(|(open, _)| open) == Some(&id) {
+            self.claude_detail = None;
+            cx.notify();
+            return;
+        }
+        self.claude_detail_generation += 1;
+        let generation = self.claude_detail_generation;
+        let daemon = self.daemon.client();
+        let request_id = id.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::LoadClaudePluginDetails {
+                            id: request_id,
+                            install_path,
+                        },
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.claude_detail_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(waku_client::ResponsePayload::ClaudePluginDetails { details }) => {
+                        this.claude_detail = Some((id, Rc::new(details)));
+                    }
+                    Err(error) => this.show_toast(error.to_string()),
+                    Ok(_) => this.show_toast(tr!("errors.unexpected_response")),
                 }
                 cx.notify();
             });
@@ -184,6 +323,36 @@ impl Waku {
             cx,
         );
     }
+
+    /// Install one plugin from a marketplace the user already added.
+    ///
+    /// No confirmation: installing adds a plugin the user just asked for and
+    /// `uninstall` reverses it. The scope still travels explicitly, because the
+    /// CLI's default would install into every project.
+    fn install_available_plugin(&mut self, plugin: &AvailablePlugin, cx: &mut Context<Self>) {
+        let cwd = self.selected_workspace_path().map(Path::to_path_buf);
+        let scope = plugin_install_scope();
+        self.run_claude_mutation(
+            waku_client::Command::InstallClaudePlugin {
+                id: plugin.id.clone(),
+                scope,
+                cwd,
+            },
+            cx,
+        );
+    }
+
+    fn update_installed_plugin(&mut self, plugin: &PluginEntry, cx: &mut Context<Self>) {
+        let cwd = self.selected_workspace_path().map(Path::to_path_buf);
+        self.run_claude_mutation(
+            waku_client::Command::UpdateClaudePlugin {
+                id: plugin.id.clone(),
+                scope: Some(plugin.scope),
+                cwd,
+            },
+            cx,
+        );
+    }
 }
 
 // ── Rendering ──────────────────────────────────────────────────────────────
@@ -202,6 +371,7 @@ impl Waku {
         body = body.child(match self.claude_tab {
             ClaudeTab::Mcp => self.render_mcp_list(cx),
             ClaudeTab::Plugins => self.render_plugin_list(cx),
+            ClaudeTab::Marketplace => self.render_marketplace(cx),
         });
 
         div()
@@ -220,6 +390,7 @@ impl Waku {
         for (kind, label) in [
             (ClaudeTab::Mcp, tr!("claude.tab_mcp")),
             (ClaudeTab::Plugins, tr!("claude.tab_plugins")),
+            (ClaudeTab::Marketplace, tr!("claude.tab_marketplace")),
         ] {
             let selected = tab == kind;
             row = row.child(
@@ -227,6 +398,7 @@ impl Waku {
                     .id(SharedString::from(match kind {
                         ClaudeTab::Mcp => "claude-tab-mcp",
                         ClaudeTab::Plugins => "claude-tab-plugins",
+                        ClaudeTab::Marketplace => "claude-tab-marketplace",
                     }))
                     .role(Role::Button)
                     .aria_label(label.clone())
@@ -570,114 +742,199 @@ impl Waku {
         };
         let click_plugin = plugin.clone();
         let key_plugin = plugin.clone();
+        let details_open = self.claude_detail.as_ref().map(|(open, _)| open) == Some(&plugin.id);
+        let details = self
+            .claude_detail
+            .as_ref()
+            .filter(|(open, _)| open == &plugin.id)
+            .map(|(_, details)| details.clone());
 
-        div()
-            .flex()
-            .items_start()
-            .gap(px(10.0))
-            .p(px(10.0))
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.inset)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.0))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .size(px(7.0))
-                                    .rounded_full()
-                                    .bg(if enabled {
+        let row =
+            div()
+                .flex()
+                .items_start()
+                .gap(px(10.0))
+                .p(px(10.0))
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.inset)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(7.0))
+                                .child(div().flex_none().size(px(7.0)).rounded_full().bg(
+                                    if enabled {
                                         theme.success
                                     } else {
                                         theme.text_ghost
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(sp(13.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text)
-                                    .child(name),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(sp(11.0))
-                                    .text_color(if enabled {
-                                        theme.text_secondary
-                                    } else {
-                                        theme.text_ghost
-                                    })
-                                    .child(if enabled {
-                                        tr!("claude.disable")
-                                    } else {
-                                        tr!("claude.enable")
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(sp(11.5))
-                            .text_color(theme.text_tertiary)
-                            .child(subtitle),
-                    )
-                    .when(!plugin.description.is_empty(), |column| {
-                        column.child(
-                            div()
-                                .text_size(sp(11.5))
-                                .text_color(theme.text_secondary)
-                                .child(plugin.description.clone()),
+                                    },
+                                ))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(sp(13.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.text)
+                                        .child(name),
+                                )
+                                .child(
+                                    // State, not the action the button performs.
+                                    // This used to read "Disable" next to a green
+                                    // dot, which says the plugin is off when it is
+                                    // the click that turns it off.
+                                    div()
+                                        .flex_none()
+                                        .text_size(sp(11.0))
+                                        .text_color(if enabled {
+                                            theme.text_secondary
+                                        } else {
+                                            theme.text_ghost
+                                        })
+                                        .child(if enabled {
+                                            tr!("claude.enabled")
+                                        } else {
+                                            tr!("claude.disabled")
+                                        }),
+                                ),
                         )
-                    }),
-            )
-            .child(self.plugin_toggle_button(plugin, enabled, toggle_label, cx))
-            .child(
-                div()
-                    .id(SharedString::from(format!(
-                        "claude-plugin-uninstall-{}",
-                        plugin.id
-                    )))
-                    .role(Role::Button)
-                    .aria_label(tr!("claude.uninstall"))
-                    .tab_index(0)
-                    .flex_none()
-                    .px(px(9.0))
-                    .h(px(24.0))
-                    .rounded(px(6.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_default()
-                    .text_size(sp(11.5))
-                    .text_color(theme.text_secondary)
-                    .hover(|style| style.bg(theme.overlay).text_color(theme.danger))
-                    .focus_visible(|style| style.border_1().border_color(theme.accent))
-                    .child(tr!("claude.uninstall"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.request_uninstall_plugin(&click_plugin, cx);
-                    }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.request_uninstall_plugin(&key_plugin, cx);
-                            cx.stop_propagation();
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(sp(11.5))
+                                .text_color(theme.text_tertiary)
+                                .child(subtitle),
+                        )
+                        .when(!plugin.description.is_empty(), |column| {
+                            column.child(
+                                div()
+                                    .text_size(sp(11.5))
+                                    .text_color(theme.text_secondary)
+                                    .child(plugin.description.clone()),
+                            )
+                        }),
+                )
+                .child(self.claude_text_button(
+                    SharedString::from(format!("claude-plugin-details-{}", plugin.id)),
+                    if details_open {
+                        tr!("claude.hide_details")
+                    } else {
+                        tr!("claude.details")
+                    },
+                    details_open,
+                    cx,
+                    {
+                        let id = plugin.id.clone();
+                        let path = plugin.install_path.clone().map(PathBuf::from);
+                        move |this: &mut Self, cx: &mut Context<Self>| {
+                            this.load_plugin_details(id.clone(), path.clone(), cx);
                         }
-                    })),
-            )
+                    },
+                ))
+                .child(self.plugin_toggle_button(plugin, enabled, toggle_label, cx))
+                .child(self.plugin_update_button(plugin, theme, cx))
+                .child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "claude-plugin-uninstall-{}",
+                            plugin.id
+                        )))
+                        .role(Role::Button)
+                        .aria_label(tr!("claude.uninstall"))
+                        .tab_index(0)
+                        .flex_none()
+                        .px(px(9.0))
+                        .h(px(24.0))
+                        .rounded(px(6.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_default()
+                        .text_size(sp(11.5))
+                        .text_color(theme.text_secondary)
+                        .hover(|style| style.bg(theme.overlay).text_color(theme.danger))
+                        .focus_visible(|style| style.border_1().border_color(theme.accent))
+                        .child(tr!("claude.uninstall"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.request_uninstall_plugin(&click_plugin, cx);
+                        }))
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.request_uninstall_plugin(&key_plugin, cx);
+                                cx.stop_propagation();
+                            }
+                        })),
+                );
+
+        // The manifest goes under the row, not in a separate pane: it describes
+        // this plugin and there is nothing to compare it against.
+        let mut column = div().flex().flex_col().gap(px(5.0)).w_full().child(row);
+        if details_open {
+            match details {
+                Some(details) => column = column.child(self.render_plugin_details(&details, theme)),
+                None => {
+                    column = column.child(
+                        div()
+                            .ml(px(14.0))
+                            .text_size(sp(11.0))
+                            .text_color(theme.text_ghost)
+                            .child(tr!("claude.details_loading")),
+                    )
+                }
+            }
+        }
+        column
+    }
+    /// `plugin update` only exists for a plugin that came from a marketplace;
+    /// a locally authored one has no newer version to fetch.
+    fn plugin_update_button(
+        &self,
+        plugin: &PluginEntry,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let target = plugin.clone();
+        let update_target = plugin.clone();
+        div()
+            .id(SharedString::from(format!(
+                "claude-plugin-update-{}",
+                plugin.id
+            )))
+            .role(Role::Button)
+            .aria_label(tr!("claude.update"))
+            .tab_index(0)
+            .flex_none()
+            .px(px(9.0))
+            .h(px(24.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .text_size(sp(11.5))
+            .text_color(theme.text_secondary)
+            .hover(|style| style.bg(theme.overlay))
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .child(tr!("claude.update"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.update_installed_plugin(&target, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.update_installed_plugin(&update_target, cx);
+                    cx.stop_propagation();
+                }
+            }))
     }
 
     fn plugin_toggle_button(
@@ -719,6 +976,439 @@ impl Waku {
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     this.set_plugin_enabled(&key_target, !enabled, cx);
+                    cx.stop_propagation();
+                }
+            }))
+    }
+
+    // ── Marketplace ────────────────────────────────────────────────────────
+
+    /// The marketplace tab: the added marketplaces, then the browse list.
+    ///
+    /// The browse list is behind a button because answering it costs the CLI a
+    /// refresh of every marketplace. Everything above it — the marketplaces,
+    /// which plugins are installed — is the cheap read the page already has.
+    fn render_marketplace(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let mut body = div().flex().flex_col().gap(px(10.0)).w_full();
+
+        body = body.child(self.render_marketplace_list(cx));
+
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(sp(12.5))
+                        .text_color(theme.text_secondary)
+                        .child(tr!("claude.browse_hint")),
+                )
+                .child(self.claude_text_button(
+                    "claude-browse",
+                    if self.claude_available_catalog.is_some() {
+                        tr!("claude.browse_refresh")
+                    } else {
+                        tr!("claude.browse")
+                    },
+                    false,
+                    cx,
+                    |this, cx| this.load_available_plugins(cx),
+                )),
+        );
+
+        if self.claude_available_pending {
+            return body.child(self.claude_placeholder(&tr!("claude.browse_pending"), cx));
+        }
+        let Some(catalog) = self.claude_available_catalog.clone() else {
+            return body;
+        };
+        if let Some(error) = catalog.unavailable.clone() {
+            return body.child(
+                self.claude_placeholder(&tr!("claude.browse_unavailable", error = error), cx),
+            );
+        }
+        body.child(self.render_available_list(catalog, cx))
+    }
+
+    fn render_marketplace_list(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let Some(catalog) = self.claude_marketplace_catalog.clone() else {
+            return self.claude_placeholder(&tr!("claude.loading"), cx);
+        };
+        let mut body = div().flex().flex_col().gap(px(5.0)).w_full().child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .text_size(sp(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_secondary)
+                        .child(tr!("claude.marketplaces")),
+                )
+                .child(
+                    div()
+                        .text_size(sp(11.0))
+                        .text_color(theme.text_ghost)
+                        .child(tr!(
+                            "claude.marketplace_count",
+                            count = catalog.marketplaces.len().to_string()
+                        )),
+                ),
+        );
+        if let Some(error) = catalog.unavailable.clone() {
+            return body.child(
+                div()
+                    .text_size(sp(11.5))
+                    .text_color(theme.danger)
+                    .child(tr!("claude.marketplaces_unavailable", error = error)),
+            );
+        }
+        if catalog.marketplaces.is_empty() {
+            // An empty list is a real state: nothing can be installed until a
+            // marketplace is added, which this build does not do.
+            return body.child(
+                div()
+                    .text_size(sp(11.5))
+                    .text_color(theme.text_tertiary)
+                    .child(tr!("claude.marketplaces_empty")),
+            );
+        }
+        for marketplace in &catalog.marketplaces {
+            let location = marketplace
+                .repo
+                .clone()
+                .or_else(|| marketplace.install_location.clone())
+                .unwrap_or_default();
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(10.0))
+                    .py(px(7.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.inset)
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(sp(12.5))
+                            .text_color(theme.text)
+                            .child(marketplace.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(sp(11.0))
+                            .text_color(theme.text_ghost)
+                            .child(location),
+                    ),
+            );
+        }
+        body
+    }
+
+    /// The browse list: filter, then rows, then a "show more" cap.
+    ///
+    /// The catalog carries thousands of entries, and `plugin list --available`
+    /// answered 2.4 MB on this machine. Drawing them all would cost a frame per
+    /// keystroke in the filter, so the filter narrows first and the rows are
+    /// capped at `claude_available_shown`.
+    fn render_available_list(
+        &self,
+        catalog: Rc<AvailablePluginCatalog>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let theme = Theme::current(cx);
+        let query = self
+            .claude_available_search
+            .read(cx)
+            .content()
+            .trim()
+            .to_lowercase();
+        let mut body = div().flex().flex_col().gap(px(7.0)).w_full().child(
+            TextField::new(
+                "claude-marketplace-search",
+                self.claude_available_search.clone(),
+            )
+            .icon("icons/search.svg", 13.0)
+            .w_full(),
+        );
+
+        let matched: Vec<&AvailablePlugin> = catalog
+            .plugins
+            .iter()
+            .filter(|plugin| plugin_matches(plugin, &query))
+            .collect();
+
+        body = body.child(
+            div()
+                .text_size(sp(11.0))
+                .text_color(theme.text_ghost)
+                .child(if matched.is_empty() {
+                    tr!("claude.no_match")
+                } else {
+                    tr!(
+                        "claude.available_count",
+                        count = matched.len().to_string(),
+                        shown = matched.len().min(self.claude_available_shown).to_string()
+                    )
+                }),
+        );
+
+        for plugin in matched.iter().take(self.claude_available_shown) {
+            body = body.child(self.render_available_row(plugin, &theme, cx));
+        }
+
+        if matched.len() > self.claude_available_shown {
+            let remaining = matched.len() - self.claude_available_shown;
+            body = body.child(self.claude_text_button(
+                "claude-show-more",
+                tr!("claude.show_more", count = remaining.to_string()),
+                false,
+                cx,
+                |this, cx| {
+                    this.claude_available_shown += 40;
+                    cx.notify();
+                },
+            ));
+        }
+        body
+    }
+
+    fn render_available_row(
+        &self,
+        plugin: &AvailablePlugin,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let installed = plugin.installed;
+        let count = plugin.install_count.map(|count| {
+            div()
+                .flex_none()
+                .text_size(sp(11.0))
+                .text_color(theme.text_ghost)
+                .child(tr!("claude.install_count", count = count.to_string()))
+        });
+
+        let mut row = div()
+            .flex()
+            .items_start()
+            .gap(px(9.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.inset)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(sp(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(plugin.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .px(px(5.0))
+                                    .rounded(px(4.0))
+                                    .bg(theme.overlay)
+                                    .text_size(sp(10.5))
+                                    .text_color(theme.text_tertiary)
+                                    .child(plugin.marketplace.clone()),
+                            )
+                            .children(count),
+                    )
+                    .child(
+                        div()
+                            .text_size(sp(11.0))
+                            .text_color(theme.text_tertiary)
+                            .line_clamp(2)
+                            .child(plugin.description.clone()),
+                    ),
+            );
+
+        if installed {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .px(px(8.0))
+                    .h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .text_size(sp(11.0))
+                    .text_color(theme.success)
+                    .child(tr!("claude.installed")),
+            );
+        } else {
+            let target = plugin.clone();
+            row = row.child(self.claude_text_button(
+                SharedString::from(format!("claude-install-{}", plugin.id)),
+                tr!("claude.install"),
+                false,
+                cx,
+                move |this, cx| this.install_available_plugin(&target, cx),
+            ));
+        }
+        row
+    }
+
+    // ── Plugin details ─────────────────────────────────────────────────────
+
+    /// What a plugin ships, shown under its row once read.
+    ///
+    /// This replaces the `components` array the plugin list used to carry but
+    /// never received: `plugin list --json` has no such field, so the old row
+    /// was always empty there. The manifest is the only place this exists.
+    fn render_plugin_details(&self, details: &PluginDetails, theme: &Theme) -> Div {
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .ml(px(14.0))
+            .rounded(px(7.0))
+            .border_l_2()
+            .border_color(theme.accent)
+            .bg(theme.inset);
+
+        if !details.description.is_empty() {
+            column = column.child(
+                div()
+                    .text_size(sp(11.5))
+                    .text_color(theme.text_secondary)
+                    .child(details.description.clone()),
+            );
+        }
+        let mut facts: Vec<String> = Vec::new();
+        if !details.version.is_empty() {
+            facts.push(format!(
+                "{}: {}",
+                tr!("claude.plugin_version"),
+                details.version
+            ));
+        }
+        if let Some(author) = details.author.clone() {
+            facts.push(format!("{}: {}", tr!("claude.plugin_author"), author));
+        }
+        if let Some(homepage) = details.homepage.clone() {
+            facts.push(format!("{}: {}", tr!("claude.plugin_homepage"), homepage));
+        }
+        if !facts.is_empty() {
+            column = column.child(
+                div()
+                    .text_size(sp(11.0))
+                    .text_color(theme.text_ghost)
+                    .child(facts.join("  ·  ")),
+            );
+        }
+        if !details.mcp_servers.is_empty() {
+            column = column.child(
+                div()
+                    .text_size(sp(11.0))
+                    .text_color(theme.text_tertiary)
+                    .child(format!(
+                        "{}: {}",
+                        tr!("claude.plugin_mcp_servers"),
+                        details.mcp_servers.join(", ")
+                    )),
+            );
+        }
+        if !details.components.is_empty() {
+            let mut grouped = div().flex().flex_wrap().gap(px(5.0));
+            for component in &details.components {
+                grouped = grouped.child(
+                    div()
+                        .px(px(5.0))
+                        .rounded(px(4.0))
+                        .bg(theme.overlay)
+                        .text_size(sp(10.5))
+                        .text_color(theme.text_tertiary)
+                        .child(format!("{}: {}", component.kind, component.name)),
+                );
+            }
+            column = column.child(grouped);
+        }
+        if details.components.is_empty() && details.mcp_servers.is_empty() {
+            column = column.child(
+                div()
+                    .text_size(sp(11.0))
+                    .text_color(theme.text_ghost)
+                    .child(tr!("claude.plugin_no_components")),
+            );
+        }
+        column
+    }
+
+    /// A small text button. The confirm bar has its own destructive variant;
+    /// these are the neutral actions (browse, install, show more, details).
+    ///
+    /// `action` takes the click event so it can carry the value the button acts
+    /// on — a plugin row's id, for instance — instead of every caller having to
+    /// route through a `fn` pointer and lose that context.
+    fn claude_text_button<F>(
+        &self,
+        id: impl Into<SharedString>,
+        label: String,
+        active: bool,
+        cx: &mut Context<Self>,
+        action: F,
+    ) -> Stateful<Div>
+    where
+        F: Fn(&mut Self, &mut Context<Self>) + Clone + 'static,
+    {
+        let theme = Theme::current(cx);
+        let click = action.clone();
+        let key = action;
+        div()
+            .id(id.into())
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .aria_selected(active)
+            .tab_index(0)
+            .flex_none()
+            .px(px(9.0))
+            .h(px(24.0))
+            .rounded(px(6.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_default()
+            .text_size(sp(11.5))
+            .text_color(theme.text_secondary)
+            .hover(|style| style.bg(theme.overlay))
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| click(this, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    key(this, cx);
                     cx.stop_propagation();
                 }
             }))
@@ -855,5 +1545,82 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    fn available(id: &str, description: &str) -> AvailablePlugin {
+        let (name, marketplace) = id.split_once('@').unwrap_or((id, ""));
+        AvailablePlugin {
+            id: id.into(),
+            name: name.into(),
+            marketplace: marketplace.into(),
+            description: description.into(),
+            install_count: Some(1),
+            installed: false,
+        }
+    }
+
+    /// An empty filter must match everything: the browse list opens unfiltered,
+    /// and a filter that matched nothing there would look like an empty
+    /// marketplace.
+    #[test]
+    fn the_empty_filter_matches_every_plugin() {
+        assert!(plugin_matches(&available("a@m", "text"), ""));
+    }
+
+    /// The filter has to reach the description as well as the name: with
+    /// thousands of entries the user is as likely to remember what a plugin
+    /// does as what it is called.
+    #[test]
+    fn the_filter_matches_name_marketplace_and_description_case_insensitively() {
+        let plugin = available("Alpha@MyMarket", "Runs QUERIES");
+        assert!(plugin_matches(&plugin, "alpha"));
+        assert!(plugin_matches(&plugin, "mymarket"));
+        assert!(plugin_matches(&plugin, "queries"));
+        assert!(!plugin_matches(&plugin, "nonexistent"));
+    }
+
+    /// Install names its scope instead of letting the CLI default stand.
+    ///
+    /// `plugin install` defaults to `user`, so this matches today; the point is
+    /// that the command the page builds carries the scope explicitly, which is
+    /// what the confirmation text says and what the uninstall path got wrong
+    /// once by relying on a default.
+    #[test]
+    fn install_names_its_scope_explicitly() {
+        let scope = plugin_install_scope();
+        assert_eq!(scope, McpScope::User);
+        assert_eq!(scope.cli_flag(), Some("user"));
+    }
+
+    /// Closing an open detail needs no read, and opening a different one must
+    /// drop the previous plugin's manifest rather than showing it under the
+    /// new row.
+    #[test]
+    fn opening_a_detail_replaces_whatever_was_open() {
+        let first = PluginDetails {
+            id: "a@m".into(),
+            name: "a".into(),
+            version: "1.0.0".into(),
+            description: String::new(),
+            author: None,
+            homepage: None,
+            mcp_servers: Vec::new(),
+            components: Vec::new(),
+            can_update: true,
+        };
+        let mut open = Some(("a@m".to_owned(), Rc::new(first)));
+        assert_eq!(open.as_ref().map(|(id, _)| id.as_str()), Some("a@m"));
+
+        let second = PluginDetails {
+            id: "b@m".into(),
+            name: "b".into(),
+            ..open.clone().unwrap().1.as_ref().clone()
+        };
+        open = Some(("b@m".to_owned(), Rc::new(second)));
+        assert_eq!(open.as_ref().map(|(id, _)| id.as_str()), Some("b@m"));
+        assert_eq!(
+            open.as_ref().map(|(_, details)| details.name.clone()),
+            Some("b".into())
+        );
     }
 }

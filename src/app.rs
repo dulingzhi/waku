@@ -78,7 +78,8 @@ use crate::{
 };
 pub(crate) use prompt_history::PromptHistoryWalk;
 use waku_client::claude::{
-    McpCatalog, McpHealth, McpScope, McpServerEntry, PluginCatalog, PluginEntry,
+    AvailablePluginCatalog, MarketplaceCatalog, McpCatalog, McpHealth, McpScope, McpServerEntry,
+    PluginCatalog, PluginDetails, PluginEntry,
 };
 
 #[cfg(target_os = "macos")]
@@ -1488,6 +1489,26 @@ pub struct Waku {
     /// ask", which is a different state from "nothing configured".
     claude_mcp_catalog: Option<Rc<McpCatalog>>,
     claude_plugin_catalog: Option<Rc<PluginCatalog>>,
+    /// The added marketplaces, read with the plugins because a plugin cannot be
+    /// installed from one that is not here.
+    claude_marketplace_catalog: Option<Rc<MarketplaceCatalog>>,
+    /// Every plugin the marketplaces offer. `None` until the user asks for it:
+    /// answering this costs the CLI a refresh of every marketplace (~10s for
+    /// 3916 entries), so it is never part of opening the tab.
+    claude_available_catalog: Option<Rc<AvailablePluginCatalog>>,
+    claude_available_pending: bool,
+    /// Bumped per available-list read so a superseded one is discarded.
+    claude_available_generation: u64,
+    /// The marketplace browser's filter and how many rows it shows. 3916
+    /// entries cannot be drawn at once, so the list is narrowed by the filter
+    /// first and then capped.
+    claude_available_search: Entity<TextInput>,
+    claude_available_shown: usize,
+    /// `(plugin id, manifest)` for the row whose details are expanded. One at a
+    /// time, like the skills detail pane.
+    claude_detail: Option<(String, Rc<PluginDetails>)>,
+    /// Bumped per detail read so a slower one cannot overwrite a newer pick.
+    claude_detail_generation: u64,
     /// Bumped per read; a result from a superseded read is discarded, since
     /// both catalogs are fetched from subprocesses that can outlive a switch
     /// between the two tabs.
@@ -2104,6 +2125,11 @@ impl Waku {
             TextInput::new(window, cx)
                 .clear_on_escape()
                 .placeholder(tr!("skills.search"))
+        });
+        let claude_available_search = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .clear_on_escape()
+                .placeholder(tr!("claude.marketplace_search"))
         });
         let session_rename_input = cx.new(|cx| TextInput::new(window, cx));
         let provider_path_input = cx.new(|cx| {
@@ -3048,6 +3074,14 @@ impl Waku {
                 skills_scan_generation: 0,
                 claude_mcp_catalog: None,
                 claude_plugin_catalog: None,
+                claude_marketplace_catalog: None,
+                claude_available_catalog: None,
+                claude_available_pending: false,
+                claude_available_generation: 0,
+                claude_available_search,
+                claude_available_shown: 40,
+                claude_detail: None,
+                claude_detail_generation: 0,
                 claude_catalog_generation: 0,
                 claude_catalog_pending: false,
                 claude_tab: claude_page::ClaudeTab::default(),

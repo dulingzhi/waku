@@ -2888,3 +2888,53 @@ claude.scope_plugin:
   en: From plugin
 claude.plugin_server_not_removable:
   en: This server comes from a plugin. Disable the plugin to remove it.
+claude.tab_marketplace:
+  en: Marketplace
+claude.marketplaces:
+  en: Marketplaces
+claude.marketplace_count:
+  en: "%{count} added"
+claude.marketplaces_empty:
+  en: No marketplaces are added, so there is nothing to install from
+claude.marketplaces_unavailable:
+  en: "Could not read marketplaces: %{error}"
+claude.browse:
+  en: Browse installable plugins
+claude.browse_refresh:
+  en: Refresh
+claude.browse_hint:
+  en: Browsing asks the Claude Code CLI to refresh every marketplace, which takes a few seconds
+claude.browse_pending:
+  en: Reading the marketplaces. This can take a few seconds…
+claude.browse_unavailable:
+  en: "Could not read installable plugins: %{error}"
+claude.marketplace_search:
+  en: Filter plugins by name, marketplace or description…
+claude.available_count:
+  en: "%{count} plugins, showing %{shown}"
+claude.show_more:
+  en: Show %{count} more
+claude.install_count:
+  en: "%{count} installs"
+claude.install:
+  en: Install
+claude.installed:
+  en: Installed
+claude.update:
+  en: Update
+claude.details:
+  en: Details
+claude.hide_details:
+  en: Hide details
+claude.details_loading:
+  en: Reading the plugin manifest…
+claude.enabled:
+  en: Enabled
+claude.disabled:
+  en: Disabled
+claude.plugin_author:
+  en: Author
+claude.plugin_homepage:
+  en: Homepage
+claude.plugin_no_components:
+  en: This plugin declares no components

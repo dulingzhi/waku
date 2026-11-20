@@ -1506,3 +1506,53 @@ claude.scope_plugin:
   ja: プラグイン由来
 claude.plugin_server_not_removable:
   ja: このサーバーはプラグイン由来です。削除するにはプラグインを無効化してください。
+claude.tab_marketplace:
+  ja: マーケットプレイス
+claude.marketplaces:
+  ja: 追加済みのマーケットプレイス
+claude.marketplace_count:
+  ja: "%{count} 件"
+claude.marketplaces_empty:
+  ja: マーケットプレイスが追加されていないため、インストールできるものがありません
+claude.marketplaces_unavailable:
+  ja: "マーケットプレイスを読み取れませんでした: %{error}"
+claude.browse:
+  ja: インストール可能なプラグインを見る
+claude.browse_refresh:
+  ja: 更新
+claude.browse_hint:
+  ja: 閲覧すると Claude Code がすべてのマーケットプレイスを更新するため、数秒かかります
+claude.browse_pending:
+  ja: マーケットプレイスを読み取り中です。数秒かかることがあります…
+claude.browse_unavailable:
+  ja: "インストール可能なプラグインを読み取れませんでした: %{error}"
+claude.marketplace_search:
+  ja: 名前・マーケットプレイス・説明でプラグインを絞り込む…
+claude.available_count:
+  ja: "%{count} 件中 %{shown} 件を表示"
+claude.show_more:
+  ja: さらに %{count} 件表示
+claude.install_count:
+  ja: "%{count} 回インストール"
+claude.install:
+  ja: インストール
+claude.installed:
+  ja: インストール済み
+claude.update:
+  ja: 更新
+claude.details:
+  ja: 詳細
+claude.hide_details:
+  ja: 詳細を閉じる
+claude.details_loading:
+  ja: プラグインのマニフェストを読み取り中です…
+claude.enabled:
+  ja: 有効
+claude.disabled:
+  ja: 無効
+claude.plugin_author:
+  ja: 作者
+claude.plugin_homepage:
+  ja: ホームページ
+claude.plugin_no_components:
+  ja: このプラグインはコンポーネントを宣言していません

@@ -1454,3 +1454,53 @@ claude.scope_plugin:
   zh-CN: 来自插件
 claude.plugin_server_not_removable:
   zh-CN: 该服务器来自插件。请禁用对应插件来移除它。
+claude.tab_marketplace:
+  zh-CN: 插件市场
+claude.marketplaces:
+  zh-CN: 已添加的市场
+claude.marketplace_count:
+  zh-CN: 共 %{count} 个
+claude.marketplaces_empty:
+  zh-CN: 还没有添加任何市场，因此没有可安装的内容
+claude.marketplaces_unavailable:
+  zh-CN: 无法读取市场列表：%{error}
+claude.browse:
+  zh-CN: 浏览可安装插件
+claude.browse_refresh:
+  zh-CN: 刷新
+claude.browse_hint:
+  zh-CN: 浏览会让 Claude Code 刷新所有市场，需要几秒钟
+claude.browse_pending:
+  zh-CN: 正在读取市场，可能需要几秒钟…
+claude.browse_unavailable:
+  zh-CN: 无法读取可安装插件：%{error}
+claude.marketplace_search:
+  zh-CN: 按名称、市场或描述筛选插件…
+claude.available_count:
+  zh-CN: 共 %{count} 个插件，已显示 %{shown} 个
+claude.show_more:
+  zh-CN: 再显示 %{count} 个
+claude.install_count:
+  zh-CN: "%{count} 次安装"
+claude.install:
+  zh-CN: 安装
+claude.installed:
+  zh-CN: 已安装
+claude.update:
+  zh-CN: 升级
+claude.details:
+  zh-CN: 详情
+claude.hide_details:
+  zh-CN: 收起详情
+claude.details_loading:
+  zh-CN: 正在读取插件清单…
+claude.enabled:
+  zh-CN: 已启用
+claude.disabled:
+  zh-CN: 已禁用
+claude.plugin_author:
+  zh-CN: 作者
+claude.plugin_homepage:
+  zh-CN: 主页
+claude.plugin_no_components:
+  zh-CN: 该插件未声明任何组件
