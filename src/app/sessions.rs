@@ -821,6 +821,10 @@ impl Waku {
         self.transcript_control_focuses.borrow_mut().clear();
         self.user_message_viewports.borrow_mut().clear();
         self.hovered_response_row = None;
+        // Fades belong to the session being left: a turn id from another
+        // session would never be looked up again, and the map would keep every
+        // settled turn of every session visited.
+        self.footer_fades.borrow_mut().clear();
         // Selection belongs to the session being left.
         self.transcript_selection.selection.borrow_mut().clear();
         self.transcript_selection.registry.borrow_mut().clear();

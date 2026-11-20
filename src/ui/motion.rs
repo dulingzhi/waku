@@ -243,6 +243,53 @@ fn width_at(from: f32, target: f32, elapsed: Duration) -> Option<f32> {
     (progress < 1.0).then(|| from + (target - from) * ease_out_quint()(progress.max(0.0)))
 }
 
+/// How long a turn's footer takes to appear once the turn settles.
+///
+/// Shorter than a panel slide: the footer is a small row under text the reader
+/// is already looking at, so it has to arrive quietly. Long enough that it
+/// reads as arriving rather than as a line popping into existence.
+pub const FOOTER_FADE: Duration = Duration::from_millis(150);
+
+/// A one-shot fade-in, evaluated from `render` the way [`WidthTween`] is.
+///
+/// Used for a row that appears when a turn settles. It must not be a
+/// `with_animation` wrapper: the footer is inside a virtualised list, and a
+/// wrapper that remounts on the next notify would replay the fade every frame
+/// the row is reused — which is the 120 Hz trap `performance.md` describes,
+/// except it would never stop.
+///
+/// Settling is when this runs, so nothing here races the stream cadence: the
+/// turn is already finished and the pump has drained.
+#[derive(Clone, Copy, Debug)]
+pub struct FadeIn {
+    started: Instant,
+}
+
+impl FadeIn {
+    pub fn new() -> Self {
+        Self {
+            started: Instant::now(),
+        }
+    }
+
+    /// Opacity on the way to 1, or `None` once the fade is over — the caller
+    /// then paints at full opacity, which is also the same as no animation at
+    /// all when reduce-motion is on.
+    pub fn opacity(&self, reduce_motion: bool) -> Option<f32> {
+        if reduce_motion {
+            return None;
+        }
+        let progress = self.started.elapsed().as_secs_f32() / FOOTER_FADE.as_secs_f32();
+        (progress < 1.0).then(|| ease_out_quint()(progress.max(0.0)))
+    }
+}
+
+impl Default for FadeIn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +320,34 @@ mod tests {
             (reversed - interrupted).abs() < 0.01,
             "the reversed slide starts at the interrupted width"
         );
+    }
+
+    #[test]
+    fn a_footer_fade_starts_clear_and_retires() {
+        let fade = FadeIn::new();
+        let start = fade.opacity(false).expect("a fresh fade is in flight");
+        assert!(
+            start < 0.01,
+            "a footer fades in from clear, not from opaque, got {start}"
+        );
+    }
+
+    #[test]
+    fn reduce_motion_reports_no_opacity_to_animate() {
+        // `None` means "paint at full opacity and schedule nothing". A fade
+        // that returned a value here would keep asking for frames it must not
+        // ask for under reduce-motion.
+        assert_eq!(FadeIn::new().opacity(true), None);
+    }
+
+    #[test]
+    fn a_settled_footer_stops_asking_for_frames() {
+        // The failure this guards: an opacity that never retires leaves the
+        // pulse clock leasing forever, which is the 120 Hz trap in a different
+        // disguise — the window would keep repainting after the fade ended.
+        let elapsed_fade = FadeIn {
+            started: Instant::now() - FOOTER_FADE - Duration::from_millis(1),
+        };
+        assert_eq!(elapsed_fade.opacity(false), None);
     }
 }
