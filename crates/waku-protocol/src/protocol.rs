@@ -246,6 +246,11 @@ pub enum Command {
     },
     UninstallClaudePlugin {
         id: String,
+        /// The scope the plugin is installed into. `plugin uninstall` defaults
+        /// to `user`, so this has to be explicit or a project-scoped plugin is
+        /// reported uninstalled while still installed.
+        #[ts(type = "string")]
+        scope: McpScope,
         #[ts(type = "string | null")]
         cwd: Option<PathBuf>,
     },

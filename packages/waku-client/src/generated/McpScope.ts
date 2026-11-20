@@ -9,4 +9,4 @@
  * behaviour for every other project, so the scope travels with the entry and
  * every mutation carries it back.
  */
-export type McpScope = "user" | "project" | "local";
+export type McpScope = "user" | "project" | "local" | "plugin";

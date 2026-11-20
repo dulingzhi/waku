@@ -379,9 +379,16 @@ pub fn uninstall_plugin(
     override_spec: Option<&str>,
     cwd: Option<&Path>,
     id: &str,
+    scope: McpScope,
 ) -> Result<(), String> {
     let binary = claude_binary(override_spec).ok_or_else(|| tr!("claude.cli_not_found"))?;
-    run_claude(&binary, &["plugin", "uninstall", id], cwd).map(|_| ())
+    // `plugin uninstall` defaults to user scope, so a project-scoped plugin
+    // must name its scope or the uninstall targets the wrong install — and
+    // reports success while the plugin is still there.
+    let Some(flag) = scope.cli_flag() else {
+        return Err(tr!("claude.plugin_server_not_removable"));
+    };
+    run_claude(&binary, &["plugin", "uninstall", id, "--scope", flag], cwd).map(|_| ())
 }
 
 #[cfg(test)]

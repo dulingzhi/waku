@@ -375,12 +375,13 @@ impl Backend for WakuBackend {
                 .map_err(|error| anyhow!(error))?;
                 Ok(ResponsePayload::Ack)
             }
-            Command::UninstallClaudePlugin { id, cwd } => {
+            Command::UninstallClaudePlugin { id, scope, cwd } => {
                 let override_spec = self.claude_binary_override();
                 crate::claude_config::uninstall_plugin(
                     override_spec.as_deref(),
                     cwd.as_deref(),
                     &id,
+                    scope,
                 )
                 .map_err(|error| anyhow!(error))?;
                 Ok(ResponsePayload::Ack)

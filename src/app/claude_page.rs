@@ -26,8 +26,15 @@ pub(super) enum ClaudeTab {
 /// A pending destructive action, held until the user confirms.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum ClaudeConfirm {
-    RemoveMcp { name: String, scope: McpScope },
-    UninstallPlugin { id: String, name: String },
+    RemoveMcp {
+        name: String,
+        scope: McpScope,
+    },
+    UninstallPlugin {
+        id: String,
+        name: String,
+        scope: McpScope,
+    },
 }
 
 impl Waku {
@@ -136,8 +143,8 @@ impl Waku {
             ClaudeConfirm::RemoveMcp { name, scope } => {
                 waku_client::Command::RemoveClaudeMcpServer { name, scope, cwd }
             }
-            ClaudeConfirm::UninstallPlugin { id, .. } => {
-                waku_client::Command::UninstallClaudePlugin { id, cwd }
+            ClaudeConfirm::UninstallPlugin { id, scope, .. } => {
+                waku_client::Command::UninstallClaudePlugin { id, scope, cwd }
             }
         };
         self.run_claude_mutation(command, cx);
@@ -161,6 +168,7 @@ impl Waku {
         self.claude_confirm = Some(ClaudeConfirm::UninstallPlugin {
             id: plugin.id.clone(),
             name: plugin.name.clone(),
+            scope: plugin.scope,
         });
         cx.notify();
     }
@@ -809,9 +817,43 @@ mod tests {
         let mut pending = Some(ClaudeConfirm::UninstallPlugin {
             id: "p@m".into(),
             name: "p".into(),
+            scope: McpScope::Project,
         });
         let taken = pending.take();
         assert!(taken.is_some());
         assert!(pending.take().is_none());
+    }
+
+    /// The uninstall carries the plugin's own scope.
+    ///
+    /// `claude plugin uninstall` defaults to `user`, so dropping the scope
+    /// would report success while leaving a project-scoped plugin installed.
+    #[test]
+    fn uninstall_keeps_the_scope_it_was_listed_with() {
+        let plugin = PluginEntry {
+            id: "ralph-loop@claude-plugins-official".into(),
+            name: "ralph-loop".into(),
+            marketplace: "claude-plugins-official".into(),
+            version: "1.0.0".into(),
+            scope: McpScope::Project,
+            enabled: false,
+            project_enabled: false,
+            description: String::new(),
+            mcp_servers: Vec::new(),
+            components: Vec::new(),
+            install_path: None,
+        };
+        let pending = ClaudeConfirm::UninstallPlugin {
+            id: plugin.id.clone(),
+            name: plugin.name.clone(),
+            scope: plugin.scope,
+        };
+        match pending {
+            ClaudeConfirm::UninstallPlugin { scope, .. } => {
+                assert_eq!(scope, McpScope::Project);
+                assert_eq!(scope.cli_flag(), Some("project"));
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 }
