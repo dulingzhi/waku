@@ -2800,7 +2800,7 @@ impl Waku {
                 // otherwise race for the same keystroke, and the popup's
                 // meaning is the one the user is looking at.
                 .when(prompt_history_available, |card| {
-                    card.key_context(crate::ui::menu::PROMPT_HISTORY_CONTEXT)
+                    card.key_context(crate::ui::menu::PROMPT_HISTORY_ELEMENT_CONTEXT)
                         .on_action(cx.listener(
                             |this, action: &PromptHistoryPrevious, window, cx| {
                                 this.recall_previous_prompt(action, window, cx);

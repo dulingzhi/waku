@@ -64,12 +64,77 @@ const PANEL_FIELD_CONTEXT: &str = "WakuMenu > TextInput";
 
 /// The composer field while prompt history may claim its arrows.
 ///
-/// Declared by the composer card only when the caret is on the field's first
-/// row, so `up` recalls instead of moving the caret there. Down is deliberately
-/// *not* bound here: leaving history has to work from any row, and the field
-/// only knows at the moment the key is pressed, so the composer handles Down
-/// through its own key listener.
+/// Two strings, and the difference between them is not cosmetic:
+///
+/// * [`PROMPT_HISTORY_CONTEXT`] is the *predicate* a binding is registered
+///   against. `a > b` means "`a` is an ancestor of `b`", and it is parsed by
+///   `KeyBindingContextPredicate::parse`, which understands the arrow.
+/// * [`PROMPT_HISTORY_ELEMENT_CONTEXT`] is what the element declares through
+///   `key_context()`. That path goes through `KeyContext::parse`, which does
+///   **not** understand `>`: it reads identifiers until the first character
+///   that is not alphanumeric/`_`/`-`, and when the leftover begins with
+///   anything else (`>`) it consumes nothing and recurses on the same input
+///   until the stack overflows.
+///
+/// Passing the predicate string to `key_context()` is therefore a crash, not a
+/// no-op. That was the 0.1.20 startup stack overflow.
 pub const PROMPT_HISTORY_CONTEXT: &str = "ComposerPromptHistory > TextInput";
+
+/// The element-side half of [`PROMPT_HISTORY_CONTEXT`]: only the leaf name,
+/// which is all `KeyContext::parse` can express.
+pub const PROMPT_HISTORY_ELEMENT_CONTEXT: &str = "ComposerPromptHistory";
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    /// Whatever is passed to `key_context()` must survive `KeyContext::parse`.
+    ///
+    /// That parser recurses on the source it has consumed, and it only consumes
+    /// alphanumeric/`_`/`-` characters as an identifier. Any other leading
+    /// character leaves the input unchanged and recurses forever, which is a
+    /// stack overflow rather than an error. This test pins the property so the
+    /// predicate form can never drift back into the element slot.
+    #[test]
+    fn element_contexts_are_parseable_identifiers() {
+        for context in [
+            PROMPT_HISTORY_ELEMENT_CONTEXT,
+            MENU_CONTEXT,
+            "Waku",
+            "ComposerAutocomplete",
+        ] {
+            assert!(
+                !context.contains('>'),
+                "`{context}` is an element key_context and cannot contain `>`"
+            );
+            assert!(
+                context
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '_' || c == '-'),
+                "`{context}` has a character KeyContext::parse cannot consume"
+            );
+        }
+    }
+
+    /// The predicate names the element context as an *ancestor*, and bottoms
+    /// out at the field the binding is meant to fire in.
+    ///
+    /// `a > b` means "`a` is an ancestor of `b`", so the element context
+    /// (`ComposerPromptHistory`) has to appear as the left side — not as the
+    /// trailing leaf, which is the focused field itself.
+    #[test]
+    fn the_prompt_history_predicate_names_the_element_context_as_its_ancestor() {
+        assert!(PROMPT_HISTORY_CONTEXT.contains('>'));
+        let (ancestor, leaf) = PROMPT_HISTORY_CONTEXT
+            .split_once('>')
+            .expect("the predicate has an ancestor form");
+        assert_eq!(ancestor.trim(), PROMPT_HISTORY_ELEMENT_CONTEXT);
+        assert!(
+            !leaf.contains('>'),
+            "a deeper chain would need its own element context"
+        );
+    }
+}
 
 /// Bind the menu's own keys. Called once at startup.
 ///
