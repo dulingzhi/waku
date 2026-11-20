@@ -2938,3 +2938,7 @@ claude.plugin_homepage:
   en: Homepage
 claude.plugin_no_components:
   en: This plugin declares no components
+claude.reading:
+  en: Reading the Claude Code configuration…
+claude.applying:
+  en: Applying the change, then re-reading…

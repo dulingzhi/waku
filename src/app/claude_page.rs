@@ -111,36 +111,52 @@ impl Waku {
             let (mcp, plugins, marketplaces) = cx
                 .background_executor()
                 .spawn(async move {
-                    let mcp = match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::LoadClaudeMcpServers { cwd },
-                    ) {
-                        Ok(waku_client::ResponsePayload::ClaudeMcpCatalog { catalog }) => {
-                            Some(catalog)
-                        }
-                        _ => None,
-                    };
-                    let plugins = match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::LoadClaudePlugins,
-                    ) {
-                        Ok(waku_client::ResponsePayload::ClaudePluginCatalog { catalog }) => {
-                            Some(catalog)
-                        }
-                        _ => None,
-                    };
-                    let marketplaces = match daemon.request(
-                        Uuid::nil(),
-                        Uuid::nil(),
-                        waku_client::Command::LoadClaudeMarketplaces,
-                    ) {
-                        Ok(waku_client::ResponsePayload::ClaudeMarketplaceCatalog { catalog }) => {
-                            Some(catalog)
-                        }
-                        _ => None,
-                    };
+                    // Three independent daemon requests. Run them concurrently:
+                    // the daemon handles each on its own thread, and the MCP
+                    // read dominates (it health-checks every server) while the
+                    // other two are ~1s each. Sequentially the page waited for
+                    // their sum.
+                    let mcp_client = daemon.clone();
+                    let plugin_client = daemon.clone();
+                    let marketplace_client = daemon;
+                    let (mcp, plugins, marketplaces) = futures::join!(
+                        async move {
+                            match mcp_client.request(
+                                Uuid::nil(),
+                                Uuid::nil(),
+                                waku_client::Command::LoadClaudeMcpServers { cwd },
+                            ) {
+                                Ok(waku_client::ResponsePayload::ClaudeMcpCatalog { catalog }) => {
+                                    Some(catalog)
+                                }
+                                _ => None,
+                            }
+                        },
+                        async move {
+                            match plugin_client.request(
+                                Uuid::nil(),
+                                Uuid::nil(),
+                                waku_client::Command::LoadClaudePlugins,
+                            ) {
+                                Ok(waku_client::ResponsePayload::ClaudePluginCatalog {
+                                    catalog,
+                                }) => Some(catalog),
+                                _ => None,
+                            }
+                        },
+                        async move {
+                            match marketplace_client.request(
+                                Uuid::nil(),
+                                Uuid::nil(),
+                                waku_client::Command::LoadClaudeMarketplaces,
+                            ) {
+                                Ok(waku_client::ResponsePayload::ClaudeMarketplaceCatalog {
+                                    catalog,
+                                }) => Some(catalog),
+                                _ => None,
+                            }
+                        },
+                    );
                     (mcp, plugins, marketplaces)
                 })
                 .await;
@@ -253,7 +269,25 @@ impl Waku {
 
     /// Run one mutating CLI command, then re-read so the page shows what the
     /// CLI actually did rather than what Waku assumed it would do.
+    ///
+    /// The row is removed from the snapshot as soon as the CLI confirms, rather
+    /// than waiting for the re-read. That re-read pays for the full MCP health
+    /// check and a scope probe per server, so without this the row lingered for
+    /// seconds after the delete had already happened and the button looked
+    /// dead.
     fn run_claude_mutation(&mut self, command: waku_client::Command, cx: &mut Context<Self>) {
+        // Whatever this command acts on, it is about to be gone or changed.
+        let removed_mcp = match &command {
+            waku_client::Command::RemoveClaudeMcpServer { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let removed_plugin = match &command {
+            waku_client::Command::UninstallClaudePlugin { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        self.claude_mutating = true;
+        cx.notify();
+
         let daemon = self.daemon.client();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -261,9 +295,26 @@ impl Waku {
                 .spawn(async move { daemon.request(Uuid::nil(), Uuid::nil(), command) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                this.claude_mutating = false;
                 match result {
                     Err(error) => this.show_toast(error.to_string()),
-                    Ok(waku_client::ResponsePayload::Ack) => {}
+                    Ok(waku_client::ResponsePayload::Ack) => {
+                        // Show the change now; the re-read below confirms it.
+                        if let (Some(name), Some(catalog)) =
+                            (removed_mcp, this.claude_mcp_catalog.clone())
+                        {
+                            let mut next = (*catalog).clone();
+                            next.servers.retain(|server| server.name != name);
+                            this.claude_mcp_catalog = Some(Rc::new(next));
+                        }
+                        if let (Some(id), Some(catalog)) =
+                            (removed_plugin, this.claude_plugin_catalog.clone())
+                        {
+                            let mut next = (*catalog).clone();
+                            next.plugins.retain(|plugin| plugin.id != id);
+                            this.claude_plugin_catalog = Some(Rc::new(next));
+                        }
+                    }
                     Ok(_) => this.show_toast(tr!("errors.unexpected_response")),
                 }
                 this.reload_claude_catalog(cx);
@@ -363,6 +414,7 @@ impl Waku {
         let mut body = div().flex().flex_col().gap(px(14.0)).w_full();
 
         body = body.child(self.render_claude_tabs(cx));
+        body = body.child(self.render_claude_status(cx));
 
         if let Some(confirm) = self.claude_confirm.clone() {
             body = body.child(self.render_claude_confirm(&confirm, cx));
@@ -381,6 +433,40 @@ impl Waku {
             .text_color(theme.text)
             .child(body)
             .into_any_element()
+    }
+
+    /// One line saying what the page is waiting on.
+    ///
+    /// Reading these catalogs means running the Claude CLI, and the worst case
+    /// is seconds: `mcp list` health-checks every server, and a re-read after a
+    /// delete pays that again. Without this line the page looked frozen — the
+    /// buttons stayed enabled and nothing said a subprocess was running.
+    fn render_claude_status(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let label = if self.claude_mutating {
+            Some(tr!("claude.applying"))
+        } else if self.claude_catalog_pending {
+            Some(tr!("claude.reading"))
+        } else {
+            None
+        };
+        let Some(label) = label else {
+            return div().h(px(0.0));
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(sp(11.5))
+            .text_color(theme.text_tertiary)
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(theme.accent),
+            )
+            .child(label)
     }
 
     fn render_claude_tabs(&self, cx: &mut Context<Self>) -> Div {

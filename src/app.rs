@@ -1514,6 +1514,10 @@ pub struct Waku {
     /// between the two tabs.
     claude_catalog_generation: u64,
     claude_catalog_pending: bool,
+    /// A mutation is in flight. The page disables its buttons while one runs so
+    /// a second click cannot queue the same delete twice, and so the wait is
+    /// visible instead of looking like an unresponsive control.
+    claude_mutating: bool,
     /// Which tab the Claude page shows.
     claude_tab: claude_page::ClaudeTab,
     /// A remove or uninstall waiting for confirmation. Destructive Claude
@@ -3099,6 +3103,7 @@ impl Waku {
                 claude_detail_generation: 0,
                 claude_catalog_generation: 0,
                 claude_catalog_pending: false,
+                claude_mutating: false,
                 claude_tab: claude_page::ClaudeTab::default(),
                 claude_confirm: None,
                 skills_scan_pending: false,
