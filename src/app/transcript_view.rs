@@ -2162,13 +2162,18 @@ impl Waku {
                     .hover(|style| style.bg(theme.overlay_strong))
                     .child(work_status_label(status))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.open_background_work_surface(session_id, click_key.clone(), cx);
+                        this.open_background_work_surface(
+                            session_id,
+                            click_key.clone(),
+                            window,
+                            cx,
+                        );
                     }))
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                         if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.open_background_work_surface(session_id, key.clone(), cx);
+                            this.open_background_work_surface(session_id, key.clone(), window, cx);
                             cx.stop_propagation();
                         }
                     }))

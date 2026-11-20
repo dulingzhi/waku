@@ -25,6 +25,19 @@ pub(super) struct BackgroundWorkRegistry {
     selection: TranscriptSelection,
 }
 
+/// One subagent's steering field.
+///
+/// A subagent has no input channel of its own: the provider's control protocol
+/// exposes `stop_task` and nothing that writes into a running task. What it does
+/// have is a main conversation that can message it, so the field here composes
+/// an instruction and sends it as a steer to the parent turn, which relays it.
+pub(super) struct SubagentSteerField {
+    pub(super) input: Entity<TextInput>,
+    /// The task this field writes about, so a stale field cannot post to a
+    /// different subagent after the open surface moves.
+    pub(super) key: BackgroundWorkKey,
+}
+
 #[derive(Clone)]
 struct BackgroundOutputViewport {
     scroll_handle: ScrollHandle,
@@ -504,6 +517,84 @@ fn work_elapsed(item: &BackgroundWorkItem) -> String {
 }
 
 impl Waku {
+    /// Build the steering field for a subagent surface, if it is not built yet.
+    ///
+    /// The field is created on demand because `TextInput::new` needs a window,
+    /// which the render path does not have. A field belonging to a different
+    /// task is replaced: the open surface may have moved since it was built,
+    /// and posting a message about the wrong subagent is worse than losing a
+    /// half-typed line.
+    pub(super) fn ensure_subagent_steer(
+        &mut self,
+        key: &BackgroundWorkKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .subagent_steer
+            .as_ref()
+            .is_some_and(|field| &field.key == key)
+        {
+            return;
+        }
+        let input = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .clear_on_escape()
+                .placeholder(tr!("background.steer_placeholder"))
+        });
+        self.subagent_steer = Some(SubagentSteerField {
+            input,
+            key: key.clone(),
+        });
+    }
+
+    /// Send the steering field's text to the parent turn.
+    ///
+    /// The subagent cannot be written into directly: the provider's control
+    /// protocol has `stop_task` and nothing that appends to a running task. So
+    /// the message is framed for the main conversation, which owns the
+    /// `SendMessage` tool and can reach the subagent by its id. The text names
+    /// the subagent so the parent knows which one is meant, and the composer is
+    /// not used at all — nothing is left behind in it for the user to send
+    /// again.
+    pub(super) fn steer_subagent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = self.subagent_steer.as_ref() else {
+            return;
+        };
+        let key = field.key.clone();
+        let input = field.input.clone();
+        let text = input.read(cx).content().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        let Some(session) = self.selected_session().cloned() else {
+            return;
+        };
+        // What the parent is asked to relay. The task id is the id the provider
+        // uses for this subagent, which is what a message has to name.
+        let target = self
+            .background_work
+            .get(&session.id)
+            .and_then(|registry| registry.items.get(&key))
+            .and_then(|item| item.control_id.clone().or_else(|| Some(item.title.clone())))
+            .unwrap_or_else(|| key.provider_id.clone());
+        let prompt = tr!(
+            "background.steer_prompt",
+            target = target,
+            message = text.clone()
+        );
+        let submission = ComposerSubmission {
+            prompt: prompt.clone(),
+            display_content: Some(text),
+            attachments: Vec::new(),
+        };
+        self.steer_composer_submission(submission, cx);
+        input.update(cx, |input, cx| input.set_content("", cx));
+        let focus = self.composer_focus(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
     pub(super) fn background_output_refresh_delay(&self) -> Option<Duration> {
         self.background_work
             .values()
@@ -717,6 +808,7 @@ impl Waku {
         &mut self,
         session_id: Uuid,
         key: BackgroundWorkKey,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(title) = self
@@ -729,6 +821,13 @@ impl Waku {
         };
         if self.state.selected_session != Some(session_id) {
             self.select_session(session_id, cx);
+        }
+        // A subagent surface carries a steering field, and building a text
+        // input needs the window. Doing it here rather than in the render keeps
+        // the render path free of entity creation, which is the rule the rest
+        // of this file follows.
+        if key.kind == BackgroundWorkKind::Subagent {
+            self.ensure_subagent_steer(&key, window, cx);
         }
         self.open_right_panel_surface(RightPanelSurface::BackgroundWork { key, title }, cx);
     }
@@ -1254,13 +1353,12 @@ impl Waku {
                     )
                     .when_some(stop, |header, stop| header.child(stop)),
             )
-            .child(self.render_background_work_detail(
-                item,
-                output,
-                output_viewport,
-                selection,
-                cx,
-            ));
+            .child(self.render_background_work_detail(item, output, output_viewport, selection, cx))
+            // Steering is a subagent-only affordance: a shell process has no
+            // conversation to say anything into.
+            .when(item.key.kind == BackgroundWorkKind::Subagent, |card| {
+                card.child(self.render_subagent_steer(item, &theme, cx))
+            });
         div()
             .id("background-work-surface")
             .tab_group()
@@ -1403,6 +1501,92 @@ impl Waku {
                         .child(background_work_selection_input(selection)),
                 ),
         )
+    }
+
+    /// The steering control under a subagent's detail.
+    ///
+    /// The provider gives a subagent no input channel: its control protocol
+    /// offers `stop_task` and nothing that writes into a running task. What it
+    /// does give is a main conversation holding the `SendMessage` tool, so the
+    /// text goes there and is relayed. The caption says so — presenting this as
+    /// a direct line would promise something the protocol cannot do.
+    fn render_subagent_steer(
+        &self,
+        item: &BackgroundWorkItem,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        // The field is built when the surface opens. If it is missing, the row
+        // still renders without it rather than creating an entity from a render
+        // path.
+        let Some(field) = self
+            .subagent_steer
+            .as_ref()
+            .filter(|field| field.key == item.key)
+            .map(|field| field.input.clone())
+        else {
+            return div();
+        };
+        let can_send = !self
+            .selected_session()
+            .is_some_and(|session| !self.session_can_steer(session));
+        div()
+            .border_t_1()
+            .border_color(theme.border)
+            .p(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(sp(11.0))
+                    .text_color(theme.text_ghost)
+                    .child(tr!("background.steer_caption")),
+            )
+            .child(TextField::new("background-subagent-steer", field.clone()).w_full())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(div().flex_1())
+                    .when(!can_send, |row| {
+                        row.child(
+                            div()
+                                .text_size(sp(10.5))
+                                .text_color(theme.text_ghost)
+                                .child(tr!("background.steer_unavailable")),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id("background-subagent-steer-send")
+                            .role(Role::Button)
+                            .aria_label(tr!("background.steer"))
+                            .tab_index(0)
+                            .px(px(10.0))
+                            .h(px(26.0))
+                            .rounded(px(6.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_default()
+                            .text_size(sp(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .when(can_send, |button| {
+                                button
+                                    .bg(theme.overlay_strong)
+                                    .text_color(theme.text)
+                                    .hover(|style| style.bg(theme.overlay))
+                            })
+                            .when(!can_send, |button| button.text_color(theme.text_ghost))
+                            .focus_visible(|style| style.border_1().border_color(theme.accent))
+                            .child(tr!("background.steer"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.steer_subagent(window, cx)),
+                            ),
+                    ),
+            )
     }
 }
 
@@ -1958,7 +2142,7 @@ fn render_background_summary_row(
             click_handle.close(window, cx);
             window.refresh();
             let _ = click_weak.update(cx, |this, cx| {
-                this.open_background_work_surface(session_id, open_key.clone(), cx);
+                this.open_background_work_surface(session_id, open_key.clone(), window, cx);
             });
         })
         .on_key_down(move |event: &KeyDownEvent, window, cx| {
@@ -1966,7 +2150,7 @@ fn render_background_summary_row(
                 key_handle.close(window, cx);
                 window.refresh();
                 let _ = key_weak.update(cx, |this, cx| {
-                    this.open_background_work_surface(session_id, key_key.clone(), cx);
+                    this.open_background_work_surface(session_id, key_key.clone(), window, cx);
                 });
                 cx.stop_propagation();
             }

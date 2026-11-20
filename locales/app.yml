@@ -2982,3 +2982,13 @@ claude.marketplace_remove_title:
   en: Remove marketplace
 claude.marketplace_remove_confirm:
   en: Remove the marketplace %{name}? Plugins already installed from it stay installed.
+background.steer:
+  en: Send
+background.steer_placeholder:
+  en: Tell this subagent what to do next…
+background.steer_caption:
+  en: Relayed through the main conversation, which messages the subagent by id.
+background.steer_unavailable:
+  en: The current turn cannot take a message right now
+background.steer_prompt:
+  en: "Pass this on to the subagent %{target}, then continue: %{message}"

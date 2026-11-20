@@ -1526,3 +1526,8 @@ claude.marketplace_refresh_all: 全部刷新
 claude.marketplace_empty_hint: 只能从已添加的市场安装插件
 claude.marketplace_remove_title: 移除市场
 claude.marketplace_remove_confirm: 移除市场 %{name}？已从它安装的插件仍会保留。
+background.steer: 发送
+background.steer_placeholder: 告诉这个子代理下一步做什么…
+background.steer_caption: 经主对话转达，主对话会按 id 给子代理发消息。
+background.steer_unavailable: 当前回合暂时无法接收消息
+background.steer_prompt: 请转达给子代理 %{target}，然后继续：%{message}

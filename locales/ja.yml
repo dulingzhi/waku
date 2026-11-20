@@ -1578,3 +1578,8 @@ claude.marketplace_refresh_all: すべて更新
 claude.marketplace_empty_hint: 追加済みのマーケットプレイスからのみインストールできます
 claude.marketplace_remove_title: マーケットプレイスを削除
 claude.marketplace_remove_confirm: マーケットプレイス %{name} を削除しますか？インストール済みのプラグインは残ります。
+background.steer: 送信
+background.steer_placeholder: このサブエージェントへの次の指示…
+background.steer_caption: メイン会話を通じて伝えます。メイン会話が id でサブエージェントに送ります。
+background.steer_unavailable: 現在のターンはメッセージを受け取れません
+background.steer_prompt: サブエージェント %{target} にこれを伝えてから続けてください：%{message}

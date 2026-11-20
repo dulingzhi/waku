@@ -1316,6 +1316,11 @@ pub struct Waku {
     /// when the resident transport reconnects.
     background_work: HashMap<Uuid, BackgroundWorkRegistry>,
     last_background_work_tick: Instant,
+    /// The steering field of the subagent whose surface is open, if any.
+    ///
+    /// A subagent has no input channel of its own, so this composes a message
+    /// that goes to the parent turn and is relayed from there.
+    subagent_steer: Option<background_work::SubagentSteerField>,
     /// Accepted submissions still creating their workspace/checkpoint, or an
     /// edited past message still rewinding its workspace and provider. The
     /// session is busy immediately, while the composer draws a spinner until
@@ -3036,6 +3041,7 @@ impl Waku {
                 runtime_attach_misses: HashMap::new(),
                 background_work: HashMap::new(),
                 last_background_work_tick: Instant::now(),
+                subagent_steer: None,
                 submission_preparations: HashSet::new(),
                 escape_stop_confirmation: EscapeStopConfirmation::default(),
                 response_fork_preparations: HashMap::new(),
