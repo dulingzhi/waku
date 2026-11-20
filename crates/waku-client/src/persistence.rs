@@ -82,6 +82,7 @@ impl PromptHistory {
         true
     }
 }
+
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
 
 /// How the desktop groups task history in the sidebar.
