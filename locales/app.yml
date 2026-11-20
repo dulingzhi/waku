@@ -2758,3 +2758,60 @@ pairing.copy_code:
   en: Copy code
 pairing.code_copied:
   en: Copied
+
+settings.shortcuts:
+  en: Shortcuts
+settings.shortcuts_keywords:
+  en: shortcuts keys keyboard bindings hotkeys reference
+shortcuts.section_general:
+  en: General
+shortcuts.section_navigation:
+  en: Navigation
+shortcuts.section_agent:
+  en: Agent and models
+shortcuts.section_editing:
+  en: Editing and search
+shortcuts.new_task:
+  en: New task
+shortcuts.open_project:
+  en: Open project
+shortcuts.command_palette:
+  en: Command palette
+shortcuts.settings:
+  en: Settings
+shortcuts.close_window:
+  en: Close the window
+shortcuts.quit:
+  en: Quit
+shortcuts.toggle_sidebar:
+  en: Toggle the sidebar
+shortcuts.toggle_right_panel:
+  en: Toggle the right panel
+shortcuts.focus_composer:
+  en: Focus the message field
+shortcuts.back:
+  en: Go back
+shortcuts.forward:
+  en: Go forward
+shortcuts.switch_task_forward:
+  en: Next task
+shortcuts.switch_task_backward:
+  en: Previous task
+shortcuts.model_picker:
+  en: Choose a model
+shortcuts.usage:
+  en: Usage
+shortcuts.stop_turn:
+  en: Stop the running turn
+shortcuts.find:
+  en: Find in file
+shortcuts.find_replace:
+  en: Find and replace
+shortcuts.find_next:
+  en: Next match
+shortcuts.find_previous:
+  en: Previous match
+shortcuts.save_file:
+  en: Save the file
+shortcuts.copy:
+  en: Copy

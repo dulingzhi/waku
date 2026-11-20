@@ -1404,3 +1404,32 @@ pairing.relay_scheme_wss: 暗号化済み
 pairing.not_configured: この daemon は relay を設定していないため、ペアリングコードはありません。
 pairing.copy_code: コードをコピー
 pairing.code_copied: コピーしました
+
+settings.shortcuts: ショートカット
+settings.shortcuts_keywords: ショートカット キー キーボード 割り当て 一覧
+shortcuts.section_general: 一般
+shortcuts.section_navigation: ナビゲーション
+shortcuts.section_agent: エージェントとモデル
+shortcuts.section_editing: 編集と検索
+shortcuts.new_task: 新規タスク
+shortcuts.open_project: プロジェクトを開く
+shortcuts.command_palette: コマンドパレット
+shortcuts.settings: 設定
+shortcuts.close_window: ウィンドウを閉じる
+shortcuts.quit: 終了
+shortcuts.toggle_sidebar: サイドバーの表示切り替え
+shortcuts.toggle_right_panel: 右パネルの表示切り替え
+shortcuts.focus_composer: 入力欄にフォーカス
+shortcuts.back: 戻る
+shortcuts.forward: 進む
+shortcuts.switch_task_forward: 次のタスク
+shortcuts.switch_task_backward: 前のタスク
+shortcuts.model_picker: モデルを選択
+shortcuts.usage: 使用量
+shortcuts.stop_turn: 実行中のターンを停止
+shortcuts.find: ファイル内を検索
+shortcuts.find_replace: 検索と置換
+shortcuts.find_next: 次の一致
+shortcuts.find_previous: 前の一致
+shortcuts.save_file: ファイルを保存
+shortcuts.copy: コピー

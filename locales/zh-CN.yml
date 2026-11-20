@@ -1352,3 +1352,32 @@ pairing.relay_scheme_wss: 已加密
 pairing.not_configured: 这个 daemon 没有配置 relay，因此没有配对码。
 pairing.copy_code: 复制配对码
 pairing.code_copied: 已复制
+
+settings.shortcuts: 快捷键
+settings.shortcuts_keywords: 快捷键 按键 键盘 绑定 参考
+shortcuts.section_general: 通用
+shortcuts.section_navigation: 导航
+shortcuts.section_agent: 智能体与模型
+shortcuts.section_editing: 编辑与搜索
+shortcuts.new_task: 新任务
+shortcuts.open_project: 打开项目
+shortcuts.command_palette: 命令面板
+shortcuts.settings: 设置
+shortcuts.close_window: 关闭窗口
+shortcuts.quit: 退出
+shortcuts.toggle_sidebar: 切换侧边栏
+shortcuts.toggle_right_panel: 切换右侧面板
+shortcuts.focus_composer: 聚焦输入框
+shortcuts.back: 后退
+shortcuts.forward: 前进
+shortcuts.switch_task_forward: 下一个任务
+shortcuts.switch_task_backward: 上一个任务
+shortcuts.model_picker: 选择模型
+shortcuts.usage: 用量
+shortcuts.stop_turn: 停止当前轮次
+shortcuts.find: 在文件中查找
+shortcuts.find_replace: 查找并替换
+shortcuts.find_next: 下一个匹配
+shortcuts.find_previous: 上一个匹配
+shortcuts.save_file: 保存文件
+shortcuts.copy: 复制

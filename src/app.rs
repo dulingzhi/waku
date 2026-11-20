@@ -220,6 +220,8 @@ enum SettingsPage {
     Daemon,
     ComputerUse,
     Appearance,
+    /// A reference, not a setting: it lists the keys that are already bound.
+    Shortcuts,
 }
 
 impl SettingsPage {
@@ -1662,6 +1664,7 @@ mod right_panel;
 mod runtime;
 mod sessions;
 mod settings;
+mod shortcuts;
 mod sidebar;
 mod skills_page;
 mod streaming;

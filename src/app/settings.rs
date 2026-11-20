@@ -19,7 +19,7 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > TextInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
-const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 7] = [
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 8] = [
     (
         SettingsPage::General,
         "settings.general",
@@ -61,6 +61,12 @@ const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 7] = [
         "settings.computer_use",
         "icons/cursor-spark.svg",
         "settings.computer_use_keywords",
+    ),
+    (
+        SettingsPage::Shortcuts,
+        "settings.shortcuts",
+        "icons/command.svg",
+        "settings.shortcuts_keywords",
     ),
 ];
 
@@ -362,6 +368,7 @@ impl Waku {
                         SettingsPage::Daemon => tr!("settings.daemon"),
                         SettingsPage::ComputerUse => tr!("settings.computer_use"),
                         SettingsPage::Appearance => tr!("settings.appearance"),
+                        SettingsPage::Shortcuts => tr!("settings.shortcuts"),
                     }),
             )
             .child(match page {
@@ -372,6 +379,7 @@ impl Waku {
                 SettingsPage::Daemon => self.render_daemon_settings(cx),
                 SettingsPage::ComputerUse => self.render_computer_use_settings(cx),
                 SettingsPage::Appearance => self.render_appearance_settings(cx),
+                SettingsPage::Shortcuts => self.render_shortcuts_settings(cx),
             });
 
         div()
@@ -1711,6 +1719,73 @@ impl Waku {
                     .child(code_font_size_selector),
             )
             .into_any_element()
+    }
+
+    /// A reference rather than a setting: nothing here is editable, because the
+    /// bindings are fixed. It exists so the keys are discoverable without
+    /// finding them in the command palette one at a time.
+    fn render_shortcuts_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
+        let mut column = div().w_full().flex().flex_col().gap(px(14.0));
+        for section in crate::app::shortcuts::SHORTCUT_SECTIONS {
+            let mut card = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .rounded(px(13.0))
+                .overflow_hidden()
+                .bg(theme.raised)
+                .child(
+                    div()
+                        .px(px(20.0))
+                        .pt(px(13.0))
+                        .pb(px(9.0))
+                        .text_size(sp(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text_tertiary)
+                        .child(tr!(section.title_key)),
+                );
+            for (index, (keys, label_key)) in section.rows.iter().enumerate() {
+                if index > 0 {
+                    card = card.child(div().mx(px(20.0)).h(px(1.0)).bg(theme.border));
+                }
+                card = card.child(
+                    div()
+                        .w_full()
+                        .min_h(px(38.0))
+                        .px(px(20.0))
+                        .py(px(7.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(24.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(sp(13.0))
+                                .text_color(theme.text)
+                                .child(tr!(label_key)),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .h(px(22.0))
+                                .px(px(8.0))
+                                .rounded(px(6.0))
+                                .flex()
+                                .items_center()
+                                .bg(theme.overlay_strong)
+                                .text_size(sp(12.0))
+                                .text_color(theme.text_secondary)
+                                .child(SharedString::from(crate::app::shortcuts::display_keys(
+                                    keys,
+                                ))),
+                        ),
+                );
+            }
+            column = column.child(card);
+        }
+        column.into_any_element()
     }
 
     fn set_render_math(&mut self, enabled: bool, cx: &mut Context<Self>) {
