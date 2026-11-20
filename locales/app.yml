@@ -2942,3 +2942,7 @@ claude.reading:
   en: Reading the Claude Code configuration…
 claude.applying:
   en: Applying the change, then re-reading…
+claude.remove_title:
+  en: Remove MCP server
+claude.uninstall_title:
+  en: Uninstall plugin

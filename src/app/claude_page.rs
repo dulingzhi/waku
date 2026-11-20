@@ -14,7 +14,28 @@
 //!   control opens a confirmation rather than acting on one click.
 
 use super::*;
+use gpui::{KeyBinding, actions};
 use waku_client::claude::AvailablePlugin;
+
+actions!(
+    waku_claude_dialog,
+    [ConfirmClaudeDialog, DismissClaudeDialog]
+);
+
+/// The confirmation card's key context.
+///
+/// A single identifier on purpose: `key_context()` takes the simple
+/// `KeyContext::parse`, which does not understand `>` and recurses forever on
+/// it. The `>` form belongs only on `KeyBinding::new`'s predicate argument,
+/// which is parsed by a different parser.
+const CLAUDE_DIALOG_CONTEXT: &str = "ClaudeDialog";
+
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("enter", ConfirmClaudeDialog, Some(CLAUDE_DIALOG_CONTEXT)),
+        KeyBinding::new("escape", DismissClaudeDialog, Some(CLAUDE_DIALOG_CONTEXT)),
+    ]);
+}
 
 /// Which half of the page is showing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -416,10 +437,6 @@ impl Waku {
         body = body.child(self.render_claude_tabs(cx));
         body = body.child(self.render_claude_status(cx));
 
-        if let Some(confirm) = self.claude_confirm.clone() {
-            body = body.child(self.render_claude_confirm(&confirm, cx));
-        }
-
         body = body.child(match self.claude_tab {
             ClaudeTab::Mcp => self.render_mcp_list(cx),
             ClaudeTab::Plugins => self.render_plugin_list(cx),
@@ -527,9 +544,23 @@ impl Waku {
         row
     }
 
-    fn render_claude_confirm(&self, confirm: &ClaudeConfirm, cx: &mut Context<Self>) -> Div {
+    /// The confirmation for a destructive change, as a centred modal.
+    ///
+    /// It used to be a banner above the list, which read as a status message
+    /// rather than a question waiting on an answer: nothing blocked the page
+    /// behind it, and the buttons sat inline with the rows. A destructive
+    /// action on configuration Waku cannot restore should stop the page until
+    /// it is answered.
+    ///
+    /// Returns `None` when nothing is pending, so the caller can splice it in
+    /// with `.children()` the way the other modals are attached.
+    pub(super) fn render_claude_confirm_dialog(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let confirm = self.claude_confirm.as_ref()?.clone();
         let theme = Theme::current(cx);
-        let message = match confirm {
+        let message = match &confirm {
             ClaudeConfirm::RemoveMcp { name, scope } => tr!(
                 "claude.remove_confirm",
                 name = name.clone(),
@@ -539,37 +570,99 @@ impl Waku {
                 tr!("claude.uninstall_confirm", name = name.clone())
             }
         };
-        div()
+        let title = match &confirm {
+            ClaudeConfirm::RemoveMcp { .. } => tr!("claude.remove_title"),
+            ClaudeConfirm::UninstallPlugin { .. } => tr!("claude.uninstall_title"),
+        };
+
+        let card = div()
+            .id("claude-confirm-card")
+            .key_context(CLAUDE_DIALOG_CONTEXT)
+            .on_action(
+                cx.listener(|this, _: &ConfirmClaudeDialog, _, cx| this.confirm_claude_action(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &DismissClaudeDialog, _, cx| this.cancel_claude_action(cx)),
+            )
+            .w_full()
+            .max_w(px(420.0))
+            .overflow_hidden()
+            .rounded(px(14.0))
+            .bg(theme.composer)
+            .shadow_xl()
             .flex()
-            .items_center()
-            .gap(px(10.0))
-            .p(px(12.0))
-            .rounded(px(9.0))
-            .border_1()
-            .border_color(theme.danger)
-            .bg(theme.danger.opacity(0.08))
+            .flex_col()
+            // Clicks inside the card must not reach the scrim, which dismisses.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(sp(12.5))
+                    .px(px(18.0))
+                    .pt(px(16.0))
+                    .pb(px(6.0))
+                    .text_size(sp(14.0))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .px(px(18.0))
+                    .pb(px(16.0))
+                    .text_size(sp(13.0))
+                    .line_height(sp(19.0))
+                    .text_color(theme.text_secondary)
                     .child(message),
             )
-            .child(self.claude_confirm_button(
-                "claude-confirm",
-                tr!("common.confirm"),
-                true,
-                cx,
-                |this, cx| this.confirm_claude_action(cx),
-            ))
-            .child(self.claude_confirm_button(
-                "claude-cancel",
-                tr!("common.cancel"),
-                false,
-                cx,
-                |this, cx| this.cancel_claude_action(cx),
-            ))
+            .child(div().mx(px(18.0)).h(px(1.0)).bg(theme.border))
+            .child(
+                div()
+                    .p(px(10.0))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.0))
+                    .child(self.claude_confirm_button(
+                        "claude-confirm-cancel",
+                        tr!("common.cancel"),
+                        false,
+                        cx,
+                        |this, cx| this.cancel_claude_action(cx),
+                    ))
+                    .child(self.claude_confirm_button(
+                        "claude-confirm-accept",
+                        tr!("common.confirm"),
+                        true,
+                        cx,
+                        |this, cx| this.confirm_claude_action(cx),
+                    )),
+            );
+
+        // The scrim matches the other modals' weights so a dark theme does not
+        // go muddy and a light one does not wash out.
+        let scrim = if theme.is_dark {
+            gpui::hsla(0.0, 0.0, 0.0, 0.34)
+        } else {
+            gpui::hsla(0.0, 0.0, 0.0, 0.16)
+        };
+        let layer = div()
+            .id("claude-confirm-layer")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(scrim)
+            .p(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            // Clicking the scrim cancels, the same as Escape: a confirmation
+            // this serious should be easy to back out of and hard to accept by
+            // accident.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.cancel_claude_action(cx)),
+            )
+            .child(card);
+        Some(gpui::deferred(layer).with_priority(4).into_any_element())
     }
 
     fn claude_confirm_button(
@@ -586,15 +679,16 @@ impl Waku {
             .role(Role::Button)
             .aria_label(label.clone())
             .tab_index(0)
-            .px(px(10.0))
-            .h(px(26.0))
+            .px(px(14.0))
+            .h(px(30.0))
             .flex_none()
-            .rounded(px(6.0))
+            .rounded(px(7.0))
             .flex()
             .items_center()
             .justify_center()
             .cursor_default()
-            .text_size(sp(12.0))
+            .text_size(sp(12.5))
+            .font_weight(FontWeight::MEDIUM)
             .when(destructive, |element| {
                 element.bg(theme.danger).text_color(theme.on_inverse)
             })
@@ -1655,6 +1749,28 @@ mod tests {
             install_count: Some(1),
             installed: false,
         }
+    }
+
+    /// The confirmation's key context must stay a single identifier.
+    ///
+    /// `key_context()` goes through `KeyContext::parse`, which does not
+    /// understand `>`: it consumes no characters, recurses on the same input,
+    /// and overflows the stack at render time. Unit tests cannot catch that —
+    /// it needs a real window — so the contract is pinned here. This is the
+    /// same failure that already crashed the app once, through the prompt
+    /// history context.
+    #[test]
+    fn the_confirmation_context_is_a_single_identifier() {
+        assert!(
+            !CLAUDE_DIALOG_CONTEXT.contains('>'),
+            "an element key_context cannot contain `>`"
+        );
+        assert!(
+            CLAUDE_DIALOG_CONTEXT
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "every character must be one the simple parser consumes"
+        );
     }
 
     /// An empty filter must match everything: the browse list opens unfiltered,

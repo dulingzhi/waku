@@ -253,6 +253,7 @@ impl Render for Waku {
             let commit_dialog = self.render_commit_dialog(cx);
             let goal_dialog = self.render_goal_dialog(window, cx);
             let directory_picker = self.render_daemon_directory_picker(window, cx);
+            let claude_confirm = self.render_claude_confirm_dialog(cx);
             let toast = self.render_active_toast(cx);
             let content = div()
                 .relative()
@@ -272,6 +273,10 @@ impl Render for Waku {
                 .children(commit_dialog)
                 .children(goal_dialog)
                 .children(directory_picker)
+                // After the other modals: a confirmation about the Claude page
+                // is the newest thing on screen and nothing else should cover
+                // the question.
+                .children(claude_confirm)
                 .children(image_preview)
                 .children(task_switcher)
                 .into_any_element();
