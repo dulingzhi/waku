@@ -386,6 +386,53 @@ impl Backend for WakuBackend {
                 .map_err(|error| anyhow!(error))?;
                 Ok(ResponsePayload::Ack)
             }
+            Command::LoadClaudeMarketplaces => {
+                let override_spec = self.claude_binary_override();
+                Ok(ResponsePayload::ClaudeMarketplaceCatalog {
+                    catalog: crate::claude_config::list_marketplaces(override_spec.as_deref()),
+                })
+            }
+            Command::LoadAvailableClaudePlugins => {
+                let override_spec = self.claude_binary_override();
+                // The installed list is the reference for "already installed":
+                // passing it in keeps the flag on the row consistent with what
+                // the Plugins tab shows, rather than trusting the available
+                // list's own opinion of itself.
+                let installed = crate::claude_config::list_plugins(override_spec.as_deref(), None);
+                Ok(ResponsePayload::ClaudeAvailablePluginCatalog {
+                    catalog: crate::claude_config::list_available_plugins(
+                        override_spec.as_deref(),
+                        &installed.plugins,
+                    ),
+                })
+            }
+            Command::LoadClaudePluginDetails { id, install_path } => {
+                Ok(ResponsePayload::ClaudePluginDetails {
+                    details: crate::claude_config::plugin_details(&id, install_path.as_deref()),
+                })
+            }
+            Command::InstallClaudePlugin { id, scope, cwd } => {
+                let override_spec = self.claude_binary_override();
+                crate::claude_config::install_plugin(
+                    override_spec.as_deref(),
+                    cwd.as_deref(),
+                    &id,
+                    scope,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::Ack)
+            }
+            Command::UpdateClaudePlugin { id, scope, cwd } => {
+                let override_spec = self.claude_binary_override();
+                crate::claude_config::update_plugin(
+                    override_spec.as_deref(),
+                    cwd.as_deref(),
+                    &id,
+                    scope,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::Ack)
+            }
             Command::LoadTaskState => {
                 let state = self.task_state.lock();
                 Ok(ResponsePayload::TaskState {
@@ -1853,6 +1900,11 @@ fn handle_driver_command(
         | Command::LoadClaudePlugins
         | Command::SetClaudePluginEnabled { .. }
         | Command::UninstallClaudePlugin { .. }
+        | Command::LoadClaudeMarketplaces
+        | Command::LoadAvailableClaudePlugins
+        | Command::LoadClaudePluginDetails { .. }
+        | Command::InstallClaudePlugin { .. }
+        | Command::UpdateClaudePlugin { .. }
         | Command::LoadTaskState
         | Command::SaveTaskState { .. }
         | Command::RemoveSession

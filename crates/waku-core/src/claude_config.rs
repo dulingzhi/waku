@@ -16,8 +16,9 @@
 use std::path::{Path, PathBuf};
 
 use waku_protocol::claude::{
-    McpCatalog, McpHealth, McpScope, McpServerEntry, McpTransport, PluginCatalog, PluginComponent,
-    PluginEntry,
+    AvailablePlugin, AvailablePluginCatalog, MarketplaceCatalog, MarketplaceEntry, McpCatalog,
+    McpHealth, McpScope, McpServerEntry, McpTransport, PluginCatalog, PluginComponent,
+    PluginDetails, PluginEntry,
 };
 
 use crate::command_env;
@@ -391,6 +392,288 @@ pub fn uninstall_plugin(
     run_claude(&binary, &["plugin", "uninstall", id, "--scope", flag], cwd).map(|_| ())
 }
 
+// ── Marketplaces and installing ────────────────────────────────────────────
+
+/// The marketplaces the user has added.
+///
+/// Cheap (~1s) and part of what the Plugins tab shows, because a plugin cannot
+/// be installed from a marketplace that is not listed here.
+pub fn list_marketplaces(override_spec: Option<&str>) -> MarketplaceCatalog {
+    let Some(binary) = claude_binary(override_spec) else {
+        return MarketplaceCatalog {
+            marketplaces: Vec::new(),
+            unavailable: Some(tr!("claude.cli_not_found")),
+        };
+    };
+    match run_claude(&binary, &["plugin", "marketplace", "list", "--json"], None) {
+        Ok(stdout) => match parse_marketplace_list(&stdout) {
+            Ok(marketplaces) => MarketplaceCatalog {
+                marketplaces,
+                unavailable: None,
+            },
+            Err(error) => MarketplaceCatalog {
+                marketplaces: Vec::new(),
+                unavailable: Some(error),
+            },
+        },
+        Err(error) => MarketplaceCatalog {
+            marketplaces: Vec::new(),
+            unavailable: Some(error),
+        },
+    }
+}
+
+fn parse_marketplace_list(stdout: &str) -> Result<Vec<MarketplaceEntry>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|error| error.to_string())?;
+    let Some(items) = value.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            Some(MarketplaceEntry {
+                name: item.get("name")?.as_str()?.to_owned(),
+                source: item
+                    .get("source")
+                    .and_then(|source| source.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                repo: item
+                    .get("repo")
+                    .and_then(|repo| repo.as_str())
+                    .map(str::to_owned),
+                install_location: item
+                    .get("installLocation")
+                    .and_then(|path| path.as_str())
+                    .map(str::to_owned),
+            })
+        })
+        .collect())
+}
+
+/// Everything the added marketplaces offer, installed or not.
+///
+/// This is the one expensive read in the whole page: it makes the CLI refresh
+/// every marketplace before answering, measured on this machine at ~10s for
+/// 3916 entries and 2.4 MB of JSON. It is therefore a command of its own that
+/// the page runs only when asked, never as part of opening the tab.
+pub fn list_available_plugins(
+    override_spec: Option<&str>,
+    installed: &[PluginEntry],
+) -> AvailablePluginCatalog {
+    let Some(binary) = claude_binary(override_spec) else {
+        return AvailablePluginCatalog {
+            plugins: Vec::new(),
+            unavailable: Some(tr!("claude.cli_not_found")),
+        };
+    };
+    match run_claude(&binary, &["plugin", "list", "--available", "--json"], None) {
+        Ok(stdout) => match parse_available_plugins(&stdout, installed) {
+            Ok(plugins) => AvailablePluginCatalog {
+                plugins,
+                unavailable: None,
+            },
+            Err(error) => AvailablePluginCatalog {
+                plugins: Vec::new(),
+                unavailable: Some(error),
+            },
+        },
+        Err(error) => AvailablePluginCatalog {
+            plugins: Vec::new(),
+            unavailable: Some(error),
+        },
+    }
+}
+
+/// `--available` answers an object with `installed` and `available` arrays,
+/// unlike plain `list`, which answers a bare array. Both shapes are accepted so
+/// a CLI that drops the wrapper does not empty the page.
+fn parse_available_plugins(
+    stdout: &str,
+    installed: &[PluginEntry],
+) -> Result<Vec<AvailablePlugin>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|error| error.to_string())?;
+    let items = match value.get("available").and_then(|list| list.as_array()) {
+        Some(items) => items.clone(),
+        None => match value.as_array() {
+            Some(items) => items.clone(),
+            None => return Ok(Vec::new()),
+        },
+    };
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("pluginId").and_then(|id| id.as_str())?.to_owned();
+            let (name, marketplace) = match id.split_once('@') {
+                Some((name, marketplace)) => (name.to_owned(), marketplace.to_owned()),
+                None => (id.clone(), String::new()),
+            };
+            Some(AvailablePlugin {
+                installed: installed.iter().any(|plugin| plugin.id == id),
+                id,
+                name,
+                marketplace,
+                description: item
+                    .get("description")
+                    .and_then(|description| description.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                install_count: item.get("installCount").and_then(|count| count.as_u64()),
+            })
+        })
+        .collect())
+}
+
+pub fn install_plugin(
+    override_spec: Option<&str>,
+    cwd: Option<&Path>,
+    id: &str,
+    scope: McpScope,
+) -> Result<(), String> {
+    let binary = claude_binary(override_spec).ok_or_else(|| tr!("claude.cli_not_found"))?;
+    // `plugin install` defaults to user scope, which would install a plugin
+    // into every project when the page meant this one.
+    let Some(flag) = scope.cli_flag() else {
+        return Err(tr!("claude.plugin_server_not_removable"));
+    };
+    // `--json` keeps the result one line instead of a progress display. `-y`
+    // is required because this runs without a TTY: without it the CLI refuses
+    // a plugin whose marketplace declares an install command, which is the
+    // safe default but has to be answered deliberately, not silently.
+    run_claude(
+        &binary,
+        &["plugin", "install", id, "--scope", flag, "--json", "-y"],
+        cwd,
+    )
+    .map(|_| ())
+}
+
+pub fn update_plugin(
+    override_spec: Option<&str>,
+    cwd: Option<&Path>,
+    id: &str,
+    scope: Option<McpScope>,
+) -> Result<(), String> {
+    let binary = claude_binary(override_spec).ok_or_else(|| tr!("claude.cli_not_found"))?;
+    let mut args = vec!["plugin", "update", id, "--json", "-y"];
+    // `update` auto-detects its scope, unlike `install` and `uninstall`, so the
+    // flag is only passed when the caller knows it. A plugin scope has no flag.
+    if let Some(flag) = scope.and_then(McpScope::cli_flag) {
+        args.push("--scope");
+        args.push(flag);
+    }
+    run_claude(&binary, &args, cwd).map(|_| ())
+}
+
+/// Read one installed plugin's manifest from its install path.
+///
+/// `claude plugin details` would be the obvious source, but it resolves plugins
+/// against the current directory: a project-scoped plugin installed for another
+/// project answers "not found" from here, and this page lists every scope. The
+/// manifest is a file both cases have, so it is read directly — a read only,
+/// which is why it does not break the "never rewrite Claude's config" rule.
+pub fn plugin_details(id: &str, install_path: Option<&Path>) -> PluginDetails {
+    let mut details = PluginDetails {
+        id: id.to_owned(),
+        name: id.split_once('@').map_or(id, |(name, _)| name).to_owned(),
+        version: String::new(),
+        description: String::new(),
+        author: None,
+        homepage: None,
+        mcp_servers: Vec::new(),
+        components: Vec::new(),
+        // Installed from a marketplace is exactly "has an id with @ and a
+        // version to move forward from".
+        can_update: id.contains('@'),
+    };
+    let Some(root) = install_path else {
+        details.can_update = false;
+        return details;
+    };
+    let manifest = root.join(".claude-plugin").join("plugin.json");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        // A missing manifest is not an error worth a page: the plugin is still
+        // listed, and the summary carries whatever `plugin list` already knew.
+        details.can_update = false;
+        return details;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        details.can_update = false;
+        return details;
+    };
+    if let Some(name) = value.get("name").and_then(|name| name.as_str()) {
+        details.name = name.to_owned();
+    }
+    if let Some(version) = value.get("version").and_then(|version| version.as_str()) {
+        details.version = version.to_owned();
+    }
+    if let Some(description) = value.get("description").and_then(|text| text.as_str()) {
+        details.description = description.to_owned();
+    }
+    // `author` is either a string or an object with a `name`, depending on the
+    // manifest version, so both shapes are read rather than assuming one.
+    details.author = match value.get("author") {
+        Some(serde_json::Value::String(name)) => Some(name.clone()),
+        Some(author) => author
+            .get("name")
+            .and_then(|name| name.as_str())
+            .map(str::to_owned),
+        None => None,
+    };
+    details.homepage = value
+        .get("homepage")
+        .and_then(|homepage| homepage.as_str())
+        .map(str::to_owned);
+    if let Some(servers) = value
+        .get("mcpServers")
+        .and_then(|servers| servers.as_object())
+    {
+        details.mcp_servers = servers.keys().cloned().collect();
+    }
+    // Every other component kind the manifest declares, in the `kind: name`
+    // form the page shows. Unknown kinds are kept so a newer manifest still
+    // reports what it ships instead of looking empty.
+    for kind in [
+        "skills",
+        "agents",
+        "commands",
+        "hooks",
+        "lspServers",
+        "outputStyles",
+    ] {
+        let Some(entries) = value.get(kind) else {
+            continue;
+        };
+        match entries {
+            // A list of names.
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    if let Some(name) = item.as_str() {
+                        details.components.push(PluginComponent {
+                            kind: kind.to_owned(),
+                            name: name.to_owned(),
+                        });
+                    }
+                }
+            }
+            // An object keyed by name, which is how hooks and LSP servers are
+            // declared.
+            serde_json::Value::Object(map) => {
+                for name in map.keys() {
+                    details.components.push(PluginComponent {
+                        kind: kind.to_owned(),
+                        name: name.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    details
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +829,150 @@ plugin:ida-pro-mcp:idalib:
             assert!(scope.is_removable());
             assert!(scope.cli_flag().is_some());
         }
+    }
+
+    fn installed_plugin(id: &str) -> PluginEntry {
+        PluginEntry {
+            id: id.into(),
+            name: id.split_once('@').map_or(id, |(name, _)| name).into(),
+            marketplace: id.split_once('@').map_or("", |(_, market)| market).into(),
+            version: "1.0.0".into(),
+            scope: McpScope::User,
+            enabled: true,
+            project_enabled: false,
+            description: String::new(),
+            mcp_servers: Vec::new(),
+            components: Vec::new(),
+            install_path: None,
+        }
+    }
+
+    /// `--available` wraps its payload in `{installed, available}`, unlike the
+    /// bare array plain `list` returns. Reading only the wrapped shape would
+    /// silently show nothing if the CLI ever dropped the wrapper.
+    #[test]
+    fn available_plugins_read_the_wrapped_and_bare_shapes() {
+        let wrapped = r#"{"installed":[],"available":[
+            {"pluginId":"a@m","name":"a","description":"first","marketplaceName":"m","installCount":12}
+        ]}"#;
+        let plugins = parse_available_plugins(wrapped, &[]).unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].id, "a@m");
+        assert_eq!(plugins[0].install_count, Some(12));
+        assert!(!plugins[0].installed);
+
+        let bare = r#"[{"pluginId":"a@m","name":"a","installCount":12}]"#;
+        assert_eq!(parse_available_plugins(bare, &[]).unwrap().len(), 1);
+    }
+
+    /// The installed flag decides whether the row offers Install at all, so it
+    /// must come from the installed catalog rather than from the available
+    /// list's own opinion of itself.
+    #[test]
+    fn an_available_plugin_already_installed_is_marked_so() {
+        let json = r#"[{"pluginId":"a@m","name":"a"}]"#;
+        let plugins = parse_available_plugins(json, &[installed_plugin("a@m")]).unwrap();
+        assert!(plugins[0].installed);
+    }
+
+    #[test]
+    fn marketplaces_carry_their_source_and_location() {
+        let json = r#"[
+            {"name":"mrexodia","source":"github","repo":"mrexodia/claude-marketplace",
+             "installLocation":"C:\\cache\\mrexodia"}
+        ]"#;
+        let marketplaces = parse_marketplace_list(json).unwrap();
+        assert_eq!(marketplaces.len(), 1);
+        assert_eq!(marketplaces[0].name, "mrexodia");
+        assert_eq!(
+            marketplaces[0].repo.as_deref(),
+            Some("mrexodia/claude-marketplace")
+        );
+        assert_eq!(
+            marketplaces[0].install_location.as_deref(),
+            Some("C:\\cache\\mrexodia")
+        );
+    }
+
+    fn write_manifest(dir: &Path, body: &str) {
+        let manifest_dir = dir.join(".claude-plugin");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(manifest_dir.join("plugin.json"), body).unwrap();
+    }
+
+    /// `author` is a plain string in some manifests and `{name}` in others, and
+    /// both are in use on this machine. Reading only one shape would drop the
+    /// author from half the plugins.
+    #[test]
+    fn plugin_details_read_both_author_shapes() {
+        let root = std::env::temp_dir().join("waku-plugin-details-author");
+        let _ = std::fs::remove_dir_all(&root);
+        write_manifest(&root, r#"{"name":"p","author":"A Person"}"#);
+        assert_eq!(
+            plugin_details("p@m", Some(&root)).author.as_deref(),
+            Some("A Person")
+        );
+
+        write_manifest(
+            &root,
+            r#"{"name":"p","author":{"name":"Anthropic","email":"x@y.z"}}"#,
+        );
+        assert_eq!(
+            plugin_details("p@m", Some(&root)).author.as_deref(),
+            Some("Anthropic")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The manifest lists most component kinds as arrays but hooks and LSP
+    /// servers as objects keyed by name; a parser that only handles arrays
+    /// reports a plugin with hooks as having none.
+    #[test]
+    fn plugin_details_collect_every_component_kind() {
+        let root = std::env::temp_dir().join("waku-plugin-details-kinds");
+        let _ = std::fs::remove_dir_all(&root);
+        write_manifest(
+            &root,
+            r#"{
+                "name":"p","version":"2.1.0","description":"d",
+                "mcpServers":{"srv":{"command":"x"}},
+                "skills":["one","two"],
+                "commands":["ship"],
+                "hooks":{"PreToolUse":[]},
+                "lspServers":{"rust":{}}
+            }"#,
+        );
+        let details = plugin_details("p@m", Some(&root));
+        assert_eq!(details.version, "2.1.0");
+        assert_eq!(details.mcp_servers, ["srv"]);
+        let kinds: Vec<(&str, &str)> = details
+            .components
+            .iter()
+            .map(|component| (component.kind.as_str(), component.name.as_str()))
+            .collect();
+        assert!(kinds.contains(&("skills", "one")));
+        assert!(kinds.contains(&("skills", "two")));
+        assert!(kinds.contains(&("commands", "ship")));
+        assert!(kinds.contains(&("hooks", "PreToolUse")));
+        assert!(kinds.contains(&("lspServers", "rust")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A missing manifest must not crash or claim updatability: the plugin is
+    /// still listed, it just has nothing to read and nothing to update from.
+    #[test]
+    fn plugin_details_survive_a_missing_manifest() {
+        let root = std::env::temp_dir().join("waku-plugin-details-missing");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let details = plugin_details("p@m", Some(&root));
+        assert_eq!(details.name, "p");
+        assert!(!details.can_update);
+        assert!(details.components.is_empty());
+
+        let none = plugin_details("p@m", None);
+        assert_eq!(none.name, "p");
+        assert!(!none.can_update);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
