@@ -1560,3 +1560,21 @@ claude.reading: Claude Code の設定を読み取り中です…
 claude.applying: 変更を適用して再読み取り中です…
 claude.remove_title: MCP サーバーを削除
 claude.uninstall_title: プラグインをアンインストール
+claude.discover: プラグインを探す
+claude.configure: 設定
+claude.hide_config: オプションを閉じる
+claude.config_leave_to_keep: 空欄のままにすると保存済みの値を保持します
+claude.config_set: 保存済み
+claude.config_secret_set: 保存済み（非表示）
+claude.config_secret_hidden: 保存済みの値は再表示されません
+claude.config_none: このプラグインに設定可能な項目はありません
+claude.config_unavailable: プラグインのオプションを読み取れませんでした：%{error}
+claude.config_orphaned: 対応する項目がない保存値：%{keys}
+claude.marketplace_add: マーケットプレイスを追加
+claude.marketplace_source_hint: owner/repo、https または git の URL、デーモン上のパス
+claude.marketplace_scope: 宣言先
+claude.marketplace_refresh: 更新
+claude.marketplace_refresh_all: すべて更新
+claude.marketplace_empty_hint: 追加済みのマーケットプレイスからのみインストールできます
+claude.marketplace_remove_title: マーケットプレイスを削除
+claude.marketplace_remove_confirm: マーケットプレイス %{name} を削除しますか？インストール済みのプラグインは残ります。

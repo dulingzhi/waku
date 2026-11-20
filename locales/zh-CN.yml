@@ -1508,3 +1508,21 @@ claude.reading: 正在读取 Claude Code 配置…
 claude.applying: 正在应用更改并重新读取…
 claude.remove_title: 移除 MCP 服务器
 claude.uninstall_title: 卸载插件
+claude.discover: 发现插件
+claude.configure: 配置
+claude.hide_config: 收起选项
+claude.config_leave_to_keep: 留空则保留已保存的值
+claude.config_set: 已保存
+claude.config_secret_set: 已保存（隐藏）
+claude.config_secret_hidden: 已保存的值不会再次显示
+claude.config_none: 该插件没有可配置项
+claude.config_unavailable: 无法读取插件配置项：%{error}
+claude.config_orphaned: 已保存但没有对应配置项的值：%{keys}
+claude.marketplace_add: 添加市场
+claude.marketplace_source_hint: owner/repo、https 或 git 地址，或守护进程上的路径
+claude.marketplace_scope: 声明在
+claude.marketplace_refresh: 刷新
+claude.marketplace_refresh_all: 全部刷新
+claude.marketplace_empty_hint: 只能从已添加的市场安装插件
+claude.marketplace_remove_title: 移除市场
+claude.marketplace_remove_confirm: 移除市场 %{name}？已从它安装的插件仍会保留。

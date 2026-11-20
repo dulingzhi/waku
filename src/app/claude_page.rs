@@ -42,10 +42,14 @@ pub fn init(cx: &mut App) {
 pub(super) enum ClaudeTab {
     #[default]
     Mcp,
+    /// Installed plugins, plus discovery and install of everything the
+    /// marketplaces offer.
+    ///
+    /// Discovery lives here rather than in its own tab because installing is
+    /// what you do after finding something: splitting them would make the user
+    /// switch tabs between two halves of one action.
     Plugins,
-    /// The plugins the added marketplaces offer, plus the marketplaces
-    /// themselves. Separate from `Plugins` because reading it is expensive:
-    /// the CLI refreshes every marketplace before answering (~10s here).
+    /// Where plugins come from: add, refresh and remove marketplaces.
     Marketplace,
 }
 
@@ -60,6 +64,12 @@ pub(super) enum ClaudeConfirm {
         id: String,
         name: String,
         scope: McpScope,
+    },
+    /// Remove a marketplace declaration. Its plugins stay installed; only the
+    /// source is forgotten, which is why the text says so rather than implying
+    /// an uninstall.
+    RemoveMarketplace {
+        name: String,
     },
 }
 
@@ -357,8 +367,172 @@ impl Waku {
             ClaudeConfirm::UninstallPlugin { id, scope, .. } => {
                 waku_client::Command::UninstallClaudePlugin { id, scope, cwd }
             }
+            // Removing a declaration has no scope: the CLI removes it from
+            // every layer, which is what the confirmation text promises.
+            ClaudeConfirm::RemoveMarketplace { name } => {
+                waku_client::Command::RemoveClaudeMarketplace { name, scope: None }
+            }
         };
         self.run_claude_mutation(command, cx);
+    }
+
+    /// Run one of the verbs that answer with a structured result.
+    ///
+    /// Kept separate from [`Self::run_claude_mutation`] because these report
+    /// partial success in their own words — a marketplace refresh that timed
+    /// out but still listed its plugins, say — and that text has to stay on
+    /// screen rather than flash by in a toast.
+    fn run_claude_action(&mut self, command: waku_client::Command, cx: &mut Context<Self>) {
+        self.claude_mutating = true;
+        self.claude_action_result = None;
+        cx.notify();
+        let daemon = self.daemon.client();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { daemon.request(Uuid::nil(), Uuid::nil(), command) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.claude_mutating = false;
+                match result {
+                    Err(error) => this.show_toast(error.to_string()),
+                    Ok(waku_client::ResponsePayload::ClaudeAction { result }) => {
+                        if !result.ok {
+                            // A failure keeps its message in the banner too:
+                            // the CLI's reason is the whole point.
+                            this.show_toast(result.message.clone());
+                        }
+                        this.claude_action_result = Some(Rc::new(result));
+                    }
+                    Ok(_) => this.show_toast(tr!("errors.unexpected_response")),
+                }
+                // Both writes change what the catalogs would report.
+                this.reload_claude_catalog(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Declare the marketplace whose address is in the field.
+    fn add_marketplace(&mut self, cx: &mut Context<Self>) {
+        let source = self
+            .claude_marketplace_source
+            .read(cx)
+            .content()
+            .trim()
+            .to_owned();
+        if source.is_empty() {
+            return;
+        }
+        let cwd = self.selected_workspace_path().map(Path::to_path_buf);
+        let scope = self.claude_marketplace_scope;
+        self.claude_marketplace_adding = false;
+        self.claude_marketplace_source
+            .update(cx, |input, cx| input.set_content("", cx));
+        self.run_claude_action(
+            waku_client::Command::AddClaudeMarketplace { source, scope, cwd },
+            cx,
+        );
+    }
+
+    /// Refresh one marketplace, or every one when `name` is `None`.
+    fn refresh_marketplace(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.run_claude_action(waku_client::Command::UpdateClaudeMarketplace { name }, cx);
+    }
+
+    /// Read a plugin's options into the form.
+    ///
+    /// Options are stored per key and a text field binds one, so the fields are
+    /// built when the form opens — `TextInput::new` needs the window, which a
+    /// render path does not have.
+    fn open_plugin_config(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.claude_config_plugin.as_deref() == Some(id.as_str()) {
+            self.claude_config_plugin = None;
+            self.claude_config_fields.clear();
+            self.claude_config_catalog = None;
+            cx.notify();
+            return;
+        }
+        self.claude_config_plugin = Some(id.clone());
+        self.claude_config_fields.clear();
+        self.claude_config_catalog = None;
+        cx.notify();
+        let daemon = self.daemon.client();
+        // The project the plugin may be scoped to: `configure` resolves against
+        // it, so a project-scoped plugin cannot be read from anywhere else.
+        let cwd = self.selected_workspace_path().map(Path::to_path_buf);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    daemon.request(
+                        Uuid::nil(),
+                        Uuid::nil(),
+                        waku_client::Command::LoadClaudePluginConfig {
+                            id: id.clone(),
+                            cwd,
+                        },
+                    )
+                })
+                .await;
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    match result {
+                        Ok(waku_client::ResponsePayload::ClaudePluginConfigCatalog { catalog }) => {
+                            if let Some(error) = catalog.unavailable.clone() {
+                                this.show_toast(error);
+                            }
+                            this.claude_config_catalog = Some(Rc::new(catalog.clone()));
+                            // A field per option. A secret or an already-saved
+                            // value is never echoed, so its field starts empty
+                            // and the placeholder says a value is kept.
+                            this.claude_config_fields = catalog
+                                .options
+                                .iter()
+                                .map(|option| {
+                                    let field = cx.new(|cx| {
+                                        TextInput::new(window, cx).clear_on_escape().placeholder(
+                                            if option.is_set {
+                                                tr!("claude.config_leave_to_keep")
+                                            } else {
+                                                option.title.clone()
+                                            },
+                                        )
+                                    });
+                                    (option.key.clone(), field)
+                                })
+                                .collect();
+                        }
+                        Err(error) => this.show_toast(error.to_string()),
+                        Ok(_) => this.show_toast(tr!("errors.unexpected_response")),
+                    }
+                    cx.notify();
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Save whatever the option form holds. Empty fields are omitted, which is
+    /// the CLI's own rule: an option left out keeps its saved value.
+    fn save_plugin_config(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.claude_config_plugin.clone() else {
+            return;
+        };
+        let values: Vec<String> = self
+            .claude_config_fields
+            .iter()
+            .filter_map(|(key, field)| {
+                let value = field.read(cx).content().trim().to_owned();
+                (!value.is_empty()).then(|| format!("{key}={value}"))
+            })
+            .collect();
+        let cwd = self.selected_workspace_path().map(Path::to_path_buf);
+        self.run_claude_action(
+            waku_client::Command::SetClaudePluginConfig { id, values, cwd },
+            cx,
+        );
     }
 
     pub(super) fn cancel_claude_action(&mut self, cx: &mut Context<Self>) {
@@ -569,10 +743,14 @@ impl Waku {
             ClaudeConfirm::UninstallPlugin { name, .. } => {
                 tr!("claude.uninstall_confirm", name = name.clone())
             }
+            ClaudeConfirm::RemoveMarketplace { name } => {
+                tr!("claude.marketplace_remove_confirm", name = name.clone())
+            }
         };
         let title = match &confirm {
             ClaudeConfirm::RemoveMcp { .. } => tr!("claude.remove_title"),
             ClaudeConfirm::UninstallPlugin { .. } => tr!("claude.uninstall_title"),
+            ClaudeConfirm::RemoveMarketplace { .. } => tr!("claude.marketplace_remove_title"),
         };
 
         let card = div()
@@ -869,6 +1047,11 @@ impl Waku {
             })
     }
 
+    /// Installed plugins, then the discovery list underneath.
+    ///
+    /// Discovery sits below what is installed rather than in its own tab:
+    /// finding a plugin and installing it are one action, and the user needs to
+    /// see what is already installed while deciding.
     fn render_plugin_list(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let Some(catalog) = self.claude_plugin_catalog.clone() else {
@@ -877,15 +1060,77 @@ impl Waku {
         if let Some(error) = catalog.unavailable.clone() {
             return self.claude_placeholder(&tr!("claude.plugins_unavailable", error = error), cx);
         }
-        if catalog.plugins.is_empty() {
-            return self.claude_placeholder(&tr!("claude.plugins_empty"), cx);
-        }
 
-        let mut list = div().flex().flex_col().gap(px(6.0)).w_full();
-        for plugin in &catalog.plugins {
-            list = list.child(self.render_plugin_row(plugin, &theme, cx));
+        let mut body = div().flex().flex_col().gap(px(10.0)).w_full();
+        body = body.child(self.render_claude_action_banner(cx));
+
+        if catalog.plugins.is_empty() {
+            body = body.child(self.claude_placeholder(&tr!("claude.plugins_empty"), cx));
+        } else {
+            let mut list = div().flex().flex_col().gap(px(6.0)).w_full();
+            for plugin in &catalog.plugins {
+                list = list.child(self.render_plugin_row(plugin, &theme, cx));
+            }
+            body = body.child(list);
         }
-        list
+        body.child(self.render_discovery(cx))
+    }
+
+    /// The discovery half of the Plugins tab: refresh, filter, install.
+    fn render_discovery(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(7.0))
+            .w_full()
+            .pt(px(6.0))
+            .border_t_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(sp(12.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_secondary)
+                            .child(tr!("claude.discover")),
+                    )
+                    .child(self.claude_text_button(
+                        "claude-discover-refresh",
+                        if self.claude_available_catalog.is_some() {
+                            tr!("claude.browse_refresh")
+                        } else {
+                            tr!("claude.browse")
+                        },
+                        false,
+                        cx,
+                        |this, _, cx| this.load_available_plugins(cx),
+                    )),
+            );
+
+        if self.claude_available_pending {
+            return body.child(self.claude_placeholder(&tr!("claude.browse_pending"), cx));
+        }
+        let Some(catalog) = self.claude_available_catalog.clone() else {
+            return body.child(
+                div()
+                    .text_size(sp(11.0))
+                    .text_color(theme.text_ghost)
+                    .child(tr!("claude.browse_hint")),
+            );
+        };
+        if let Some(error) = catalog.unavailable.clone() {
+            return body.child(
+                self.claude_placeholder(&tr!("claude.browse_unavailable", error = error), cx),
+            );
+        }
+        body.child(self.render_available_list(catalog, cx))
     }
 
     fn render_plugin_row(
@@ -923,6 +1168,7 @@ impl Waku {
         let click_plugin = plugin.clone();
         let key_plugin = plugin.clone();
         let details_open = self.claude_detail.as_ref().map(|(open, _)| open) == Some(&plugin.id);
+        let config_open = self.claude_config_plugin.as_deref() == Some(plugin.id.as_str());
         let details = self
             .claude_detail
             .as_ref()
@@ -1016,7 +1262,7 @@ impl Waku {
                     {
                         let id = plugin.id.clone();
                         let path = plugin.install_path.clone().map(PathBuf::from);
-                        move |this: &mut Self, cx: &mut Context<Self>| {
+                        move |this: &mut Self, _: &mut Window, cx: &mut Context<Self>| {
                             this.load_plugin_details(id.clone(), path.clone(), cx);
                         }
                     },
@@ -1025,6 +1271,22 @@ impl Waku {
                 .when(Self::plugin_can_update(plugin), |row| {
                     row.child(self.plugin_update_button(plugin, theme, cx))
                 })
+                .child(self.claude_text_button(
+                    SharedString::from(format!("claude-plugin-config-{}", plugin.id)),
+                    if config_open {
+                        tr!("claude.hide_config")
+                    } else {
+                        tr!("claude.configure")
+                    },
+                    config_open,
+                    cx,
+                    {
+                        let id = plugin.id.clone();
+                        move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
+                            this.open_plugin_config(id.clone(), window, cx);
+                        }
+                    },
+                ))
                 .child(
                     div()
                         .id(SharedString::from(format!(
@@ -1074,6 +1336,159 @@ impl Waku {
                     )
                 }
             }
+        }
+        if config_open {
+            column = column.child(self.render_plugin_config(plugin, theme, cx));
+        }
+        column
+    }
+
+    /// The option form for one plugin, drawn under its row.
+    fn render_plugin_config(
+        &self,
+        plugin: &PluginEntry,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .ml(px(14.0))
+            .rounded(px(7.0))
+            .border_l_2()
+            .border_color(theme.accent)
+            .bg(theme.inset);
+
+        let Some(catalog) = self
+            .claude_config_catalog
+            .clone()
+            .filter(|catalog| catalog.plugin_id == plugin.id)
+        else {
+            return column.child(
+                div()
+                    .text_size(sp(11.0))
+                    .text_color(theme.text_ghost)
+                    .child(tr!("claude.details_loading")),
+            );
+        };
+        if let Some(error) = catalog.unavailable.clone() {
+            return column.child(
+                div()
+                    .text_size(sp(11.5))
+                    .text_color(theme.danger)
+                    .child(tr!("claude.config_unavailable", error = error)),
+            );
+        }
+        if catalog.options.is_empty() {
+            // A real answer, not a failure: the plugin declares nothing.
+            return column.child(
+                div()
+                    .text_size(sp(11.5))
+                    .text_color(theme.text_tertiary)
+                    .child(tr!("claude.config_none")),
+            );
+        }
+
+        for option in &catalog.options {
+            let field = self
+                .claude_config_fields
+                .iter()
+                .find(|(key, _)| key == &option.key)
+                .map(|(_, field)| field.clone());
+            let mut line = div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .w_full()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(sp(11.5))
+                                .text_color(theme.text)
+                                .child(option.title.clone()),
+                        )
+                        .when(!option.required, |row| {
+                            row.child(
+                                div()
+                                    .text_size(sp(10.5))
+                                    .text_color(theme.text_ghost)
+                                    .child(tr!("common.optional")),
+                            )
+                        })
+                        .when(option.is_set, |row| {
+                            row.child(div().text_size(sp(10.5)).text_color(theme.success).child(
+                                if option.secret {
+                                    tr!("claude.config_secret_set")
+                                } else {
+                                    tr!("claude.config_set")
+                                },
+                            ))
+                        }),
+                )
+                .when(!option.description.is_empty(), |column| {
+                    column.child(
+                        div()
+                            .text_size(sp(10.5))
+                            .text_color(theme.text_ghost)
+                            .child(option.description.clone()),
+                    )
+                });
+            line = match field {
+                Some(field) => line.child(
+                    TextField::new(
+                        SharedString::from(format!("claude-config-{}-{}", plugin.id, option.key)),
+                        field,
+                    )
+                    .w_full(),
+                ),
+                // A secret with a value already saved has nothing to echo, so
+                // it is shown as state rather than an empty box that looks
+                // like data loss.
+                None if option.secret && option.is_set => line.child(
+                    div()
+                        .text_size(sp(11.0))
+                        .text_color(theme.text_ghost)
+                        .child(tr!("claude.config_secret_hidden")),
+                ),
+                None => line,
+            };
+            column = column.child(line);
+        }
+
+        column = column.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(div().flex_1())
+                .child(self.claude_text_button(
+                    SharedString::from(format!("claude-config-save-{}", plugin.id)),
+                    tr!("common.save"),
+                    false,
+                    cx,
+                    |this, _, cx| this.save_plugin_config(cx),
+                )),
+        );
+
+        if !catalog.orphaned.is_empty() {
+            column = column.child(
+                div()
+                    .text_size(sp(10.5))
+                    .text_color(theme.text_ghost)
+                    .child(tr!(
+                        "claude.config_orphaned",
+                        keys = catalog.orphaned.join(", ")
+                    )),
+            );
         }
         column
     }
@@ -1180,50 +1595,203 @@ impl Waku {
     /// The browse list is behind a button because answering it costs the CLI a
     /// refresh of every marketplace. Everything above it — the marketplaces,
     /// which plugins are installed — is the cheap read the page already has.
+    /// The Marketplace tab: where plugins come from.
+    ///
+    /// Adding, refreshing and removing a source all live here; discovering what
+    /// a source offers and installing from it live on the Plugins tab, because
+    /// finding something and installing it are one action.
     fn render_marketplace(&self, cx: &mut Context<Self>) -> Div {
         let theme = Theme::current(cx);
         let mut body = div().flex().flex_col().gap(px(10.0)).w_full();
 
+        body = body.child(self.render_claude_action_banner(cx));
         body = body.child(self.render_marketplace_list(cx));
 
-        body = body.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_size(sp(12.5))
-                        .text_color(theme.text_secondary)
-                        .child(tr!("claude.browse_hint")),
-                )
-                .child(self.claude_text_button(
-                    "claude-browse",
-                    if self.claude_available_catalog.is_some() {
-                        tr!("claude.browse_refresh")
-                    } else {
-                        tr!("claude.browse")
-                    },
-                    false,
-                    cx,
-                    |this, cx| this.load_available_plugins(cx),
-                )),
-        );
-
-        if self.claude_available_pending {
-            return body.child(self.claude_placeholder(&tr!("claude.browse_pending"), cx));
-        }
-        let Some(catalog) = self.claude_available_catalog.clone() else {
-            return body;
-        };
-        if let Some(error) = catalog.unavailable.clone() {
-            return body.child(
-                self.claude_placeholder(&tr!("claude.browse_unavailable", error = error), cx),
+        // The add form: an address and the layer to declare it in.
+        if self.claude_marketplace_adding {
+            let mut scopes = div().flex().items_center().gap(px(5.0));
+            for scope in [
+                MarketplaceScope::User,
+                MarketplaceScope::Project,
+                MarketplaceScope::Local,
+            ] {
+                scopes = scopes.child(self.claude_scope_chip(scope, cx));
+            }
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(7.0))
+                    .p(px(10.0))
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.inset)
+                    .child(
+                        TextField::new(
+                            "claude-marketplace-source",
+                            self.claude_marketplace_source.clone(),
+                        )
+                        .icon("icons/search.svg", 13.0)
+                        .w_full(),
+                    )
+                    .child(
+                        div()
+                            .text_size(sp(11.0))
+                            .text_color(theme.text_ghost)
+                            .child(tr!("claude.marketplace_source_hint")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(
+                                div()
+                                    .text_size(sp(11.5))
+                                    .text_color(theme.text_tertiary)
+                                    .child(tr!("claude.marketplace_scope")),
+                            )
+                            .children(Some(scopes))
+                            .child(div().flex_1())
+                            .child(self.claude_text_button(
+                                "claude-marketplace-add-cancel",
+                                tr!("common.cancel"),
+                                false,
+                                cx,
+                                |this, _, cx| {
+                                    this.claude_marketplace_adding = false;
+                                    cx.notify();
+                                },
+                            ))
+                            .child(self.claude_text_button(
+                                "claude-marketplace-add-confirm",
+                                tr!("claude.marketplace_add"),
+                                false,
+                                cx,
+                                |this, _, cx| this.add_marketplace(cx),
+                            )),
+                    ),
+            );
+        } else {
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(sp(12.0))
+                            .text_color(theme.text_secondary)
+                            .child(tr!("claude.marketplace_empty_hint")),
+                    )
+                    .child(self.claude_text_button(
+                        "claude-marketplace-refresh-all",
+                        tr!("claude.marketplace_refresh_all"),
+                        false,
+                        cx,
+                        |this, _, cx| this.refresh_marketplace(None, cx),
+                    ))
+                    .child(self.claude_text_button(
+                        "claude-marketplace-add",
+                        tr!("claude.marketplace_add"),
+                        false,
+                        cx,
+                        |this, _, cx| {
+                            this.claude_marketplace_adding = true;
+                            cx.notify();
+                        },
+                    )),
             );
         }
-        body.child(self.render_available_list(catalog, cx))
+
+        body
+    }
+
+    /// The scope chip in the add form, styled like the page's tab strip.
+    fn claude_scope_chip(&self, scope: MarketplaceScope, cx: &mut Context<Self>) -> Stateful<Div> {
+        let theme = Theme::current(cx);
+        let selected = self.claude_marketplace_scope == scope;
+        div()
+            .id(SharedString::from(format!(
+                "claude-marketplace-scope-{}",
+                scope.cli_flag()
+            )))
+            .role(Role::Button)
+            .aria_label(scope.label())
+            .aria_selected(selected)
+            .tab_index(0)
+            .px(px(8.0))
+            .h(px(22.0))
+            .rounded(px(5.0))
+            .flex()
+            .items_center()
+            .cursor_default()
+            .text_size(sp(11.0))
+            .when(selected, |element| {
+                element.bg(theme.overlay_strong).text_color(theme.text)
+            })
+            .when(!selected, |element| {
+                element
+                    .hover(|style| style.bg(theme.overlay))
+                    .text_color(theme.text_tertiary)
+            })
+            .focus_visible(|style| style.border_1().border_color(theme.accent))
+            .child(scope.label())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.claude_marketplace_scope = scope;
+                cx.notify();
+            }))
+    }
+
+    /// The last structured result, kept on screen because these verbs report
+    /// partial success in their own words.
+    fn render_claude_action_banner(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let Some(result) = self.claude_action_result.clone() else {
+            return div().h(px(0.0));
+        };
+        let color = if result.ok {
+            theme.text_secondary
+        } else {
+            theme.danger
+        };
+        div()
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .p(px(9.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(if result.ok {
+                theme.border
+            } else {
+                theme.danger
+            })
+            .bg(theme.inset)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(sp(11.5))
+                    .line_height(sp(16.0))
+                    .text_color(color)
+                    // The CLI's own text, unchanged: a truncated or reworded
+                    // refresh warning would lose the part that matters.
+                    .child(result.message.clone()),
+            )
+            .child(self.claude_text_button(
+                "claude-action-dismiss",
+                tr!("common.dismiss_notification"),
+                false,
+                cx,
+                |this, _, cx| {
+                    this.claude_action_result = None;
+                    cx.notify();
+                },
+            ))
     }
 
     fn render_marketplace_list(&self, cx: &mut Context<Self>) -> Div {
@@ -1263,7 +1831,7 @@ impl Waku {
         }
         if catalog.marketplaces.is_empty() {
             // An empty list is a real state: nothing can be installed until a
-            // marketplace is added, which this build does not do.
+            // marketplace is added, which the form below does.
             return body.child(
                 div()
                     .text_size(sp(11.5))
@@ -1277,6 +1845,8 @@ impl Waku {
                 .clone()
                 .or_else(|| marketplace.install_location.clone())
                 .unwrap_or_default();
+            let refresh_name = marketplace.name.clone();
+            let remove_marketplace = marketplace.clone();
             body = body.child(
                 div()
                     .flex()
@@ -1303,7 +1873,32 @@ impl Waku {
                             .text_size(sp(11.0))
                             .text_color(theme.text_ghost)
                             .child(location),
-                    ),
+                    )
+                    .child(self.claude_text_button(
+                        SharedString::from(format!(
+                            "claude-marketplace-refresh-{}",
+                            marketplace.name
+                        )),
+                        tr!("claude.marketplace_refresh"),
+                        false,
+                        cx,
+                        move |this, _, cx| this.refresh_marketplace(Some(refresh_name.clone()), cx),
+                    ))
+                    .child(self.claude_text_button(
+                        SharedString::from(format!(
+                            "claude-marketplace-remove-{}",
+                            marketplace.name
+                        )),
+                        tr!("common.remove"),
+                        false,
+                        cx,
+                        move |this, _, cx| {
+                            this.claude_confirm = Some(ClaudeConfirm::RemoveMarketplace {
+                                name: remove_marketplace.name.clone(),
+                            });
+                            cx.notify();
+                        },
+                    )),
             );
         }
         body
@@ -1368,7 +1963,7 @@ impl Waku {
                 tr!("claude.show_more", count = remaining.to_string()),
                 false,
                 cx,
-                |this, cx| {
+                |this, _, cx| {
                     this.claude_available_shown += 40;
                     cx.notify();
                 },
@@ -1463,7 +2058,7 @@ impl Waku {
                 tr!("claude.install"),
                 false,
                 cx,
-                move |this, cx| this.install_available_plugin(&target, cx),
+                move |this, _, cx| this.install_available_plugin(&target, cx),
             ));
         }
         row
@@ -1573,7 +2168,7 @@ impl Waku {
         action: F,
     ) -> Stateful<Div>
     where
-        F: Fn(&mut Self, &mut Context<Self>) + Clone + 'static,
+        F: Fn(&mut Self, &mut Window, &mut Context<Self>) + Clone + 'static,
     {
         let theme = Theme::current(cx);
         let click = action.clone();
@@ -1597,10 +2192,10 @@ impl Waku {
             .hover(|style| style.bg(theme.overlay))
             .focus_visible(|style| style.border_1().border_color(theme.accent))
             .child(label)
-            .on_click(cx.listener(move |this, _, _, cx| click(this, cx)))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| click(this, window, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    key(this, cx);
+                    key(this, window, cx);
                     cx.stop_propagation();
                 }
             }))

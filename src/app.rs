@@ -78,8 +78,9 @@ use crate::{
 };
 pub(crate) use prompt_history::PromptHistoryWalk;
 use waku_client::claude::{
-    AvailablePluginCatalog, MarketplaceCatalog, McpCatalog, McpHealth, McpScope, McpServerEntry,
-    PluginCatalog, PluginDetails, PluginEntry,
+    AvailablePluginCatalog, ClaudeActionResult, MarketplaceCatalog, MarketplaceScope, McpCatalog,
+    McpHealth, McpScope, McpServerEntry, PluginCatalog, PluginConfigCatalog, PluginDetails,
+    PluginEntry,
 };
 
 #[cfg(target_os = "macos")]
@@ -1509,6 +1510,24 @@ pub struct Waku {
     claude_detail: Option<(String, Rc<PluginDetails>)>,
     /// Bumped per detail read so a slower one cannot overwrite a newer pick.
     claude_detail_generation: u64,
+    /// The marketplace address being typed, and the scope it will be declared
+    /// in. Adding a marketplace is a text field plus a choice, not a wizard.
+    claude_marketplace_source: Entity<TextInput>,
+    claude_marketplace_scope: MarketplaceScope,
+    /// Whether the add form is open. Closed by default so the page leads with
+    /// what already exists.
+    claude_marketplace_adding: bool,
+    /// The option form of the plugin whose configuration is open, keyed by
+    /// plugin id. Options save per key, so each editable row owns a field.
+    claude_config_plugin: Option<String>,
+    claude_config_fields: Vec<(String, Entity<TextInput>)>,
+    /// The loaded option catalog for the plugin whose form is open, so the
+    /// render can draw titles, kinds and saved state next to each field.
+    claude_config_catalog: Option<Rc<PluginConfigCatalog>>,
+    /// The last structured result of a marketplace or option write. Kept on
+    /// screen because these verbs report partial success in their own words
+    /// (a refresh that timed out but still listed), which a toast would hide.
+    claude_action_result: Option<Rc<ClaudeActionResult>>,
     /// Bumped per read; a result from a superseded read is discarded, since
     /// both catalogs are fetched from subprocesses that can outlive a switch
     /// between the two tabs.
@@ -2135,6 +2154,11 @@ impl Waku {
             TextInput::new(window, cx)
                 .clear_on_escape()
                 .placeholder(tr!("claude.marketplace_search"))
+        });
+        let claude_marketplace_source = cx.new(|cx| {
+            TextInput::new(window, cx)
+                .clear_on_escape()
+                .placeholder(tr!("claude.marketplace_source_placeholder"))
         });
         let session_rename_input = cx.new(|cx| TextInput::new(window, cx));
         let provider_path_input = cx.new(|cx| {
@@ -3102,6 +3126,13 @@ impl Waku {
                 claude_available_shown: 40,
                 claude_detail: None,
                 claude_detail_generation: 0,
+                claude_marketplace_source,
+                claude_marketplace_scope: MarketplaceScope::User,
+                claude_marketplace_adding: false,
+                claude_config_plugin: None,
+                claude_config_fields: Vec::new(),
+                claude_config_catalog: None,
+                claude_action_result: None,
                 claude_catalog_generation: 0,
                 claude_catalog_pending: false,
                 claude_mutating: false,

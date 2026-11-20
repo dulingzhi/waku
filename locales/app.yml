@@ -2946,3 +2946,39 @@ claude.remove_title:
   en: Remove MCP server
 claude.uninstall_title:
   en: Uninstall plugin
+claude.discover:
+  en: Discover plugins
+claude.configure:
+  en: Configure
+claude.hide_config:
+  en: Hide options
+claude.config_leave_to_keep:
+  en: Leave empty to keep the saved value
+claude.config_set:
+  en: Saved
+claude.config_secret_set:
+  en: Saved (hidden)
+claude.config_secret_hidden:
+  en: A value is saved and is never shown again
+claude.config_none:
+  en: This plugin has no configurable options
+claude.config_unavailable:
+  en: "Could not read the plugin's options: %{error}"
+claude.config_orphaned:
+  en: "Saved values with no matching option: %{keys}"
+claude.marketplace_add:
+  en: Add marketplace
+claude.marketplace_source_hint:
+  en: owner/repo, an https or git URL, or a path on the daemon host
+claude.marketplace_scope:
+  en: Declare in
+claude.marketplace_refresh:
+  en: Refresh
+claude.marketplace_refresh_all:
+  en: Refresh all
+claude.marketplace_empty_hint:
+  en: Plugins can only be installed from a marketplace you have added
+claude.marketplace_remove_title:
+  en: Remove marketplace
+claude.marketplace_remove_confirm:
+  en: Remove the marketplace %{name}? Plugins already installed from it stay installed.
