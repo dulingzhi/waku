@@ -2709,6 +2709,21 @@ impl Waku {
                 }
             })
             .detach();
+            // The marketplace filter narrows a list that is drawn from state,
+            // so an edit has to redraw it; nothing else observes this field.
+            cx.subscribe(
+                &claude_available_search,
+                |this: &mut Self, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Edited) {
+                        // A new filter starts the list over, otherwise a filter
+                        // typed after a few "show more"s would keep the widened
+                        // cap and could draw far more rows than one page.
+                        this.claude_available_shown = 40;
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
             cx.subscribe(
                 &session_rename_input,
                 |this: &mut Self, _, event: &InputEvent, cx| match event {
