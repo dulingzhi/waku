@@ -155,8 +155,10 @@ web.error_daemon_url_scheme: デーモン URL には ws:// または wss:// を�
 web.error_daemon_url_host: デーモン URL にはホストが必要で、認証情報は含められません
 web.error_secure_websocket_required: 安全な Waku Web ページからは wss:// でのみ接続できます
 web.error_daemon_token_required: デーモントークンを入力してください
-settings.theme: テーマ
-settings.theme_description: システム、ライト、ダークのいずれかのテーマを選択します
+settings.color_mode: 外観
+settings.color_mode_description: システムに従うか、ライト／ダークを固定します
+settings.palette: テーマ
+settings.palette_description: 配色を選択します。各テーマはライトとダークの両方の形を持ちます
 settings.ui_font_size: UI のフォントサイズ
 settings.ui_font_size_description: インターフェース全体とメッセージの文字サイズ
 settings.code_font_size: コードのフォントサイズ

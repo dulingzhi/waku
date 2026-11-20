@@ -33,7 +33,7 @@ use crate::model::{
     AgentSession, FavoriteModel, Message, MessageAttachment, MessageRole, Project, ProviderKind,
     RuntimeMode, SessionWorkspace,
 };
-use crate::theme::ThemePreference;
+use crate::theme::{ColorMode, PaletteId};
 pub use waku_protocol::persistence::{
     ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
     ComposerDraftTarget, ComposerDrafts, SessionMessageMatch,
@@ -189,7 +189,8 @@ impl ComposerDraftStore {
 pub struct AppSettings {
     pub analytics_enabled: bool,
     pub favorite_models: Vec<FavoriteModel>,
-    pub theme: ThemePreference,
+    pub color_mode: ColorMode,
+    pub palette: PaletteId,
     pub language: AppLanguage,
 }
 
@@ -198,9 +199,33 @@ impl Default for AppSettings {
         Self {
             analytics_enabled: default_analytics_enabled(),
             favorite_models: Vec::new(),
-            theme: ThemePreference::System,
+            color_mode: ColorMode::System,
+            palette: PaletteId::default(),
             language: AppLanguage::default(),
         }
+    }
+}
+
+impl AppSettings {
+    /// Lift a pre-split `theme` key onto `color_mode` before deserializing.
+    ///
+    /// The struct is `#[serde(default)]`, so a missing `color_mode` is
+    /// supplied from the default *before* any serde alias could look at the
+    /// old key — an alias here is silently a no-op. Moving the value across
+    /// first is what keeps a user's chosen appearance from snapping back to
+    /// "follow the system" on upgrade.
+    ///
+    /// Anything unexpected is left alone for the real deserializer to report,
+    /// so this cannot mask a genuinely malformed document.
+    fn lift_legacy_theme(bytes: &[u8]) -> Option<serde_json::Value> {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let object = value.as_object_mut()?;
+        if !object.contains_key("color_mode")
+            && let Some(legacy) = object.remove("theme")
+        {
+            object.insert("color_mode".to_owned(), legacy);
+        }
+        Some(value)
     }
 }
 
@@ -265,7 +290,9 @@ pub struct PersistedState {
     #[serde(default)]
     pub favorite_models: Vec<FavoriteModel>,
     #[serde(default)]
-    pub theme: ThemePreference,
+    pub color_mode: ColorMode,
+    #[serde(default)]
+    pub palette: PaletteId,
     #[serde(default)]
     pub language: AppLanguage,
     #[serde(default = "default_sidebar_visibility")]
@@ -381,7 +408,8 @@ impl PersistedState {
             last_context_window: None,
             remembered_model_traits: Vec::new(),
             favorite_models: Vec::new(),
-            theme: ThemePreference::System,
+            color_mode: ColorMode::System,
+            palette: PaletteId::default(),
             language: AppLanguage::default(),
             sidebar_visible: true,
             right_panel_visible: false,
@@ -477,7 +505,8 @@ impl PersistedState {
         AppSettings {
             analytics_enabled: self.analytics_enabled,
             favorite_models: self.favorite_models.clone(),
-            theme: self.theme,
+            color_mode: self.color_mode,
+            palette: self.palette.clone(),
             language: self.language,
         }
     }
@@ -522,7 +551,10 @@ impl PersistedState {
     fn apply_app_settings(&mut self, settings: AppSettings) {
         self.analytics_enabled = settings.analytics_enabled;
         self.favorite_models = settings.favorite_models;
-        self.theme = settings.theme;
+        self.color_mode = settings.color_mode;
+        self.palette = settings
+            .palette
+            .or_default(waku_protocol::theme::KNOWN_PALETTES);
         self.language = settings.language;
     }
 
@@ -1059,9 +1091,14 @@ impl StateStore {
         let Some(bytes) = source else {
             return Ok(None);
         };
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(to_io_error)
+        match AppSettings::lift_legacy_theme(&bytes) {
+            Some(value) => serde_json::from_value(value).map(Some).map_err(to_io_error),
+            // Not a JSON object at all: let the deserializer produce the error
+            // rather than turning this into a parse failure with no context.
+            None => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(to_io_error),
+        }
     }
 
     fn read_app_state(&self) -> io::Result<Option<AppState>> {
@@ -1931,12 +1968,16 @@ mod tests {
         fs::write(&legacy_path, legacy).unwrap();
 
         let restored = store_in(&directory).load().unwrap();
-        assert_eq!(restored.theme, ThemePreference::Dark);
+        assert_eq!(restored.color_mode, ColorMode::Dark);
         assert!(!restored.analytics_enabled);
 
         let app: serde_json::Value =
             serde_json::from_slice(&fs::read(directory.join("app.json")).unwrap()).unwrap();
-        assert_eq!(app["theme"], "dark");
+        // A legacy file used `theme`; the saved document is written with the
+        // new name, so the field converges after one save rather than sitting
+        // in the old shape forever.
+        assert_eq!(app["color_mode"], "dark");
+        assert!(app.get("theme").is_none());
         assert!(app.get("computer_use_enabled").is_none());
         assert!(app.get("disabled_providers").is_none());
         assert_eq!(fs::read_to_string(legacy_path).unwrap(), legacy);
@@ -1961,11 +2002,32 @@ mod tests {
 
     #[test]
     fn settings_accept_a_partial_user_authored_document() {
-        let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        let settings: AppSettings = serde_json::from_str(r#"{"color_mode":"dark"}"#).unwrap();
 
-        assert_eq!(settings.theme, ThemePreference::Dark);
+        assert_eq!(settings.color_mode, ColorMode::Dark);
         assert_eq!(settings.language, AppLanguage::System);
         assert!(settings.analytics_enabled);
+    }
+
+    /// A settings file written before the theme/palette split still opens, and
+    /// keeps the appearance the user chose.
+    ///
+    /// Goes through the same loader the app reads at startup, not a test-only
+    /// helper, because the shim and the loader drifting apart is exactly the
+    /// failure this is meant to prevent.
+    #[test]
+    fn a_settings_file_written_before_the_palette_split_still_loads() {
+        let directory = temporary_directory();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("app.json"), r#"{"theme":"light"}"#).unwrap();
+
+        let restored = store_in(&directory).load().unwrap();
+
+        assert_eq!(restored.color_mode, ColorMode::Light);
+        // Nothing is invented for the palette: it defaults, so the appearance
+        // the user picked survives even though they never picked a palette.
+        assert_eq!(restored.palette, PaletteId::default());
+        fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
@@ -2601,7 +2663,7 @@ mod tests {
             provider: ProviderKind::Codex,
             model: "gpt-5.6-luna".into(),
         });
-        state.theme = ThemePreference::Light;
+        state.color_mode = ColorMode::Light;
         state.language = AppLanguage::SimplifiedChinese;
         state.sidebar_visible = false;
         state.right_panel_visible = false;
@@ -2662,7 +2724,7 @@ mod tests {
             crate::model::RuntimeMode::Auto
         );
         assert_eq!(restored.favorite_models, state.favorite_models);
-        assert_eq!(restored.theme, ThemePreference::Light);
+        assert_eq!(restored.color_mode, ColorMode::Light);
         assert_eq!(restored.language, AppLanguage::SimplifiedChinese);
         assert!(!restored.sidebar_visible);
         assert!(!restored.right_panel_visible);
@@ -2820,7 +2882,7 @@ mod tests {
         let directory = temporary_directory();
         let store = store_in(&directory);
         let mut state = PersistedState::fresh(PathBuf::from("/tmp/project"));
-        state.theme = ThemePreference::Light;
+        state.color_mode = ColorMode::Light;
         state.language = AppLanguage::SimplifiedChinese;
         state.sidebar_width = 301.0;
         store.save(&mut state).unwrap();
@@ -2832,7 +2894,8 @@ mod tests {
             "settings are pretty-printed for editing"
         );
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["theme"], "light");
+        assert_eq!(value["color_mode"], "light");
+        assert_eq!(value["palette"], "graphite");
         assert_eq!(value["language"], "simplified-chinese");
         for daemon_key in [
             "computer_use_enabled",

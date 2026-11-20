@@ -306,10 +306,14 @@ web.error_secure_websocket_required:
   en: A secure Waku Web page can only connect through wss://
 web.error_daemon_token_required:
   en: Enter the daemon token
-settings.theme:
+settings.color_mode:
+  en: Appearance
+settings.color_mode_description:
+  en: Follow the system, or force light or dark
+settings.palette:
   en: Theme
-settings.theme_description:
-  en: Choose between system, light, or dark themes
+settings.palette_description:
+  en: Choose the colors. Each theme supplies its own light and dark form
 settings.ui_font_size:
   en: UI font size
 settings.ui_font_size_description:

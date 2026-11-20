@@ -151,8 +151,10 @@ web.error_daemon_url_scheme: 守护进程 URL 必须使用 ws:// 或 wss://
 web.error_daemon_url_host: 守护进程 URL 必须包含主机，且不能包含凭据
 web.error_secure_websocket_required: 安全的 Waku Web 页面只能通过 wss:// 连接
 web.error_daemon_token_required: 请输入守护进程令牌
-settings.theme: 主题
-settings.theme_description: 选择跟随系统、浅色或深色主题
+settings.color_mode: 外观
+settings.color_mode_description: 跟随系统，或强制浅色、深色
+settings.palette: 主题配色
+settings.palette_description: 选择配色方案。每个主题都提供自己的浅色与深色形态
 settings.ui_font_size: 界面字号
 settings.ui_font_size_description: 整个界面与消息的文字大小
 settings.code_font_size: 代码字号

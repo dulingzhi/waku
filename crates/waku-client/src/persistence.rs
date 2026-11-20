@@ -22,7 +22,7 @@ use waku_protocol::model::{
     AgentSession, FavoriteModel, Project, ProviderKind, ProviderResumeCursor,
     ProviderSessionHistory, ProviderSessionSummary, RuntimeMode,
 };
-use waku_protocol::theme::ThemePreference;
+use waku_protocol::theme::{ColorMode, PaletteId};
 
 pub use waku_protocol::persistence::{
     ComposerDraft, ComposerDraftAttachment, ComposerDraftChange, ComposerDraftKey,
@@ -246,7 +246,19 @@ pub struct PersistedWindowState {
 pub struct AppSettings {
     pub analytics_enabled: bool,
     pub favorite_models: Vec<FavoriteModel>,
-    pub theme: ThemePreference,
+    /// Light-or-dark, and whether that follows the system.
+    ///
+    /// `alias = "theme"` reads the field this replaced. Its values were
+    /// `system` / `light` / `dark` — the same three this enum accepts — so an
+    /// older settings file migrates without a version bump and without losing
+    /// the user's choice. Writing always emits `color_mode`, so the file
+    /// converges on the new name after one save.
+    #[serde(default, alias = "theme")]
+    pub color_mode: ColorMode,
+    /// Which palette. An id this build does not know falls back to
+    /// [`PaletteId::DEFAULT`] when applied, so a settings file written by a
+    /// newer build still loads.
+    pub palette: PaletteId,
     pub language: AppLanguage,
     /// Base text size for the interface, in pixels: chrome and prose are
     /// authored against the 14px default and scale from it. Hand-edited
@@ -269,7 +281,8 @@ impl Default for AppSettings {
         Self {
             analytics_enabled: default_analytics_enabled(),
             favorite_models: Vec::new(),
-            theme: ThemePreference::System,
+            color_mode: ColorMode::System,
+            palette: PaletteId::default(),
             language: AppLanguage::default(),
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
@@ -282,6 +295,29 @@ impl Default for AppSettings {
 
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 pub const DEFAULT_CODE_FONT_SIZE: f32 = 13.0;
+
+impl AppSettings {
+    /// Lift a pre-split `theme` key onto `color_mode` before deserializing.
+    ///
+    /// The struct is `#[serde(default)]`, so a missing `color_mode` is
+    /// supplied from the default *before* any serde alias could look at the
+    /// old key — an alias here is silently a no-op. Moving the value across
+    /// first is what keeps a user's chosen appearance from snapping back to
+    /// "follow the system" on upgrade.
+    ///
+    /// Anything unexpected is left alone for the real deserializer to report,
+    /// so this cannot mask a genuinely malformed document.
+    pub(crate) fn lift_legacy_theme(bytes: &[u8]) -> Option<serde_json::Value> {
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let object = value.as_object_mut()?;
+        if !object.contains_key("color_mode")
+            && let Some(legacy) = object.remove("theme")
+        {
+            object.insert("color_mode".to_owned(), legacy);
+        }
+        Some(value)
+    }
+}
 
 /// Bounds a possibly hand-edited font size to something the layout survives.
 fn sanitized_font_size(size: f32, fallback: f32) -> f32 {
@@ -370,7 +406,9 @@ pub struct PersistedState {
     #[serde(default)]
     pub favorite_models: Vec<FavoriteModel>,
     #[serde(default)]
-    pub theme: ThemePreference,
+    pub color_mode: ColorMode,
+    #[serde(default)]
+    pub palette: PaletteId,
     #[serde(default)]
     pub language: AppLanguage,
     #[serde(default = "default_ui_font_size")]
@@ -461,7 +499,8 @@ impl PersistedState {
             last_context_window: None,
             remembered_model_traits: Vec::new(),
             favorite_models: Vec::new(),
-            theme: ThemePreference::System,
+            color_mode: ColorMode::System,
+            palette: PaletteId::default(),
             language: AppLanguage::default(),
             ui_font_size: DEFAULT_UI_FONT_SIZE,
             code_font_size: DEFAULT_CODE_FONT_SIZE,
@@ -606,7 +645,8 @@ impl PersistedState {
         AppSettings {
             analytics_enabled: self.analytics_enabled,
             favorite_models: self.favorite_models.clone(),
-            theme: self.theme,
+            color_mode: self.color_mode,
+            palette: self.palette.clone(),
             language: self.language,
             ui_font_size: self.ui_font_size,
             code_font_size: self.code_font_size,
@@ -643,7 +683,10 @@ impl PersistedState {
     fn apply_app_settings(&mut self, settings: AppSettings) {
         self.analytics_enabled = settings.analytics_enabled;
         self.favorite_models = settings.favorite_models;
-        self.theme = settings.theme;
+        self.color_mode = settings.color_mode;
+        self.palette = settings
+            .palette
+            .or_default(waku_protocol::theme::KNOWN_PALETTES);
         self.language = settings.language;
         self.ui_font_size = sanitized_ui_font_size(settings.ui_font_size);
         self.code_font_size = sanitized_code_font_size(settings.code_font_size);
@@ -830,7 +873,15 @@ pub fn load_or_create_app_settings() -> io::Result<AppSettings> {
         })
         .unwrap_or(false);
     let mut settings: AppSettings = source
-        .map(|(bytes, _)| serde_json::from_slice::<AppSettings>(&bytes).map_err(to_io_error))
+        .map(|(bytes, _)| {
+            // A pre-split settings file kept the appearance under `theme`.
+            // See `AppSettings::lift_legacy_theme` for why an alias cannot do
+            // this on a `#[serde(default)]` struct.
+            match AppSettings::lift_legacy_theme(&bytes) {
+                Some(value) => serde_json::from_value(value).map_err(to_io_error),
+                None => serde_json::from_slice::<AppSettings>(&bytes).map_err(to_io_error),
+            }
+        })
         .transpose()?
         .unwrap_or_default();
     let generated_token = settings.daemon_exposure.ensure_token();
