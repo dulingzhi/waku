@@ -77,6 +77,9 @@ use crate::{
     ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
 };
 pub(crate) use prompt_history::PromptHistoryWalk;
+use waku_client::claude::{
+    McpCatalog, McpHealth, McpScope, McpServerEntry, PluginCatalog, PluginEntry,
+};
 
 #[cfg(target_os = "macos")]
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
@@ -219,6 +222,9 @@ enum SettingsPage {
     General,
     Providers,
     Skills,
+    /// Claude Code's MCP servers and plugins. Named for the provider because
+    /// these are its own config surfaces, not Waku's.
+    Claude,
     Usage,
     Daemon,
     ComputerUse,
@@ -1477,6 +1483,22 @@ pub struct Waku {
     /// registry, like the toast's, so it can never join a drag to another
     /// surface's text.
     skills_selection: TranscriptSelection,
+    /// The Claude page's MCP and plugin snapshots. `None` means the first read
+    /// has not landed; `unavailable` inside each catalog carries "could not
+    /// ask", which is a different state from "nothing configured".
+    claude_mcp_catalog: Option<Rc<McpCatalog>>,
+    claude_plugin_catalog: Option<Rc<PluginCatalog>>,
+    /// Bumped per read; a result from a superseded read is discarded, since
+    /// both catalogs are fetched from subprocesses that can outlive a switch
+    /// between the two tabs.
+    claude_catalog_generation: u64,
+    claude_catalog_pending: bool,
+    /// Which tab the Claude page shows.
+    claude_tab: claude_page::ClaudeTab,
+    /// A remove or uninstall waiting for confirmation. Destructive Claude
+    /// operations go through this rather than acting on one click, because the
+    /// damage is outside Waku and cannot be undone from here.
+    claude_confirm: Option<claude_page::ClaudeConfirm>,
     /// Scroll position of the detail pane, tracked so it can draw a
     /// scrollbar and land at the top when the selection moves.
     skills_detail_scroll: ScrollHandle,
@@ -1658,6 +1680,7 @@ mod activity_diff;
 mod autocomplete;
 mod background_work;
 mod branches;
+mod claude_page;
 mod command_palette;
 mod commit_dialog;
 mod components;
@@ -3023,6 +3046,12 @@ impl Waku {
                 settings_page: None,
                 skills_catalog: None,
                 skills_scan_generation: 0,
+                claude_mcp_catalog: None,
+                claude_plugin_catalog: None,
+                claude_catalog_generation: 0,
+                claude_catalog_pending: false,
+                claude_tab: claude_page::ClaudeTab::default(),
+                claude_confirm: None,
                 skills_scan_pending: false,
                 skills_scanned_at: None,
                 skills_search,

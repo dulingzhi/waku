@@ -52,6 +52,11 @@ impl Waku {
         if page == SettingsPage::Skills {
             self.ensure_skills_catalog(false, cx);
         }
+        if page == SettingsPage::Claude {
+            // Reading MCP and plugin state shells out to the Claude CLI, so it
+            // is kicked off here rather than from the page's render.
+            self.ensure_claude_catalog(cx);
+        }
         cx.notify();
     }
 
