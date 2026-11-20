@@ -128,6 +128,28 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
     spawn(command)?.wait_with_output()
 }
 
+/// Spawn `command` with `input` written to its stdin, then collect its output.
+///
+/// Same spawn path as [`output`], so the signal handling is unchanged. The
+/// write happens on this thread, which is safe for the small payloads these
+/// calls carry: a plugin's options are a few hundred bytes, far below the pipe
+/// buffer, so the child can never block waiting for us to start reading.
+pub fn output_with_stdin(command: &mut Command, input: &[u8]) -> io::Result<Output> {
+    use std::io::Write as _;
+
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = spawn(command)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // A child that exits early closes its end; that is not an error here —
+        // the exit status and stderr carry the real reason.
+        let _ = stdin.write_all(input);
+    }
+    child.wait_with_output()
+}
+
 /// Normalize a Waku-owned provider thread before a dependency spawns the child
 /// internally. The ACP SDK owns its `async_process::Command`, so its dedicated
 /// connection thread uses this once at startup instead of [`spawn`].

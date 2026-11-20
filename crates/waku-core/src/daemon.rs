@@ -433,6 +433,79 @@ impl Backend for WakuBackend {
                 .map_err(|error| anyhow!(error))?;
                 Ok(ResponsePayload::Ack)
             }
+            Command::AddClaudeMarketplace { source, scope, cwd } => {
+                let override_spec = self.claude_binary_override();
+                let result = crate::claude_config::add_marketplace(
+                    override_spec.as_deref(),
+                    cwd.as_deref(),
+                    &source,
+                    scope,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::ClaudeAction { result })
+            }
+            Command::RemoveClaudeMarketplace { name, scope } => {
+                let override_spec = self.claude_binary_override();
+                let result = crate::claude_config::remove_marketplace(
+                    override_spec.as_deref(),
+                    &name,
+                    scope,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::ClaudeAction { result })
+            }
+            Command::UpdateClaudeMarketplace { name } => {
+                let override_spec = self.claude_binary_override();
+                let result = crate::claude_config::update_marketplace(
+                    override_spec.as_deref(),
+                    name.as_deref(),
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::ClaudeAction { result })
+            }
+            Command::LoadClaudePluginConfig { id, cwd } => {
+                let override_spec = self.claude_binary_override();
+                Ok(ResponsePayload::ClaudePluginConfigCatalog {
+                    catalog: crate::claude_config::plugin_config(
+                        override_spec.as_deref(),
+                        cwd.as_deref(),
+                        &id,
+                    ),
+                })
+            }
+            Command::SetClaudePluginConfig { id, values, cwd } => {
+                let override_spec = self.claude_binary_override();
+                let pairs: Vec<(String, String)> = values
+                    .iter()
+                    .filter_map(|pair| {
+                        let (key, value) = pair.split_once('=')?;
+                        Some((key.to_owned(), value.to_owned()))
+                    })
+                    .collect();
+                let result = crate::claude_config::set_plugin_config(
+                    override_spec.as_deref(),
+                    cwd.as_deref(),
+                    &id,
+                    &pairs,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::ClaudeAction { result })
+            }
+            Command::PruneClaudePlugins {
+                dry_run,
+                scope,
+                cwd,
+            } => {
+                let override_spec = self.claude_binary_override();
+                let result = crate::claude_config::prune_plugins(
+                    override_spec.as_deref(),
+                    cwd.as_deref(),
+                    dry_run,
+                    scope,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::ClaudeAction { result })
+            }
             Command::LoadTaskState => {
                 let state = self.task_state.lock();
                 Ok(ResponsePayload::TaskState {
@@ -1905,6 +1978,12 @@ fn handle_driver_command(
         | Command::LoadClaudePluginDetails { .. }
         | Command::InstallClaudePlugin { .. }
         | Command::UpdateClaudePlugin { .. }
+        | Command::AddClaudeMarketplace { .. }
+        | Command::RemoveClaudeMarketplace { .. }
+        | Command::UpdateClaudeMarketplace { .. }
+        | Command::LoadClaudePluginConfig { .. }
+        | Command::SetClaudePluginConfig { .. }
+        | Command::PruneClaudePlugins { .. }
         | Command::LoadTaskState
         | Command::SaveTaskState { .. }
         | Command::RemoveSession

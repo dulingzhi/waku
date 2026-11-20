@@ -16,8 +16,9 @@
 use std::path::{Path, PathBuf};
 
 use waku_protocol::claude::{
-    AvailablePlugin, AvailablePluginCatalog, MarketplaceCatalog, MarketplaceEntry, McpCatalog,
-    McpHealth, McpScope, McpServerEntry, McpTransport, PluginCatalog, PluginComponent,
+    AvailablePlugin, AvailablePluginCatalog, ClaudeActionResult, MarketplaceCatalog,
+    MarketplaceEntry, MarketplaceScope, McpCatalog, McpHealth, McpScope, McpServerEntry,
+    McpTransport, PluginCatalog, PluginComponent, PluginConfigCatalog, PluginConfigOption,
     PluginDetails, PluginEntry,
 };
 
@@ -49,6 +50,70 @@ fn run_claude(binary: &Path, args: &[&str], cwd: Option<&Path>) -> Result<String
         return Err(detail);
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Run a `--json` verb and read its result line.
+///
+/// These verbs print a human line or two and then one JSON object as their
+/// last line of stdout — even when they fail, which is why a failure still has
+/// a `message` worth showing. A non-zero exit is not treated as an error here:
+/// the CLI reports its own reason inside that object, and that reason is more
+/// precise than the exit status.
+fn run_claude_action(
+    binary: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+) -> Result<ClaudeActionResult, String> {
+    let mut command = command_env::plain_command(binary);
+    command.args(args);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command_env::output(&mut command).map_err(|error| error.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(line) = stdout.lines().rev().find_map(parse_action_line) {
+        return Ok(line);
+    }
+    // No JSON line: fall back to the raw diagnostics rather than inventing a
+    // result the CLI never reported.
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let message = if stderr.is_empty() {
+        stdout.trim().to_owned()
+    } else {
+        stderr
+    };
+    Err(if message.is_empty() {
+        format!("claude exited with {}", output.status)
+    } else {
+        message
+    })
+}
+
+/// Turn one `{"command":…,"outcome":…,"message":…}` line into a result.
+///
+/// Anything that is not a JSON object with an `outcome` is not a result line,
+/// so a progress message that happens to start with `{` cannot be mistaken for
+/// one.
+fn parse_action_line(line: &str) -> Option<ClaudeActionResult> {
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let outcome = value.get("outcome")?.as_str()?;
+    Some(ClaudeActionResult {
+        ok: outcome == "ok",
+        message: value
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        failure_code: value
+            .get("failureCode")
+            .and_then(|code| code.as_str())
+            .map(str::to_owned),
+        summary: None,
+    })
 }
 
 // ── MCP ────────────────────────────────────────────────────────────────────
@@ -611,7 +676,273 @@ pub fn update_plugin(
     run_claude(&binary, &args, cwd).map(|_| ())
 }
 
-/// Read one installed plugin's manifest from its install path.
+// ── Marketplace writes ─────────────────────────────────────────────────────
+
+/// Declare a marketplace from a repo, URL or path.
+///
+/// The CLI validates the source and says why it refused, so the source is
+/// passed through untouched rather than pattern-matched here: `owner/repo`, an
+/// https or git URL, and a local path are all valid and only the CLI knows
+/// which forms it currently accepts.
+pub fn add_marketplace(
+    override_spec: Option<&str>,
+    cwd: Option<&Path>,
+    source: &str,
+    scope: MarketplaceScope,
+) -> Result<ClaudeActionResult, String> {
+    let binary = claude_binary(override_spec).ok_or_else(|| tr!("claude.cli_not_found"))?;
+    run_claude_action(
+        &binary,
+        &[
+            "plugin",
+            "marketplace",
+            "add",
+            source,
+            "--scope",
+            scope.cli_flag(),
+            "--json",
+        ],
+        cwd,
+    )
+}
+
+/// Remove a marketplace declaration. `scope: None` removes it from every layer,
+/// which is what the CLI does when `--scope` is omitted.
+pub fn remove_marketplace(
+    override_spec: Option<&str>,
+    name: &str,
+    scope: Option<MarketplaceScope>,
+) -> Result<ClaudeActionResult, String> {
+    let binary = claude_binary(override_spec).ok_or_else(|| tr!("claude.cli_not_found"))?;
+    let mut args = vec!["plugin", "marketplace", "remove", name, "--json"];
+    if let Some(scope) = scope {
+        args.push("--scope");
+        args.push(scope.cli_flag());
+    }
+    run_claude_action(&binary, &args, None)
+}
+
+/// Refresh one marketplace, or all of them when no name is given.
+///
+/// Refreshing all of them prints no JSON line (`--json` only applies to a named
+/// marketplace), so that form collects the text output instead of pretending to
+/// have a structured result.
+pub fn update_marketplace(
+    override_spec: Option<&str>,
+    name: Option<&str>,
+) -> Result<ClaudeActionResult, String> {
+    let binary = claude_binary(override_spec).ok_or_else(|| tr!("claude.cli_not_found"))?;
+    match name {
+        Some(name) => run_claude_action(
+            &binary,
+            &["plugin", "marketplace", "update", name, "--json"],
+            None,
+        ),
+        None => {
+            let stdout = run_claude(&binary, &["plugin", "marketplace", "update"], None)?;
+            Ok(ClaudeActionResult {
+                ok: true,
+                message: stdout.trim().to_owned(),
+                failure_code: None,
+                summary: None,
+            })
+        }
+    }
+}
+
+// ── Plugin configuration ───────────────────────────────────────────────────
+
+/// Read the options a plugin declares and which are set.
+///
+/// `configure --json` answers a schema per option plus `configured` and
+/// `unconfigured` key lists. Both are needed: the schema says what can be set,
+/// the lists say what already is.
+pub fn plugin_config(
+    override_spec: Option<&str>,
+    cwd: Option<&Path>,
+    id: &str,
+) -> PluginConfigCatalog {
+    let empty = |error: String| PluginConfigCatalog {
+        plugin_id: id.to_owned(),
+        options: Vec::new(),
+        unavailable: Some(error),
+        orphaned: Vec::new(),
+    };
+    let Some(binary) = claude_binary(override_spec) else {
+        return empty(tr!("claude.cli_not_found"));
+    };
+    // `configure` resolves the plugin against the current directory, so a
+    // project-scoped plugin is only reachable from its own project. Running
+    // there is the only way to read its options.
+    match run_claude(&binary, &["plugin", "configure", id, "--json"], cwd) {
+        Ok(stdout) => match parse_plugin_config(id, &stdout) {
+            Ok(catalog) => catalog,
+            Err(error) => empty(error),
+        },
+        Err(error) => empty(error),
+    }
+}
+
+fn parse_plugin_config(id: &str, stdout: &str) -> Result<PluginConfigCatalog, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|error| error.to_string())?;
+    let configured: Vec<String> = value
+        .get("configured")
+        .and_then(|list| list.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|key| key.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let unconfigured: Vec<String> = value
+        .get("unconfigured")
+        .and_then(|list| list.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|key| key.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut options = Vec::new();
+    if let Some(schema) = value.get("schema").and_then(|schema| schema.as_object()) {
+        for (key, spec) in schema {
+            options.push(parse_config_option(key, spec, &configured, &unconfigured));
+        }
+    }
+    // A key the schema no longer declares but the CLI still holds a value for.
+    // It is usually the reason a plugin behaves oddly, so it is reported
+    // instead of being dropped on the floor.
+    let known: Vec<&str> = options.iter().map(|option| option.key.as_str()).collect();
+    let orphaned = configured
+        .iter()
+        .filter(|key| !known.contains(&key.as_str()))
+        .cloned()
+        .collect();
+
+    Ok(PluginConfigCatalog {
+        plugin_id: id.to_owned(),
+        options,
+        unavailable: None,
+        orphaned,
+    })
+}
+
+fn parse_config_option(
+    key: &str,
+    spec: &serde_json::Value,
+    configured: &[String],
+    unconfigured: &[String],
+) -> PluginConfigOption {
+    let schema_type = spec.get("type").and_then(|kind| kind.as_str());
+    let choices: Vec<String> = spec
+        .get("enum")
+        .and_then(|choices| choices.as_array())
+        .map(|choices| {
+            choices
+                .iter()
+                .map(|choice| match choice {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // The CLI reports which keys are set, not their values, and a secret is
+    // never echoed back. So the saved value is carried as a set/unset marker
+    // rather than invented: an option in `configured` shows as saved, and one
+    // the schema still lists among `unconfigured` shows as unset.
+    let is_set = configured.iter().any(|saved| saved == key)
+        && !unconfigured.iter().any(|unsaved| unsaved == key);
+    PluginConfigOption {
+        key: key.to_owned(),
+        title: spec
+            .get("title")
+            .and_then(|title| title.as_str())
+            .unwrap_or(key)
+            .to_owned(),
+        description: spec
+            .get("description")
+            .and_then(|description| description.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        kind: if !choices.is_empty() {
+            "enum".to_owned()
+        } else {
+            schema_type.unwrap_or("string").to_owned()
+        },
+        required: spec
+            .get("required")
+            .and_then(|required| required.as_bool())
+            .unwrap_or(false),
+        choices,
+        value: None,
+        secret: spec
+            .get("secret")
+            .and_then(|secret| secret.as_bool())
+            .unwrap_or(false),
+        is_set,
+    }
+}
+
+/// Save plugin options through `plugin configure --values-stdin`.
+///
+/// Values go over stdin, not the command line: an option can be a token, and an
+/// argument is visible in the process list on this machine.
+pub fn set_plugin_config(
+    override_spec: Option<&str>,
+    cwd: Option<&Path>,
+    id: &str,
+    values: &[(String, String)],
+) -> Result<ClaudeActionResult, String> {
+    let binary = claude_binary(override_spec).ok_or_else(|| tr!("claude.cli_not_found"))?;
+    let mut object = serde_json::Map::new();
+    for (key, value) in values {
+        object.insert(key.clone(), serde_json::Value::String(value.clone()));
+    }
+    let stdin = serde_json::to_string(&serde_json::Value::Object(object))
+        .map_err(|error| error.to_string())?;
+    let mut command = command_env::plain_command(&binary);
+    command.args(["plugin", "configure", id, "--values-stdin", "--json"]);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command_env::output_with_stdin(&mut command, stdin.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(result) = stdout.lines().rev().find_map(parse_action_line) {
+        return Ok(result);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(if stderr.is_empty() {
+        stdout.trim().to_owned()
+    } else {
+        stderr
+    })
+}
+
+/// Remove auto-installed plugin dependencies that are no longer needed.
+pub fn prune_plugins(
+    override_spec: Option<&str>,
+    cwd: Option<&Path>,
+    dry_run: bool,
+    scope: MarketplaceScope,
+) -> Result<ClaudeActionResult, String> {
+    let binary = claude_binary(override_spec).ok_or_else(|| tr!("claude.cli_not_found"))?;
+    let mut args = vec!["plugin", "prune", "--scope", scope.cli_flag(), "-y"];
+    if dry_run {
+        args.push("--dry-run");
+    }
+    let stdout = run_claude(&binary, &args, cwd)?;
+    Ok(ClaudeActionResult {
+        ok: true,
+        message: stdout.trim().to_owned(),
+        failure_code: None,
+        summary: None,
+    })
+}
+
 ///
 /// `claude plugin details` would be the obvious source, but it resolves plugins
 /// against the current directory: a project-scoped plugin installed for another
@@ -1101,6 +1432,110 @@ exit /b 0\n";
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+    /// A result line is the last JSON object on stdout, even on failure.
+    ///
+    /// The CLI prints human progress first and the object last, so a parser
+    /// that took the first brace it saw would read a progress message.
+    #[test]
+    fn an_action_result_is_read_off_the_last_json_line() {
+        let stdout = "Refreshing marketplace cache (timeout: 120s)…\n\
+                      {\"command\":\"marketplace-update\",\"outcome\":\"ok\",\"marketplace\":\"mrexodia\",\"message\":\"Successfully updated\"}\n";
+        let result = stdout.lines().rev().find_map(parse_action_line).unwrap();
+        assert!(result.ok);
+        assert_eq!(result.message, "Successfully updated");
+
+        let failed = "{\"command\":\"marketplace-add\",\"outcome\":\"failed\",\"message\":\"Invalid marketplace source format.\",\"failureCode\":\"invalid_source\"}";
+        let result = parse_action_line(failed).unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.failure_code.as_deref(), Some("invalid_source"));
+        assert!(result.message.contains("Invalid marketplace source"));
+    }
+
+    /// Prose that merely starts with `{` is not a result line.
+    #[test]
+    fn non_json_lines_are_not_mistaken_for_results() {
+        assert!(parse_action_line("{not json").is_none());
+        assert!(parse_action_line("plain progress text").is_none());
+        // Valid JSON without `outcome` is not one of these results either.
+        assert!(parse_action_line(r#"{"command":"x"}"#).is_none());
+    }
+
+    /// The schema says what may be set, the two lists say what is.
+    #[test]
+    fn plugin_config_reports_options_and_their_set_state() {
+        let stdout = r#"{
+            "pluginId":"p@m",
+            "schema":{
+                "token":{"type":"string","description":"API token","secret":true},
+                "mode":{"title":"Mode","enum":["fast","safe"]},
+                "level":{"type":"number","required":true}
+            },
+            "configured":["token"],
+            "unconfigured":["mode","level"]
+        }"#;
+        let catalog = parse_plugin_config("p@m", stdout).unwrap();
+        assert!(catalog.unavailable.is_none());
+        let by_key = |key: &str| {
+            catalog
+                .options
+                .iter()
+                .find(|option| option.key == key)
+                .unwrap()
+        };
+        assert!(by_key("token").secret);
+        assert!(by_key("token").is_set);
+        assert_eq!(by_key("mode").kind, "enum");
+        assert_eq!(by_key("mode").choices, ["fast", "safe"]);
+        assert!(!by_key("mode").is_set);
+        assert!(by_key("level").required);
+        assert!(catalog.orphaned.is_empty());
+    }
+
+    /// A saved key the schema no longer declares is reported, not hidden: it is
+    /// usually why a plugin misbehaves.
+    #[test]
+    fn a_saved_value_without_a_schema_entry_is_reported_as_orphaned() {
+        let stdout = r#"{
+            "pluginId":"p@m",
+            "schema":{"mode":{"enum":["a"]}},
+            "configured":["mode","removed-key"],
+            "unconfigured":[]
+        }"#;
+        let catalog = parse_plugin_config("p@m", stdout).unwrap();
+        assert_eq!(catalog.orphaned, ["removed-key"]);
+    }
+
+    /// An empty schema is a real answer, not a failure: the plugin simply has
+    /// nothing to configure.
+    #[test]
+    fn an_empty_schema_is_not_an_error() {
+        let stdout = r#"{"pluginId":"p@m","schema":{},"inputs":{},"choices":{},"configured":[],"unconfigured":[]}"#;
+        let catalog = parse_plugin_config("p@m", stdout).unwrap();
+        assert!(catalog.unavailable.is_none());
+        assert!(catalog.options.is_empty());
+    }
+
+    /// A plugin the CLI cannot resolve must stay an error, not an empty form.
+    ///
+    /// `configure` resolves against the current directory, and a project-scoped
+    /// plugin outside its project answers "No installed plugin has the id…".
+    /// Reporting that as "no options" would tell the user the plugin simply has
+    /// nothing to configure, which is a different and wrong statement.
+    ///
+    /// The CLI itself is not invoked here: that would make the test depend on
+    /// what is installed. What this pins is the split between "read, no
+    /// options" and "could not read", which is the decision the page renders
+    /// differently.
+    #[test]
+    fn an_unresolvable_plugin_is_not_reported_as_having_no_options() {
+        // An unparsable answer stands in for any failure to read.
+        let catalog = parse_plugin_config("p@m", "No installed plugin has the id");
+        assert!(
+            catalog.is_err(),
+            "an answer that is not JSON is a read failure, not an empty schema"
+        );
+    }
+
     /// A probe that cannot run must leave its own slot empty.
     #[test]
     fn a_failed_scope_probe_leaves_its_slot_empty() {
