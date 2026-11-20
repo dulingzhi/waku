@@ -842,7 +842,9 @@ impl Waku {
                     },
                 ))
                 .child(self.plugin_toggle_button(plugin, enabled, toggle_label, cx))
-                .child(self.plugin_update_button(plugin, theme, cx))
+                .when(Self::plugin_can_update(plugin), |row| {
+                    row.child(self.plugin_update_button(plugin, theme, cx))
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!(
@@ -895,6 +897,16 @@ impl Waku {
         }
         column
     }
+
+    /// Whether a plugin came from a marketplace and can therefore be updated.
+    ///
+    /// `plugin update` fetches a newer version from the marketplace, so a
+    /// locally authored plugin has nothing to fetch. The id shape is the signal:
+    /// an installed plugin is `name@marketplace`, a local one has no `@`.
+    fn plugin_can_update(plugin: &PluginEntry) -> bool {
+        plugin.id.contains('@') && !plugin.marketplace.is_empty()
+    }
+
     /// `plugin update` only exists for a plugin that came from a marketplace;
     /// a locally authored one has no newer version to fetch.
     fn plugin_update_button(
@@ -1590,6 +1602,33 @@ mod tests {
         let scope = plugin_install_scope();
         assert_eq!(scope, McpScope::User);
         assert_eq!(scope.cli_flag(), Some("user"));
+    }
+
+    /// The manifest read, `can_update` and this decision must agree.
+    ///
+    /// Two places would otherwise drift: the details panel reports whether an
+    /// update is possible, and the row decides whether to offer the button.
+    #[test]
+    fn update_is_offered_exactly_for_marketplace_plugins() {
+        let mut plugin = PluginEntry {
+            id: "p@m".into(),
+            name: "p".into(),
+            marketplace: "m".into(),
+            version: "1.0.0".into(),
+            scope: McpScope::User,
+            enabled: true,
+            project_enabled: false,
+            description: String::new(),
+            mcp_servers: Vec::new(),
+            components: Vec::new(),
+            install_path: None,
+        };
+        assert!(Waku::plugin_can_update(&plugin));
+
+        // A locally authored plugin: no marketplace, so nothing to fetch.
+        plugin.id = "local-plugin".into();
+        plugin.marketplace = String::new();
+        assert!(!Waku::plugin_can_update(&plugin));
     }
 
     /// Closing an open detail needs no read, and opening a different one must
