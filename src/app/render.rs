@@ -34,6 +34,11 @@ impl Waku {
         };
         div()
             .id(id)
+            // A divider that can be dragged is a control, and a keyboard user
+            // needs to know it is one even though the affordance is a hover
+            // strip.
+            .role(Role::Splitter)
+            .aria_label(tr!("settings.panel_resize"))
             .absolute()
             .top_0()
             .left(px(strip_left))

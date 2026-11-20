@@ -312,6 +312,8 @@ settings.color_mode_description:
   en: Follow the system, or force light or dark
 settings.palette:
   en: Theme
+settings.panel_resize:
+  en: Resize the panel
 settings.palette_description:
   en: Choose the colors. Each theme supplies its own light and dark form
 settings.ui_font_size:
@@ -1217,6 +1219,8 @@ composer.attach_daemon:
   en: Attach a file or folder from the daemon host
 composer.attach_daemon_title:
   en: Attach from daemon host
+composer.send:
+  en: Send the message
 composer.stop:
   en: Stop
 composer.stop_confirm:
@@ -1493,6 +1497,8 @@ right_panel.files:
   en: Files
 right_panel.diff:
   en: Review
+sidebar.hide_sidebar:
+  en: Hide the sidebar
 right_panel.toggle:
   en: Toggle right panel
 right_panel.open_surface:

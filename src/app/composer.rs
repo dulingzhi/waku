@@ -2806,6 +2806,8 @@ impl Waku {
                         .child(match submit_action {
                             ComposerSubmitAction::Preparing => div()
                                 .id("send-or-stop")
+                                .role(Role::Button)
+                                .aria_label(tr!("composer.preparing_task"))
                                 .w(px(26.0))
                                 .h(px(26.0))
                                 .rounded_full()
@@ -2828,6 +2830,15 @@ impl Waku {
                                 .child(
                                     div()
                                         .id("send-or-stop")
+                                        // The same element id serves send, stop
+                                        // and preparing, so the name has to
+                                        // come from the state: a screen reader
+                                        // user who hears "Send" and then
+                                        // presses it would interrupt the turn
+                                        // instead of sending.
+                                        .role(Role::Button)
+                                        .aria_label(tr!("composer.stop"))
+                                        .aria_keyshortcuts("Escape")
                                         .w(px(26.0))
                                         .h(px(26.0))
                                         .rounded_full()
@@ -2858,6 +2869,8 @@ impl Waku {
                                     element.child(
                                         div()
                                             .id("queue-follow-up")
+                                            .role(Role::Button)
+                                            .aria_label(tr!("composer.queue_followup"))
                                             .w(px(26.0))
                                             .h(px(26.0))
                                             .rounded_full()
@@ -2889,6 +2902,9 @@ impl Waku {
                                 }),
                             ComposerSubmitAction::Send => div()
                                 .id("send-or-stop")
+                                .role(Role::Button)
+                                .aria_label(tr!("composer.send"))
+                                .aria_keyshortcuts("Enter")
                                 .w(px(26.0))
                                 .h(px(26.0))
                                 .rounded_full()

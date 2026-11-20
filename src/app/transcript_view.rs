@@ -1478,6 +1478,22 @@ impl Waku {
         if let Some(stats) = self.render_turn_stats_row(turn_id, theme) {
             column = column.child(stats);
         }
+        // The footer lands when the turn settles, so this fade never races the
+        // stream: by the time a row exists here, the pump has drained. One
+        // fade per turn, remembered so a later re-render does not restart it.
+        let reduce_motion = cx.reduce_motion();
+        let fade = {
+            let mut fades = self.footer_fades.borrow_mut();
+            *fades.entry(turn_id).or_default()
+        };
+        if let Some(opacity) = fade.opacity(reduce_motion) {
+            // Advance on the shared pulse clock at ~30 fps rather than
+            // `request_animation_frame`: one fade per settled turn, and the
+            // lease parks itself the moment the fade ends. A display-rate loop
+            // here would price a whole-pane rebuild per frame for 150ms.
+            motion::pulse_lease(cx.entity().entity_id(), cx);
+            column = column.opacity(opacity);
+        }
         column
             .child(render_message_footer(
                 theme,
@@ -1912,6 +1928,14 @@ impl Waku {
             .child(
                 div()
                     .id(SharedString::from(format!("turn-collapsed-{turn_id}")))
+                    .role(Role::Button)
+                    // Names the turn and says what is behind the row; the
+                    // chevron states the collapsed position for a reader who
+                    // cannot see it.
+                    .aria_label(SharedString::from(label.clone()))
+                    .aria_description(SharedString::from(stats.clone()))
+                    .aria_expanded(false)
+                    .aria_keyshortcuts("Enter")
                     .track_focus(&focus)
                     .tab_index(0)
                     .w_full()
@@ -2212,6 +2236,32 @@ impl Waku {
                 .child(
                     div()
                         .id(SharedString::from(format!("activity-item-{id}")))
+                        .role(if has_detail || inline_diff {
+                            Role::Button
+                        } else {
+                            Role::ListItem
+                        })
+                        // What the row shows, in the order it reads: action,
+                        // subject, verdict. A failed row says so in the name,
+                        // because the danger edge is not spoken.
+                        .aria_label(SharedString::from({
+                            let mut label = action_label.clone();
+                            if !row_detail.is_empty() {
+                                label.push(' ');
+                                label.push_str(&row_detail);
+                            }
+                            if failed_row {
+                                label.push_str(" — ");
+                                label.push_str(&tr!("transcript.row_failed"));
+                            }
+                            label
+                        }))
+                        .when(has_detail || inline_diff, |element| {
+                            // Only a row that opens is expandable; a plain row
+                            // reporting an expanded state would announce a
+                            // control that is not there.
+                            element.aria_expanded(payload_open)
+                        })
                         .h(px(28.0))
                         .pl(px(8.0))
                         .pr(px(4.0))

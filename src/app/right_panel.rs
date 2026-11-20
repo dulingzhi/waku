@@ -2123,6 +2123,10 @@ impl Waku {
         let theme = Theme::current(cx);
         div()
             .id("toggle-right-panel")
+            .role(Role::Button)
+            .aria_label(tr!("right_panel.toggle"))
+            .aria_keyshortcuts(crate::platform::primary_shortcut("⌘⇧B", "Ctrl+Shift+B"))
+            .aria_expanded(self.right_panel_visible)
             .w(px(26.0))
             .h(px(26.0))
             .flex_none()

@@ -12,10 +12,10 @@ use gpui::{
     Animation, AnimationExt, AnyElement, App, Bounds, ClipboardEntry, ClipboardItem, Context, Div,
     Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyDownEvent,
     ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, ScrollHandle,
-    SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window, WindowBounds, canvas,
-    div, ease_out_quint, fill, font, img, linear_color_stop, linear_gradient, list, point,
-    prelude::*, pulsating_between, px, rgb,
+    MouseUpEvent, NavigationDirection, ObjectFit, PathPromptOptions, Pixels, Render, Role,
+    ScrollHandle, SharedString, Stateful, StyleRefinement, TextRun, WeakEntity, Window,
+    WindowBounds, canvas, div, ease_out_quint, fill, font, img, linear_color_stop, linear_gradient,
+    list, point, prelude::*, pulsating_between, px, rgb,
 };
 use uuid::Uuid;
 
@@ -1531,6 +1531,11 @@ pub struct Waku {
     /// separate virtual-list rows, so GPUI's ancestor-scoped `group_hover`
     /// cannot reveal them when a sibling response row is hovered.
     hovered_response_row: Option<(Uuid, TranscriptRowKind)>,
+    /// When each turn's footer first appeared, so it can fade in once instead
+    /// of popping. Keyed by turn and cleared with the other visible state: a
+    /// stale entry would make a footer's second appearance start at zero
+    /// opacity again.
+    footer_fades: RefCell<HashMap<Uuid, crate::ui::motion::FadeIn>>,
     /// Checkpoint-ref existence per (session, retained turn count), filled by
     /// `prefetch_checkpoint_refs` on the background executor. Rows read only
     /// this cache: resolving a ref forks a `git` subprocess, which must stay
@@ -3043,6 +3048,7 @@ impl Waku {
                 assistant_footer_cache: RefCell::new(HashMap::new()),
                 assistant_footer_fingerprint: Cell::new(None),
                 hovered_response_row: None,
+                footer_fades: RefCell::new(HashMap::new()),
                 checkpoint_ref_cache: RefCell::new(HashMap::new()),
                 checkpoint_ref_generation: Cell::new(0),
                 checkpoint_ref_prefetch: Cell::new(None),

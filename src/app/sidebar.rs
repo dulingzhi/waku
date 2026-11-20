@@ -482,6 +482,9 @@ impl Waku {
         let theme = Theme::current(cx);
         div()
             .id("toggle-sidebar")
+            .role(Role::Button)
+            .aria_label(tr!("sidebar.hide_sidebar"))
+            .aria_keyshortcuts(crate::platform::primary_shortcut("⌘B", "Ctrl+B"))
             .w(px(26.0))
             .h(px(26.0))
             .flex_none()
@@ -671,6 +674,8 @@ impl Waku {
         let add_project = div()
             .id("add-project")
             .tab_index(0)
+            .role(Role::Button)
+            .aria_label(tr!("project.new_project"))
             .w(px(20.0))
             .h(px(22.0))
             .rounded(px(6.0))
@@ -714,6 +719,11 @@ impl Waku {
         div()
             .id(id)
             .tab_index(0)
+            // Announced as a button with its visible text as the name. A row
+            // that responds to Enter and Space but reports no role is invisible
+            // to a screen reader, however it looks.
+            .role(Role::Button)
+            .aria_label(label.clone())
             .w_full()
             .h(px(SIDEBAR_ACTION_ROW_HEIGHT))
             .flex_none()
@@ -1883,6 +1893,12 @@ impl Waku {
         let keyboard_menu = menu.clone();
         let row = div()
             .id(SharedString::from(format!("session-{}", session.id)))
+            .role(Role::Button)
+            // The visible text is the title, which the row already draws; the
+            // subtitle (project, status) is not on screen in every layout, so
+            // the name is the title alone rather than a concatenation that
+            // would read differently than it looks.
+            .aria_label(SharedString::from(localized_session_title(session)))
             .w_full()
             .min_w_0()
             .flex()

@@ -158,6 +158,7 @@ web.error_daemon_token_required: デーモントークンを入力してくだ�
 settings.color_mode: 外観
 settings.color_mode_description: システムに従うか、ライト／ダークを固定します
 settings.palette: テーマ
+settings.panel_resize: パネルの幅を変更
 settings.palette_description: 配色を選択します。各テーマはライトとダークの両方の形を持ちます
 settings.ui_font_size: UI のフォントサイズ
 settings.ui_font_size_description: インターフェース全体とメッセージの文字サイズ
@@ -623,6 +624,7 @@ composer.queue_placeholder: フォローアップを追加…
 composer.prompt_placeholder: Waku に作業を依頼…
 composer.attach_daemon: デーモンホストからファイルまたはフォルダを添付
 composer.attach_daemon_title: デーモンホストから添付
+composer.send: メッセージを送信
 composer.stop: 停止
 composer.stop_confirm: もう一度 Escape を押すと停止します
 composer.steer_current: 現在のターンに指示を追加
@@ -766,6 +768,7 @@ right_panel.browser: ブラウザ
 right_panel.terminal: ターミナル
 right_panel.files: ファイル
 right_panel.diff: レビュー
+sidebar.hide_sidebar: サイドバーを隠す
 right_panel.toggle: 右パネルの表示を切り替える
 right_panel.open_surface: パネルを開く
 right_panel.choose_surface: 右パネルに表示する内容を選択します

@@ -154,6 +154,7 @@ web.error_daemon_token_required: 请输入守护进程令牌
 settings.color_mode: 外观
 settings.color_mode_description: 跟随系统，或强制浅色、深色
 settings.palette: 主题配色
+settings.panel_resize: 调整面板宽度
 settings.palette_description: 选择配色方案。每个主题都提供自己的浅色与深色形态
 settings.ui_font_size: 界面字号
 settings.ui_font_size_description: 整个界面与消息的文字大小
@@ -594,6 +595,7 @@ composer.queue_placeholder: 添加后续消息…
 composer.prompt_placeholder: 让 Waku 构建些什么…
 composer.attach_daemon: 从守护进程主机附加文件或文件夹
 composer.attach_daemon_title: 从守护进程主机附加
+composer.send: 发送消息
 composer.stop: 停止
 composer.stop_confirm: 再按一次 Escape 停止
 composer.steer_current: 引导当前回合
@@ -729,6 +731,7 @@ right_panel.browser: 浏览器
 right_panel.terminal: 终端
 right_panel.files: 文件
 right_panel.diff: 审阅
+sidebar.hide_sidebar: 隐藏侧边栏
 right_panel.toggle: 显示或隐藏右侧面板
 right_panel.open_surface: 打开一个面板
 right_panel.choose_surface: 选择要在右侧面板中显示的内容
