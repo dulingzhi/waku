@@ -2815,3 +2815,76 @@ shortcuts.save_file:
   en: Save the file
 shortcuts.copy:
   en: Copy
+
+claude.cli_not_found:
+  en: Claude Code was not found on this machine
+claude.scope_user:
+  en: User
+claude.scope_project:
+  en: Project
+claude.scope_local:
+  en: Local
+claude.tab_mcp:
+  en: MCP servers
+claude.tab_plugins:
+  en: Plugins
+claude.mcp_empty:
+  en: No MCP servers are configured
+claude.mcp_unavailable:
+  en: "Could not read MCP servers: %{error}"
+claude.plugins_empty:
+  en: No plugins are installed
+claude.plugins_unavailable:
+  en: "Could not read plugins: %{error}"
+claude.health_connected:
+  en: Connected
+claude.health_failed:
+  en: Failed
+claude.health_unknown:
+  en: Not checked
+claude.pending_approval:
+  en: Pending approval
+claude.remove:
+  en: Remove
+claude.remove_confirm:
+  en: Remove the MCP server %{name} from %{scope}? This cannot be undone.
+claude.enable:
+  en: Enable
+claude.disable:
+  en: Disable
+claude.uninstall:
+  en: Uninstall
+claude.uninstall_confirm:
+  en: Uninstall the plugin %{name}? This cannot be undone.
+claude.search:
+  en: Search MCP servers and plugins…
+claude.loading:
+  en: Reading the Claude Code configuration…
+claude.mcp_count:
+  en: "%{count} servers"
+claude.plugin_count:
+  en: "%{count} plugins"
+claude.mcp_target:
+  en: Target
+claude.plugin_version:
+  en: Version
+claude.plugin_marketplace:
+  en: Marketplace
+claude.plugin_components:
+  en: Components
+claude.plugin_mcp_servers:
+  en: MCP servers
+claude.no_match:
+  en: Nothing matches your search
+settings.claude:
+  en: Claude Code
+settings.claude_keywords:
+  en: claude code mcp server servers plugin plugins marketplace install enable disable remove uninstall
+common.confirm:
+  en: Confirm
+errors.unexpected_response:
+  en: The daemon returned an unexpected response
+claude.scope_plugin:
+  en: From plugin
+claude.plugin_server_not_removable:
+  en: This server comes from a plugin. Disable the plugin to remove it.

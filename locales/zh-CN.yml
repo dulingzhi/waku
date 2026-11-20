@@ -1381,3 +1381,76 @@ shortcuts.find_next: 下一个匹配
 shortcuts.find_previous: 上一个匹配
 shortcuts.save_file: 保存文件
 shortcuts.copy: 复制
+
+claude.cli_not_found:
+  zh-CN: 未在这台机器上找到 Claude Code
+claude.scope_user:
+  zh-CN: 用户
+claude.scope_project:
+  zh-CN: 项目
+claude.scope_local:
+  zh-CN: 本地
+claude.tab_mcp:
+  zh-CN: MCP 服务器
+claude.tab_plugins:
+  zh-CN: 插件
+claude.mcp_empty:
+  zh-CN: 还没有配置 MCP 服务器
+claude.mcp_unavailable:
+  zh-CN: "读取 MCP 服务器失败：%{error}"
+claude.plugins_empty:
+  zh-CN: 还没有安装插件
+claude.plugins_unavailable:
+  zh-CN: "读取插件失败：%{error}"
+claude.health_connected:
+  zh-CN: 已连接
+claude.health_failed:
+  zh-CN: 连接失败
+claude.health_unknown:
+  zh-CN: 未检测
+claude.pending_approval:
+  zh-CN: 等待批准
+claude.remove:
+  zh-CN: 移除
+claude.remove_confirm:
+  zh-CN: 从%{scope}移除 MCP 服务器 %{name}？此操作无法撤销。
+claude.enable:
+  zh-CN: 启用
+claude.disable:
+  zh-CN: 禁用
+claude.uninstall:
+  zh-CN: 卸载
+claude.uninstall_confirm:
+  zh-CN: 卸载插件 %{name}？此操作无法撤销。
+claude.search:
+  zh-CN: 搜索 MCP 服务器和插件…
+claude.loading:
+  zh-CN: 正在读取 Claude Code 配置…
+claude.mcp_count:
+  zh-CN: "%{count} 个服务器"
+claude.plugin_count:
+  zh-CN: "%{count} 个插件"
+claude.mcp_target:
+  zh-CN: 目标
+claude.plugin_version:
+  zh-CN: 版本
+claude.plugin_marketplace:
+  zh-CN: 插件市场
+claude.plugin_components:
+  zh-CN: 组件
+claude.plugin_mcp_servers:
+  zh-CN: MCP 服务器
+claude.no_match:
+  zh-CN: 没有匹配的内容
+settings.claude:
+  zh-CN: Claude Code
+settings.claude_keywords:
+  zh-CN: claude code mcp 服务器 插件 市场 安装 启用 禁用 移除 卸载
+common.confirm:
+  zh-CN: 确认
+errors.unexpected_response:
+  zh-CN: 守护进程返回了意外的响应
+claude.scope_plugin:
+  zh-CN: 来自插件
+claude.plugin_server_not_removable:
+  zh-CN: 该服务器来自插件。请禁用对应插件来移除它。

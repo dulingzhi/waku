@@ -19,7 +19,12 @@ use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
-pub const PROTOCOL_VERSION: u32 = 8;
+use crate::claude::{McpCatalog, McpScope, PluginCatalog};
+
+/// Bumped because the new Claude MCP and plugin commands below change the
+/// command surface: a client that sends them to an older daemon would get an
+/// error it cannot distinguish from a real failure.
+pub const PROTOCOL_VERSION: u32 = 9;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -210,6 +215,39 @@ pub enum Command {
     },
     TrashSkills {
         dirs: Vec<PathBuf>,
+    },
+    /// Every MCP server Claude Code knows about, with its scope and the health
+    /// `claude mcp list` reports. One command, because that CLI verb both
+    /// enumerates and health-checks; there is no cheap configuration-only view
+    /// to split out.
+    LoadClaudeMcpServers {
+        /// The project whose `local` and `project` scopes to include, when a
+        /// task is open. `None` lists user scope only.
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    /// Remove an MCP server. There is deliberately no `Set…Enabled` command:
+    /// Claude Code has no CLI verb for it — disabling is the per-project
+    /// `disabledMcpServers` key inside `.claude.json`, which this build refuses
+    /// to rewrite (see `waku_core::claude_config` for why).
+    RemoveClaudeMcpServer {
+        name: String,
+        #[ts(type = "string")]
+        scope: McpScope,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    LoadClaudePlugins,
+    SetClaudePluginEnabled {
+        id: String,
+        enabled: bool,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    UninstallClaudePlugin {
+        id: String,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
     },
     LoadTaskState,
     SaveTaskState {
@@ -455,6 +493,12 @@ pub enum ResponsePayload {
     SkillsCatalog {
         catalog: SkillsCatalog,
     },
+    ClaudeMcpCatalog {
+        catalog: McpCatalog,
+    },
+    ClaudePluginCatalog {
+        catalog: PluginCatalog,
+    },
     TaskState {
         projects: Vec<Project>,
         sessions: Vec<AgentSession>,
@@ -578,7 +622,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
     }
 
     #[test]
@@ -587,7 +631,7 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
     }
 
     #[test]

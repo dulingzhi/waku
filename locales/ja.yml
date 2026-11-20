@@ -1433,3 +1433,76 @@ shortcuts.find_next: 次の一致
 shortcuts.find_previous: 前の一致
 shortcuts.save_file: ファイルを保存
 shortcuts.copy: コピー
+
+claude.cli_not_found:
+  ja: このマシンに Claude Code が見つかりません
+claude.scope_user:
+  ja: ユーザー
+claude.scope_project:
+  ja: プロジェクト
+claude.scope_local:
+  ja: ローカル
+claude.tab_mcp:
+  ja: MCP サーバー
+claude.tab_plugins:
+  ja: プラグイン
+claude.mcp_empty:
+  ja: MCP サーバーが設定されていません
+claude.mcp_unavailable:
+  ja: "MCP サーバーを読み込めません: %{error}"
+claude.plugins_empty:
+  ja: プラグインがインストールされていません
+claude.plugins_unavailable:
+  ja: "プラグインを読み込めません: %{error}"
+claude.health_connected:
+  ja: 接続済み
+claude.health_failed:
+  ja: 接続失敗
+claude.health_unknown:
+  ja: 未確認
+claude.pending_approval:
+  ja: 承認待ち
+claude.remove:
+  ja: 削除
+claude.remove_confirm:
+  ja: MCP サーバー %{name} を%{scope}から削除しますか？この操作は元に戻せません。
+claude.enable:
+  ja: 有効化
+claude.disable:
+  ja: 無効化
+claude.uninstall:
+  ja: アンインストール
+claude.uninstall_confirm:
+  ja: プラグイン %{name} をアンインストールしますか？この操作は元に戻せません。
+claude.search:
+  ja: MCP サーバーとプラグインを検索…
+claude.loading:
+  ja: Claude Code の設定を読み込み中…
+claude.mcp_count:
+  ja: "%{count} サーバー"
+claude.plugin_count:
+  ja: "%{count} プラグイン"
+claude.mcp_target:
+  ja: ターゲット
+claude.plugin_version:
+  ja: バージョン
+claude.plugin_marketplace:
+  ja: マーケットプレイス
+claude.plugin_components:
+  ja: コンポーネント
+claude.plugin_mcp_servers:
+  ja: MCP サーバー
+claude.no_match:
+  ja: 一致するものがありません
+settings.claude:
+  ja: Claude Code
+settings.claude_keywords:
+  ja: claude code mcp サーバー プラグイン マーケットプレイス インストール 有効 無効 削除
+common.confirm:
+  ja: 確認
+errors.unexpected_response:
+  ja: デーモンが予期しない応答を返しました
+claude.scope_plugin:
+  ja: プラグイン由来
+claude.plugin_server_not_removable:
+  ja: このサーバーはプラグイン由来です。削除するにはプラグインを無効化してください。
