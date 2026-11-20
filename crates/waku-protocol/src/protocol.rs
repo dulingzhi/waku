@@ -20,7 +20,8 @@ use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
 use crate::claude::{
-    AvailablePluginCatalog, MarketplaceCatalog, McpCatalog, McpScope, PluginCatalog, PluginDetails,
+    AvailablePluginCatalog, ClaudeActionResult, MarketplaceCatalog, MarketplaceScope, McpCatalog,
+    McpScope, PluginCatalog, PluginConfigCatalog, PluginDetails,
 };
 
 /// Bumped because the new Claude MCP and plugin commands below change the
@@ -29,7 +30,7 @@ use crate::claude::{
 ///
 /// 10 adds the marketplace, available-plugin, plugin-detail, install and
 /// update commands, which extend the same surface for the same reason.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -287,6 +288,51 @@ pub enum Command {
         id: String,
         #[ts(type = "string | null")]
         scope: Option<McpScope>,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    /// Declare a marketplace from a repo, URL or path.
+    AddClaudeMarketplace {
+        /// `owner/repo`, an https/git URL, or a path on the daemon host.
+        source: String,
+        #[ts(type = "string")]
+        scope: MarketplaceScope,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    /// Remove a marketplace declaration. `scope: None` removes it everywhere.
+    RemoveClaudeMarketplace {
+        name: String,
+        #[ts(type = "string | null")]
+        scope: Option<MarketplaceScope>,
+    },
+    /// Refresh one marketplace, or every one when no name is given.
+    UpdateClaudeMarketplace {
+        #[ts(type = "string | null")]
+        name: Option<String>,
+    },
+    /// Read the options a plugin declares and which of them are set.
+    ///
+    /// Carries `cwd` because `plugin configure` resolves the plugin against the
+    /// current directory: a project-scoped plugin is only reachable from its own
+    /// project, exactly like `plugin details`.
+    LoadClaudePluginConfig {
+        id: String,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    /// Save plugin options. Values are the CLI's own `key=value` pairs.
+    SetClaudePluginConfig {
+        id: String,
+        values: Vec<String>,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    /// Remove auto-installed plugin dependencies that are no longer needed.
+    PruneClaudePlugins {
+        /// Report what would be removed without removing it.
+        dry_run: bool,
+        scope: MarketplaceScope,
         #[ts(type = "string | null")]
         cwd: Option<PathBuf>,
     },
@@ -549,6 +595,12 @@ pub enum ResponsePayload {
     ClaudePluginDetails {
         details: PluginDetails,
     },
+    ClaudeAction {
+        result: ClaudeActionResult,
+    },
+    ClaudePluginConfigCatalog {
+        catalog: PluginConfigCatalog,
+    },
     TaskState {
         projects: Vec<Project>,
         sessions: Vec<AgentSession>,
@@ -672,7 +724,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 10);
+        assert_eq!(PROTOCOL_VERSION, 11);
     }
 
     #[test]
@@ -681,7 +733,7 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 10);
+        assert_eq!(PROTOCOL_VERSION, 11);
     }
 
     #[test]

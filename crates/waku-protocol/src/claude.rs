@@ -165,6 +165,101 @@ pub struct MarketplaceCatalog {
     pub unavailable: Option<String>,
 }
 
+/// What a marketplace declaration is attached to.
+///
+/// A marketplace is declared in a settings file, and those files cascade:
+/// `user` applies everywhere, `project` travels with the repository, `local` is
+/// this checkout on this machine. Removing one from the wrong layer changes
+/// behaviour for every other project, so the page states which it will touch.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum MarketplaceScope {
+    User,
+    Project,
+    Local,
+}
+
+impl MarketplaceScope {
+    pub fn label(self) -> String {
+        match self {
+            Self::User => tr!("claude.scope_user"),
+            Self::Project => tr!("claude.scope_project"),
+            Self::Local => tr!("claude.scope_local"),
+        }
+    }
+
+    pub fn cli_flag(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// One configurable option a plugin declares.
+///
+/// Read from `claude plugin configure --json`, whose `schema` is a JSON-schema
+/// fragment per option. This carries only what a form can render: the key, its
+/// type, whether it is required, and the choices when the schema enumerates
+/// them. Anything richer stays in the raw description so nothing is silently
+/// dropped.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginConfigOption {
+    /// The key to send back in the values object.
+    pub key: String,
+    /// A short human label, falling back to the key when the schema has none.
+    pub title: String,
+    pub description: String,
+    /// `string`, `number`, `boolean`, or `enum` when the schema lists choices.
+    pub kind: String,
+    pub required: bool,
+    /// Present for `enum`.
+    pub choices: Vec<String>,
+    /// The value the user already saved, when there is one.
+    pub value: Option<String>,
+    /// Whether the value must never be echoed back to the screen.
+    ///
+    /// The CLI stores some options as secrets; those are shown as "set" rather
+    /// than printed, and the page never reads their value.
+    pub secret: bool,
+    /// Whether a value is already saved.
+    ///
+    /// `configure --json` reports set/unset by key and never echoes a value
+    /// back, so this is what the page can honestly show.
+    pub is_set: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginConfigCatalog {
+    pub plugin_id: String,
+    pub options: Vec<PluginConfigOption>,
+    pub unavailable: Option<String>,
+    /// Saved values whose key no longer appears in the schema.
+    ///
+    /// Reported rather than hidden: a stale value is usually why a plugin
+    /// behaves unexpectedly, and the fix is to clear it.
+    pub orphaned: Vec<String>,
+}
+
+/// The outcome of a write that the CLI reports as structured JSON.
+///
+/// The message is the CLI's own words: a failed install explains itself far
+/// better than anything this page could paraphrase, and a partial success (a
+/// marketplace whose refresh timed out) only makes sense in its own text.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeActionResult {
+    pub ok: bool,
+    pub message: String,
+    /// The CLI's short reason for a failure, e.g. `invalid_source`.
+    pub failure_code: Option<String>,
+    /// Set by a browse or refresh that has to report how much it read.
+    pub summary: Option<String>,
+}
+
 /// A plugin one of the added marketplaces offers, installed or not.
 ///
 /// This list is the expensive one: asking for it makes the CLI refresh every
