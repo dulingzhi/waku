@@ -338,6 +338,53 @@ impl Backend for WakuBackend {
                 crate::skills::trash_skills(&dirs).map_err(|error| anyhow!(error))?;
                 Ok(ResponsePayload::Ack)
             }
+            Command::LoadClaudeMcpServers { cwd } => {
+                let override_spec = self.claude_binary_override();
+                Ok(ResponsePayload::ClaudeMcpCatalog {
+                    catalog: crate::claude_config::list_mcp_servers(
+                        override_spec.as_deref(),
+                        cwd.as_deref(),
+                    ),
+                })
+            }
+            Command::RemoveClaudeMcpServer { name, scope, cwd } => {
+                let override_spec = self.claude_binary_override();
+                crate::claude_config::remove_mcp_server(
+                    override_spec.as_deref(),
+                    cwd.as_deref(),
+                    &name,
+                    scope,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::Ack)
+            }
+            Command::LoadClaudePlugins => {
+                let override_spec = self.claude_binary_override();
+                Ok(ResponsePayload::ClaudePluginCatalog {
+                    catalog: crate::claude_config::list_plugins(override_spec.as_deref(), None),
+                })
+            }
+            Command::SetClaudePluginEnabled { id, enabled, cwd } => {
+                let override_spec = self.claude_binary_override();
+                crate::claude_config::set_plugin_enabled(
+                    override_spec.as_deref(),
+                    cwd.as_deref(),
+                    &id,
+                    enabled,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::Ack)
+            }
+            Command::UninstallClaudePlugin { id, cwd } => {
+                let override_spec = self.claude_binary_override();
+                crate::claude_config::uninstall_plugin(
+                    override_spec.as_deref(),
+                    cwd.as_deref(),
+                    &id,
+                )
+                .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::Ack)
+            }
             Command::LoadTaskState => {
                 let state = self.task_state.lock();
                 Ok(ResponsePayload::TaskState {
@@ -1538,6 +1585,20 @@ impl WakuBackend {
             .path
             .ok_or_else(|| anyhow!("{} is not installed on the daemon", provider.display_name()))
     }
+
+    /// The user's configured `claude` path, when there is one.
+    ///
+    /// Claude's MCP and plugin commands must run against the same binary the
+    /// sessions run, or a user who pointed Waku at a specific install would be
+    /// editing a different Claude Code's configuration.
+    fn claude_binary_override(&self) -> Option<String> {
+        ensure_shell_environment();
+        self.settings
+            .get()
+            .provider_binary_overrides
+            .get(&ProviderKind::Claude)
+            .cloned()
+    }
 }
 
 fn validate_message_rewind(source: &AgentSession, turn_count: usize) -> anyhow::Result<()> {
@@ -1786,6 +1847,11 @@ fn handle_driver_command(
         | Command::LoadSkills { .. }
         | Command::SetSkillsEnabled { .. }
         | Command::TrashSkills { .. }
+        | Command::LoadClaudeMcpServers { .. }
+        | Command::RemoveClaudeMcpServer { .. }
+        | Command::LoadClaudePlugins
+        | Command::SetClaudePluginEnabled { .. }
+        | Command::UninstallClaudePlugin { .. }
         | Command::LoadTaskState
         | Command::SaveTaskState { .. }
         | Command::RemoveSession
