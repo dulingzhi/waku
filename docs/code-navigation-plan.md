@@ -65,13 +65,79 @@ every other request — session updates included — for as long as the scan run
 That is acceptable for `ReadTextFile` and not acceptable for anything that reads
 thousands of files.
 
-So the plan puts search in two places by design:
+## Measured, not assumed: what searching actually costs
 
-- **The daemon owns the index.** It is the only party that can see the
-  filesystem, it knows the workspace root, and it survives client restarts.
-- **The client owns the query box and the results UI**, and asks the daemon for
-  results asynchronously, debounced, through a path that does not stall the
-  request loop.
+**This section replaces an earlier claim in this document that incremental
+refreshing was "a cheap signal".** It was measured on the user's own repositories
+and the claim was wrong, so the design changed. All numbers below come from two
+standalone probes (`indexbench`, `incrbench`, `querybench`) compiled with
+`rustc -O` and run on this machine: 32 logical cores, SSD, Windows.
+
+Trees measured: **Waku** (624 text files, 8.7 MiB), **`up5client\Client\Platform`**
+(4 054 files, 43 MiB — a real C++/Qt client), **`up5client\Client`**
+(19 202 files, 211 MiB).
+
+### Full scan: cheap enough, given threads
+
+| Work | 43 MiB | 211 MiB |
+| --- | --- | --- |
+| Walk the tree (`read_dir`) | 17–37 ms | 179–346 ms |
+| Read every file, 1 thread (cold) | 595 ms | 6 083 ms |
+| Read every file, 1 thread (warm) | 147–156 ms | 1 872–1 894 ms |
+| Read + 5 whole-word scans, 1 thread | 463 ms | 5 822 ms |
+| Read + 5 whole-word scans, **8 threads** | **95 ms** | **860 ms** |
+
+Parallelism is worth 6.7×, so a scan-shaped query belongs on a thread pool and
+never on the request loop. Full rebuild of a whole workspace is under a second
+at 211 MiB — **a full rebuild is not the problem.**
+
+### Polling is the problem
+
+| Poll, no file changed | 43 MiB (4 054 files) | 211 MiB (19 202 files) |
+| --- | --- | --- |
+| `stat` every known file | 112–118 ms | **496–990 ms** |
+| `stat` + walk to find new files | 537–545 ms | **1 209–1 276 ms** |
+
+A change-detection tick by mtime costs **half a second to over a second** on a
+200 MiB tree. Run every second, that is a permanently busy core; run every ten
+seconds, staleness is visible to the user.
+
+`git status` is not the cheap alternative it looks like: **2.9 s** on the 43 MiB
+tree, worse than polling, and it does not describe untracked build output.
+
+### Query without an index: the finding that changed the design
+
+| Query, 8 threads, index-free | 43 MiB | 211 MiB |
+| --- | --- | --- |
+| One identifier, whole-word | ~105–175 ms | ~400–520 ms |
+| Waku's own tree (624 files) | — | ~40 ms |
+
+For comparison, `rg` on the 211 MiB tree took **2.3–3.1 s** — slower than the
+naive probe, because `rg` walks and greps files this probe skips, and because
+process start-up is a fixed cost on every query. **The matcher is not the
+bottleneck; the read is.** So "add a fancier matcher" is not the optimization
+this problem needs.
+
+### What this means for the design
+
+1. **Do not build a maintained index as the first move.** The expensive part is
+   keeping it fresh, and there is no cheap freshness signal on Windows at this
+   size. An index that is a second behind on every keystroke of a save is worse
+   than a query that answers in 100 ms from disk.
+2. **Scan on demand, debounced, on a thread pool.** ~100 ms on the 43 MiB repo
+   and ~450 ms on a 211 MiB one is an acceptable answer for an explicitly
+   invoked action (`go to definition`, `find references`) once it is debounced
+   and cancelled when the query changes.
+3. **Cache results per query, not files.** `QueryCache` in `src/query.rs`
+   already exists for exactly this shape and is used by the command palette.
+4. **Keep a warm file list** (the walk result, refreshed on a slow timer and on
+   window focus) so a query does not pay the 200–350 ms walk. That is the one
+   piece of state worth keeping, and it is small: 19 202 paths.
+5. **An index, if it ever comes, must be justified by a measurement** showing the
+   on-demand path is too slow, and it must be built on the daemon with a worker
+   that the request loop never blocks on. The memory cost of storing every
+   occurrence is real: the 43 MiB tree has 1.3 M lines and the 211 MiB tree 5.9 M,
+   which is ~20 MiB and ~90 MiB at 16 bytes a line.
 
 ## What the workspace browsing should become
 
@@ -198,17 +264,20 @@ There is no parser, so there are three real routes and one fake one.
 | **D. A shell-out to `rg`/`git grep`** | Nothing a pattern scan cannot do | A process per query on a host that may not have the tool | Rejected |
 
 The recommendation is **C now, A later, and B only if a specific language needs
-it**. Concretely for C:
+it**. Concretely for C, and reshaped by the measurements above:
 
-- Index is built **on the daemon**, in a background thread, over the file list
-  `list_project_files` already produces (git-listed when available).
-- It stores, per file: identifier name → byte ranges of the lines matching a
-  declaration pattern for its extension. Pure text, no AST.
+- **No maintained index in this stage.** The query is a scan over the warm file
+  list, on the daemon's blocking pool, debounced, cancelled on query change.
+  Measured: ~105–175 ms on a 43 MiB tree, ~400–520 ms on a 211 MiB one.
+- The **warm file list** is the only state kept: the walk result, refreshed on a
+  slow timer and on window focus. Measured walk cost is 17–37 ms at 43 MiB and
+  179–346 ms at 211 MiB, which is worth not paying per query.
 - Declaration patterns are a small table keyed by extension, not a language
   framework: `fn|struct|enum|trait|impl|const|static|mod|type` for Rust,
-  `function|class|const|let|var` for JS/TS, `def|class` for Python, and so on.
-  Keeping it a table is what makes the false-positive rate predictable and the
-  scope reviewable.
+  `function|class|const|let|var` for JS/TS, `def|class` for Python, and for the
+  C/C++ trees that this was measured against, `class|struct|enum` plus the
+  out-of-line member definitions `Type Name::Method(`. Keeping it a table is what
+  makes the false-positive rate predictable and the scope reviewable.
 - The identifier under the cursor is resolved by **a small word scanner over the
   line**, not by the lexer. This is a correction to an earlier draft of this
   plan: `highlight::tokenize_line` *does not* emit plain identifiers. At
@@ -230,11 +299,10 @@ because it shows every candidate with its file and line.
 
 ### C4. Find references
 
-Same index, opposite query: every occurrence of the identifier as a whole word
-across the indexed file set, grouped by file with counts, opened in the right
-panel's existing list. This is `rg` semantics built in Rust over the same
-`regex` dependency `file_search.rs` already uses, run once per query on the
-daemon, and capped with an honest "+N more".
+Same scan, opposite query: every occurrence of the identifier as a whole word
+across the warm file list, grouped by file with counts, opened in the right
+panel's existing list. Run once per query on the daemon's blocking pool, and
+capped with an honest "+N more".
 
 The distinction that has to survive into the UI: **references are not
 definitions.** A text occurrence includes comments, strings, and unrelated
@@ -244,7 +312,7 @@ that legible rather than misleading.
 ### C5. Workspace text search (a find bar that is not per-file)
 
 `file_search.rs` searches one open file. There is no way to ask "where is this
-string in the project". This is the third query over the same index, and the one
+string in the project". This is the third query over the same scan, and the one
 most people will use daily:
 
 - `secondary-shift-f` opens a workspace search bar in the right panel. That
@@ -257,12 +325,20 @@ most people will use daily:
   which needs C1, so C1 comes first.
 - Case/whole-word/regex toggles reuse `file_search.rs`'s existing flag model.
 
+This is the case where an index would earn its keep, because a user typing in a
+search box issues many queries per minute. Measured on-demand cost is ~105–175 ms
+per query at 43 MiB and ~400–520 ms at 211 MiB, which is too slow to run on every
+keystroke. **So C5 initially runs only on submit/Enter, with an explicit spinner,
+not per keystroke.** If that feels bad in use, that is the measurement that
+justifies building the index — not before.
+
 ### C6. Symbol outline for the open file
 
-With C3's index already built, the per-file outline (functions, types, members in
-order) is a filtered view of the same data. It belongs in the right panel, above
-or beside the working tree, and it is what makes navigation work on a file too
-big to scroll.
+The per-file outline (functions, types, members in order) is a filtered view of
+the same declaration table, computed for one file at a time and therefore
+trivially cheap — roughly 80 ms for 4 054 files' worth of lines means one file is
+sub-millisecond. It belongs in the right panel, above or beside the working
+tree, and it is what makes navigation work on a file too big to scroll.
 
 ## Order of work
 
@@ -273,25 +349,29 @@ Each stage is independently shippable and independently testable.
 | 1 | C1 consume the parsed location | none | Fixes a live bug; builds the reveal primitive everything else needs |
 | 2 | B1 keyboard navigation, C2 clickable gutter | none | Pure `src/app`, cheap, immediately felt |
 | 3 | B2 persistence, B3 filter | none | Pure client, removes daily annoyances |
-| 4 | The daemon-side index + C3 go to definition | new `WorkspaceOperation` | First thing that needs the daemon to work; see the concurrency rule below |
-| 5 | C4 find references, C5 workspace search | reuses stage 4 | Same index, same request shape |
+| 4 | Daemon-side scan + warm file list + C3 go to definition | new `WorkspaceOperation` | First thing that needs the daemon; see the concurrency rule below |
+| 5 | C4 find references, C5 workspace search | reuses stage 4 | Same scan, same request shape |
 | 6 | C6 outline, B4 attention ordering | none (client-side) | Presentation over data that now exists |
 | 7 | LSP (route A) — only if stage 4's limits prove real | new op, process hosting | Deliberately last |
 
+An index is **not** on this list. It becomes a candidate only if C5's
+submit-only search measures badly in real use.
+
 ## The concurrency rule for stage 4
 
-The indexer must not run on the request loop. Concretely:
+The scan must not run on the request loop. Concretely:
 
-- A dedicated worker thread in the daemon owns the index, guarded by a
-  `parking_lot::Mutex` that the **request path never takes**: requests ask for a
-  snapshot (`Arc<Index>`) and answer from it.
-- Refresh is incremental and triggered by a cheap signal — file count and
-  modification times, not content hashes — debounced the way
-  `command_palette.rs:628-644` debounces message search.
-- A query that arrives while the first index is still building gets an explicit
-  "indexing" state, not an empty result. An empty result must mean "not found".
-- Every request carries a generation number, so a snapshot from a superseded
-  build cannot answer a newer query. This is the same epoch pattern
+- Work runs on the daemon's blocking thread pool, and the request path never
+  takes a lock held across I/O: a request either answers from the warm file list
+  plus its own scan, or reports "indexing"/"scanning" — never an empty result
+  that reads as "not found".
+- The **warm file list** is the only cached state. It is refreshed on a slow
+  timer (order of a minute, not a second — see the measured poll costs) and when
+  the client asks, not continuously.
+- Debounce and cancel the way `command_palette.rs:628-644` debounces message
+  search: a newer query abandons the token of the older one.
+- Every query carries a generation number, so a result from a superseded query
+  cannot overwrite a newer one. This is the same epoch pattern
   `read_right_panel_file_into_editor` already uses (`right_panel.rs:3073`).
 
 ## What this plan deliberately refuses
@@ -304,6 +384,10 @@ The indexer must not run on the request loop. Concretely:
   `AGENTS.md` forbid I/O from a frame; there are existing tests
   (`right_panel.rs:1383`, `:1412`) that assert the render paths do zero
   filesystem work. Anything here keeps that property.
+- **A maintained index built before a query-shape measurement proves it is
+  needed.** The measurement above says the expensive half is freshness, not
+  lookup, and on Windows at 19 202 files freshness costs half a second to a
+  second a tick.
 - **A search that silently truncates.** Every capped query reports its cap.
 - **Pretending text search is symbol search.** The UI says "matches", not
   "references", wherever the answer came from a pattern.
@@ -318,8 +402,10 @@ Per stage, the same bar the last four rounds held:
 - **A destructive edit for each new test that could pass vacuously.** The
   incremental-cache trap recorded in earlier work means a "passing" test after a
   restore is re-run after `cargo clean -p <crate>` before it is trusted.
-- The indexer's concurrency guard gets a test that a stale generation cannot
-  answer.
+- The scan's cancellation gets a test that a stale generation cannot answer.
+- **A benchmark kept with the code**, not a one-off script: the probe behind the
+  numbers above is small enough to live in the repo behind `#[ignore]`, so the
+  next person changing the matcher can see whether they helped or hurt.
 - `clippy -D warnings`, `fmt`, `i18n:check`, `protocol:check` per stage.
 - Any new `WorkspaceOperation` variant bumps `PROTOCOL_VERSION` and regenerates
   the TS types (`bun run protocol:generate`), because a daemon without the
