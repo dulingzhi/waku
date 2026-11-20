@@ -141,3 +141,79 @@ pub struct PluginCatalog {
     pub plugins: Vec<PluginEntry>,
     pub unavailable: Option<String>,
 }
+
+/// One marketplace the user has added, as `plugin marketplace list` reports it.
+///
+/// A marketplace is a catalogue of plugins, not a plugin itself: it has to be
+/// added before anything inside it can be installed. It carries no enable state.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceEntry {
+    pub name: String,
+    /// How the marketplace is reached: `github`, `git`, `directory`, `url`.
+    pub source: String,
+    /// The repository, path or URL behind it, when the CLI names one.
+    pub repo: Option<String>,
+    /// Where its clone lives on this machine.
+    pub install_location: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketplaceCatalog {
+    pub marketplaces: Vec<MarketplaceEntry>,
+    pub unavailable: Option<String>,
+}
+
+/// A plugin one of the added marketplaces offers, installed or not.
+///
+/// This list is the expensive one: asking for it makes the CLI refresh every
+/// marketplace first, which was measured at ~10s against 3916 entries. It is
+/// therefore its own command, triggered on purpose rather than on page open.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailablePlugin {
+    /// `name@marketplace`, the id both install and update take.
+    pub id: String,
+    pub name: String,
+    pub marketplace: String,
+    pub description: String,
+    /// How many other users have it, which is the only ordering signal the CLI
+    /// gives. `None` when it did not report one.
+    pub install_count: Option<u64>,
+    /// Already installed, so the row offers no install control.
+    pub installed: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailablePluginCatalog {
+    pub plugins: Vec<AvailablePlugin>,
+    pub unavailable: Option<String>,
+}
+
+/// What one plugin ships and what it costs to have it loaded.
+///
+/// Read from the install path's manifest rather than `claude plugin details`,
+/// because that verb only resolves plugins visible from the current directory —
+/// a project-scoped plugin installed for another project answers "not found".
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDetails {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub author: Option<String>,
+    pub homepage: Option<String>,
+    /// The MCP servers the plugin contributes, by name.
+    pub mcp_servers: Vec<String>,
+    /// Other component kinds, in the form `kind: name` the manifest uses, so a
+    /// newer manifest with a kind this build does not know still shows up.
+    pub components: Vec<PluginComponent>,
+    /// Whether `claude plugin update` should be offered.
+    ///
+    /// Only ever true for an installed plugin from a marketplace: a locally
+    /// authored plugin has no newer version to fetch.
+    pub can_update: bool,
+}

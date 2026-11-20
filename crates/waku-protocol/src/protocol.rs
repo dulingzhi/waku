@@ -19,12 +19,17 @@ use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
 
-use crate::claude::{McpCatalog, McpScope, PluginCatalog};
+use crate::claude::{
+    AvailablePluginCatalog, MarketplaceCatalog, McpCatalog, McpScope, PluginCatalog, PluginDetails,
+};
 
 /// Bumped because the new Claude MCP and plugin commands below change the
 /// command surface: a client that sends them to an older daemon would get an
 /// error it cannot distinguish from a real failure.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// 10 adds the marketplace, available-plugin, plugin-detail, install and
+/// update commands, which extend the same surface for the same reason.
+pub const PROTOCOL_VERSION: u32 = 10;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -251,6 +256,37 @@ pub enum Command {
         /// reported uninstalled while still installed.
         #[ts(type = "string")]
         scope: McpScope,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    /// The marketplaces the user has added, cheap enough to read with the page.
+    LoadClaudeMarketplaces,
+    /// Everything the added marketplaces offer, installed or not.
+    ///
+    /// Separate from `LoadClaudePlugins` on purpose: answering it makes the CLI
+    /// refresh every marketplace, measured at ~10s for 3916 entries, so it must
+    /// never run as part of opening the page.
+    LoadAvailableClaudePlugins,
+    /// Read one installed plugin's manifest. Reads a file, not the CLI, because
+    /// `plugin details` only resolves plugins visible from the current directory.
+    LoadClaudePluginDetails {
+        id: String,
+        #[ts(type = "string | null")]
+        install_path: Option<PathBuf>,
+    },
+    InstallClaudePlugin {
+        id: String,
+        /// The scope to install into. The CLI defaults to `user`, which would
+        /// put a project plugin into every project without saying so.
+        #[ts(type = "string")]
+        scope: McpScope,
+        #[ts(type = "string | null")]
+        cwd: Option<PathBuf>,
+    },
+    UpdateClaudePlugin {
+        id: String,
+        #[ts(type = "string | null")]
+        scope: Option<McpScope>,
         #[ts(type = "string | null")]
         cwd: Option<PathBuf>,
     },
@@ -504,6 +540,15 @@ pub enum ResponsePayload {
     ClaudePluginCatalog {
         catalog: PluginCatalog,
     },
+    ClaudeMarketplaceCatalog {
+        catalog: MarketplaceCatalog,
+    },
+    ClaudeAvailablePluginCatalog {
+        catalog: AvailablePluginCatalog,
+    },
+    ClaudePluginDetails {
+        details: PluginDetails,
+    },
     TaskState {
         projects: Vec<Project>,
         sessions: Vec<AgentSession>,
@@ -627,7 +672,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 9);
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 
     #[test]
@@ -636,7 +681,7 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 9);
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 
     #[test]
