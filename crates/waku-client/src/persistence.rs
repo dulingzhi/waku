@@ -33,6 +33,55 @@ const STATE_VERSION: u32 = 5;
 const APP_STATE_VERSION: u32 = 1;
 
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 252.0;
+
+/// How many submitted prompts one project remembers. Old enough entries fall
+/// off the back; the shell convention is unlimited, but an unbounded list in a
+/// settings file the app rewrites on every save is not worth the write cost.
+pub const PROMPT_HISTORY_LIMIT: usize = 50;
+
+/// Submitted prompts, newest last, keyed by project.
+///
+/// A project is the sharing unit: every task in it walks the same history, so
+/// recall works across tasks the way a shell's does across directories. This is
+/// deliberately *not* the composer draft's key, which is per session — a draft
+/// is unsent text that belongs to one task, while history is what was sent.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PromptHistory {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub by_project: HashMap<Uuid, Vec<String>>,
+}
+
+impl PromptHistory {
+    pub fn entries(&self, project_id: Uuid) -> &[String] {
+        self.by_project
+            .get(&project_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Record a submitted prompt. Identical text moves to the newest position
+    /// instead of accumulating duplicates, and the list is trimmed from the
+    /// front so the cap bounds the file rather than the recency.
+    pub fn record(&mut self, project_id: Uuid, text: &str) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            return false;
+        }
+        let entries = self.by_project.entry(project_id).or_default();
+        if entries.last().is_some_and(|last| last == text) {
+            return false;
+        }
+        if let Some(existing) = entries.iter().position(|entry| entry == text) {
+            entries.remove(existing);
+        }
+        entries.push(text.to_owned());
+        if entries.len() > PROMPT_HISTORY_LIMIT {
+            let excess = entries.len() - PROMPT_HISTORY_LIMIT;
+            entries.drain(..excess);
+        }
+        true
+    }
+}
 pub const DEFAULT_RIGHT_PANEL_WIDTH: f32 = 460.0;
 
 /// How the desktop groups task history in the sidebar.
@@ -274,6 +323,8 @@ pub struct AppSettings {
     /// catalog id. `None` — and an id no longer installed — fall back to the
     /// platform file manager.
     pub open_in_app: Option<String>,
+    /// Submitted prompts per project, for Up/Down recall in the composer.
+    pub prompt_history: PromptHistory,
 }
 
 impl Default for AppSettings {
@@ -289,6 +340,7 @@ impl Default for AppSettings {
             render_math: true,
             daemon_exposure: DaemonExposureSettings::default(),
             open_in_app: None,
+            prompt_history: PromptHistory::default(),
         }
     }
 }
@@ -447,6 +499,11 @@ pub struct PersistedState {
     pub disabled_providers: Vec<ProviderKind>,
     #[serde(default)]
     pub provider_binary_overrides: HashMap<ProviderKind, String>,
+    /// Submitted prompts per project. Lives here rather than in the daemon-held
+    /// drafts because it is a desktop keyboard affordance, and because routing
+    /// it through the wire would mean a protocol change for local convenience.
+    #[serde(default)]
+    pub prompt_history: PromptHistory,
     /// The relay the daemon reported, carried through untouched.
     ///
     /// `#[serde(skip)]` on purpose: this is the daemon's configuration, not the
@@ -519,6 +576,7 @@ impl PersistedState {
             computer_use_allowed_apps: Vec::new(),
             disabled_providers: Vec::new(),
             provider_binary_overrides: HashMap::new(),
+            prompt_history: PromptHistory::default(),
             relay_url: None,
             relay_keep_listening: false,
             daemon_settings_extra: BTreeMap::new(),
@@ -653,6 +711,7 @@ impl PersistedState {
             render_math: self.render_math,
             daemon_exposure: self.daemon_exposure.clone(),
             open_in_app: self.open_in_app.clone(),
+            prompt_history: self.prompt_history.clone(),
         }
     }
 
@@ -693,6 +752,7 @@ impl PersistedState {
         self.render_math = settings.render_math;
         self.daemon_exposure = settings.daemon_exposure;
         self.open_in_app = settings.open_in_app;
+        self.prompt_history = settings.prompt_history;
     }
 
     fn apply_app_state(&mut self, app_state: AppState) {
@@ -1353,5 +1413,93 @@ mod tests {
         restore_task_state_skeletons(&mut sessions);
         assert!(!sessions[0].detail_loaded);
         assert!(sessions[0].has_started());
+    }
+
+    #[test]
+    fn prompt_history_keeps_newest_last_and_moves_repeats_to_the_end() {
+        let mut history = PromptHistory::default();
+        let project = Uuid::new_v4();
+        assert!(history.record(project, "first"));
+        assert!(history.record(project, "second"));
+        assert!(history.record(project, "third"));
+        assert_eq!(history.entries(project), ["first", "second", "third"]);
+
+        // Re-sending an older prompt promotes it instead of duplicating it.
+        assert!(history.record(project, "first"));
+        assert_eq!(history.entries(project), ["second", "third", "first"]);
+        assert_eq!(history.entries(project).len(), 3);
+    }
+
+    #[test]
+    fn prompt_history_caps_and_drops_the_oldest() {
+        let mut history = PromptHistory::default();
+        let project = Uuid::new_v4();
+        for index in 0..PROMPT_HISTORY_LIMIT + 5 {
+            history.record(project, &format!("prompt {index}"));
+        }
+        let entries = history.entries(project);
+        assert_eq!(entries.len(), PROMPT_HISTORY_LIMIT);
+        // The first five fell off; the newest is still the newest.
+        assert_eq!(entries.first().map(String::as_str), Some("prompt 5"));
+        assert_eq!(
+            entries.last().map(String::as_str),
+            Some(format!("prompt {}", PROMPT_HISTORY_LIMIT + 4).as_str())
+        );
+    }
+
+    #[test]
+    fn prompt_history_is_per_project() {
+        let mut history = PromptHistory::default();
+        let alpha = Uuid::new_v4();
+        let beta = Uuid::new_v4();
+        history.record(alpha, "alpha prompt");
+        history.record(beta, "beta prompt");
+
+        assert_eq!(history.entries(alpha), ["alpha prompt"]);
+        assert_eq!(history.entries(beta), ["beta prompt"]);
+        assert!(history.entries(Uuid::new_v4()).is_empty());
+    }
+
+    #[test]
+    fn prompt_history_ignores_blank_and_trims_surrounding_space() {
+        let mut history = PromptHistory::default();
+        let project = Uuid::new_v4();
+        assert!(!history.record(project, ""));
+        assert!(!history.record(project, "   \n\t "));
+        assert!(history.entries(project).is_empty());
+
+        assert!(history.record(project, "  hello  "));
+        assert_eq!(history.entries(project), ["hello"]);
+    }
+
+    #[test]
+    fn prompt_history_does_not_duplicate_the_newest_entry() {
+        let mut history = PromptHistory::default();
+        let project = Uuid::new_v4();
+        assert!(history.record(project, "same"));
+        // Repeating the newest is not a change, so no write is requested.
+        assert!(!history.record(project, "same"));
+        assert_eq!(history.entries(project), ["same"]);
+    }
+
+    #[test]
+    fn prompt_history_survives_the_settings_round_trip() {
+        let mut state = PersistedState::empty();
+        let project = Uuid::new_v4();
+        state.prompt_history.record(project, "remember me");
+
+        let encoded = serde_json::to_value(state.app_settings()).unwrap();
+        let mut restored = PersistedState::empty();
+        restored.apply_app_settings(serde_json::from_value(encoded).unwrap());
+
+        assert_eq!(restored.prompt_history.entries(project), ["remember me"]);
+    }
+
+    #[test]
+    fn a_settings_file_without_prompt_history_still_loads() {
+        // The field is new; an older `app.json` has no key for it, and must not
+        // fail to load or silently seed entries.
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.prompt_history.by_project.is_empty());
     }
 }
