@@ -184,12 +184,21 @@ impl EditHistory {
         self.redo.clear();
     }
 
-    /// Whether there is a step to undo. A terminal needs this to decide what
-    /// the status line says; the editor itself just calls [`Self::undo`].
+    /// Whether there is a step to undo.
+    ///
+    /// Not called by the editor yet: its key binding simply attempts the undo
+    /// and does nothing when there is none. This exists for the tests that pin
+    /// the history's bookkeeping, and for the menu items the panel will show
+    /// once it has a per-file menu.
+    #[allow(
+        dead_code,
+        reason = "pins the history's public bookkeeping for tests and future callers"
+    )]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
 
+    #[allow(dead_code, reason = "see can_undo")]
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
     }
@@ -258,22 +267,17 @@ pub fn trimmed_splice(
     (start, old, new)
 }
 
-/// Bytes shared at the start of both strings. The shared bytes are identical,
-/// so a boundary found in one is a boundary in the other.
+/// Bytes shared at the start of both strings, backed off to a character
+/// boundary so a partially shared code point is not split.
 fn common_prefix_len(a: &str, b: &str) -> usize {
-    let len = a
+    let mut len = a
         .as_bytes()
         .iter()
-        .zip(b.as_bytes().iter())
+        .zip(b.as_bytes())
         .take_while(|(x, y)| x == y)
         .count();
     while !a.is_char_boundary(len) {
-        // Cannot go below zero: a shared prefix is at least empty, and empty
-        // is a boundary.
-        if len == 0 {
-            return 0;
-        }
-        return common_prefix_len(&a[..len - 1], &b[..len - 1]);
+        len -= 1;
     }
     len
 }
@@ -281,7 +285,7 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
 /// Bytes shared at the end of both strings. The shared bytes are identical,
 /// so a boundary found in one is a boundary in the other.
 fn common_suffix_len(a: &str, b: &str) -> usize {
-    let len = a
+    let mut len = a
         .as_bytes()
         .iter()
         .rev()
@@ -289,10 +293,7 @@ fn common_suffix_len(a: &str, b: &str) -> usize {
         .take_while(|(x, y)| x == y)
         .count();
     while !a.is_char_boundary(a.len() - len) {
-        if len == 0 {
-            return 0;
-        }
-        return common_suffix_len(&a[..a.len() - 1], &b[..b.len() - 1]);
+        len -= 1;
     }
     len
 }

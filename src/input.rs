@@ -609,12 +609,6 @@ impl TextInput {
         self
     }
 
-    /// Paint-only syntax colouring for `language`, when recognised.
-    pub fn syntax(mut self, language: Option<&str>) -> Self {
-        self.language = language.and_then(highlight::lang_for_tag);
-        self
-    }
-
     /// Make Enter submit this multi-line field instead of inserting a
     /// newline; Shift+Enter still breaks the line.
     pub fn submit_on_enter(mut self) -> Self {
@@ -657,12 +651,6 @@ impl TextInput {
     /// still selects the dragged range, and the next click places the caret.
     pub fn select_all_on_focus_click(mut self) -> Self {
         self.select_all_on_focus_click = true;
-        self
-    }
-
-    /// Reject edits while still allowing selection and copy.
-    pub fn read_only(mut self, read_only: bool) -> Self {
-        self.read_only = read_only;
         self
     }
 
