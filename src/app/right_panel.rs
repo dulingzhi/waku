@@ -2878,6 +2878,11 @@ impl Waku {
         let file_tree_width = fitted_file_tree_width(panel_width, self.right_panel_file_tree_width);
         let (editor_state, writable, _) =
             self.ensure_right_panel_file_editor(&relative_path, window, cx);
+        let surface = self
+            .right_panel_file_editors
+            .get(&relative_path)
+            .map(RightPanelFileEditor::surface)
+            .expect("the editor was just ensured");
 
         // Markdown files carry the global source/preview toggle; every other
         // language always shows source.
@@ -2888,7 +2893,7 @@ impl Waku {
         } else {
             self.render_file_editor_body(
                 &relative_path,
-                &editor_state,
+                &surface,
                 panel_width - file_tree_width,
                 writable,
                 window,
@@ -2985,28 +2990,28 @@ impl Waku {
     fn ensure_right_panel_file_editor(
         &mut self,
         relative_path: &str,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Entity<TextInput>, bool, bool) {
-        if let Some(editor) = self.right_panel_file_editors.get(relative_path) {
-            return (editor.text_input(), editor.writable, editor.is_dirty());
+    ) -> (Entity<WincEditor>, bool, bool) {
+        if let Some(editor) = self.right_panel_file_editors.get(relative_path)
+            && let EditorSurface::Winc(entity) = editor.surface()
+        {
+            return (entity, editor.writable, editor.is_dirty());
         }
 
         // Reached from `render`, so the file cannot be read here. The editor
         // starts empty and locked, and `read_right_panel_file_into_editor`
         // fills it in from the background executor a frame or two later.
         let language = file_highlighter_language(relative_path);
-        let state = cx.new(|cx| {
-            TextInput::new(window, cx)
-                .multi_line()
-                .syntax(Some(language))
-                .read_only(true)
-        });
+        let scroll = self.right_panel_editor_scroll_handle.clone();
+        let font_size = px(self.state.code_font_size);
+        let state = cx.new(|cx| WincEditor::new(Some(language), font_size, scroll, cx));
+        state.update(cx, |editor, cx| editor.set_read_only(true, cx));
 
         self.right_panel_file_editors.insert(
             relative_path.to_owned(),
             RightPanelFileEditor {
-                backend: Box::new(TextInputBackend::new(state.clone())),
+                backend: Box::new(WincEditorBackend::new(state.clone())),
                 disk_content: String::new(),
                 writable: false,
                 reading: false,
@@ -3024,7 +3029,7 @@ impl Waku {
                 if !matches!(event, InputEvent::Edited) {
                     return;
                 }
-                let value = state.read(cx).content().to_owned();
+                let value = state.read(cx).content();
                 if let Some(editor) = this
                     .right_panel_file_editors
                     .get_mut(subscribed_path.as_str())
@@ -3158,7 +3163,7 @@ impl Waku {
     fn render_file_editor_body(
         &mut self,
         relative_path: &str,
-        editor_state: &Entity<TextInput>,
+        surface: &EditorSurface,
         pane_width: f32,
         writable: bool,
         window: &mut Window,
@@ -3168,7 +3173,6 @@ impl Waku {
         const CONTENT_PAD_TOP: f32 = 6.0;
 
         let text_size = self.state.code_font_size;
-        let line_height = (text_size * 1.5).round();
 
         // An open find bar follows whichever file this body is showing; a
         // cheap comparison every frame, one recompute on the frame after the
@@ -3177,16 +3181,41 @@ impl Waku {
         let find_bar = self.render_file_search_bar(pane_width, writable, window, cx);
 
         let theme = Theme::current(cx);
-        let field = editor_state.read(cx);
-        let line_count = field.content().split('\n').count().max(1);
-        let heights = field.wrapped_line_heights();
+
+        // The two backends lay text out differently — the field wraps and
+        // measures each wrapped row, the rope editor paints fixed rows — so the
+        // gutter asks the surface it is drawing beside rather than assuming.
+        let (line_count, heights, line_height, font_size) = match surface {
+            EditorSurface::TextInput(field) => {
+                let field = field.read(cx);
+                let line_height = (text_size * 1.5).round();
+                (
+                    field.content().split('\n').count().max(1),
+                    Some(field.wrapped_line_heights()),
+                    line_height,
+                    text_size,
+                )
+            }
+            EditorSurface::Winc(editor) => {
+                let editor = editor.read(cx);
+                (
+                    editor.buffer().line_count().max(1),
+                    None,
+                    // `Pixels` and `f32` both appear below, so the row height is
+                    // carried as the plain float both can be made from.
+                    f32::from(editor.row_height()),
+                    text_size,
+                )
+            }
+        };
         // A mono digit advances ~0.6em, so the gutter tracks the font size.
-        let digit_width = (text_size * 0.6).ceil();
+        let digit_width = (font_size * 0.6).ceil();
         let gutter_width = 20.0 + digit_width * (line_count.to_string().len() as f32);
-        let content_height = if heights.is_empty() {
-            px(line_height) * line_count as f32
-        } else {
-            heights.iter().fold(Pixels::ZERO, |total, h| total + *h)
+        let content_height = match &heights {
+            Some(heights) if !heights.is_empty() => {
+                heights.iter().fold(Pixels::ZERO, |total, h| total + *h)
+            }
+            _ => px(line_height) * line_count as f32,
         };
 
         let viewport = self.right_panel_editor_scroll_handle.clone();
@@ -3198,8 +3227,8 @@ impl Waku {
                 let mut y = bounds.origin.y;
                 for number in 1..=line_count {
                     let height = heights
-                        .get(number - 1)
-                        .copied()
+                        .as_ref()
+                        .and_then(|heights| heights.get(number - 1).copied())
                         .unwrap_or_else(|| px(line_height));
                     // Everything below the viewport is unreachable from here on.
                     if y > visible.bottom() {
@@ -3235,6 +3264,11 @@ impl Waku {
         .w(px(gutter_width - GUTTER_PAD_RIGHT))
         .h(content_height);
 
+        let body: AnyElement = match surface {
+            EditorSurface::TextInput(field) => field.clone().into_any_element(),
+            EditorSurface::Winc(editor) => editor.clone().into_any_element(),
+        };
+
         // The find bar sits in normal flow above the scroll region — Zed's
         // buffer-search arrangement — so an open bar pushes the content and
         // its line-number gutter down instead of covering the first lines.
@@ -3269,13 +3303,7 @@ impl Waku {
                                     .items_start()
                                     .child(gutter)
                                     .child(div().w(px(GUTTER_PAD_RIGHT)).flex_none())
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .pr(px(10.0))
-                                            .child(editor_state.clone()),
-                                    ),
+                                    .child(div().flex_1().min_w_0().pr(px(10.0)).child(body)),
                             ),
                     )
                     .child(scrollbar::vertical(
@@ -3302,7 +3330,7 @@ impl Waku {
     fn render_file_markdown_preview(
         &mut self,
         relative_path: &str,
-        editor_state: &Entity<TextInput>,
+        editor_state: &Entity<WincEditor>,
         cx: &mut Context<Self>,
     ) -> Div {
         let theme = Theme::current(cx);
@@ -3312,7 +3340,14 @@ impl Waku {
             *cache = Some((relative_path.to_owned(), MarkdownView::new()));
         }
         let (_, view) = cache.as_mut().expect("entry ensured above");
-        view.set_text(editor_state.read(cx).content(), false);
+        // Read through the backend: preview shows what is in the editor,
+        // unsaved edits included, whichever backend holds it.
+        let content = self
+            .right_panel_file_editors
+            .get_mut(relative_path)
+            .map(|editor| editor.backend.content(cx))
+            .unwrap_or_else(|| editor_state.read(cx).content());
+        view.set_text(&content, false);
         let ctx = MarkdownCtx::new(
             format!("file-preview-{relative_path}"),
             &palette,

@@ -131,17 +131,27 @@ pub trait FileEditorBackend {
     );
 }
 
-/// The editor Waku ships with today: a multi-line `TextInput`.
+/// The editor the panel used before the rope-backed one.
 ///
-/// This is not a stopgap the Winc integration deletes. It stays as the reference
-/// the rope-backed editor is compared against, and as the fallback when that one
-/// cannot run.
+/// It is no longer what opening a file gets — the panel builds a
+/// [`WincEditorBackend`] now — but it stays as the reference the trait was
+/// written against, and as the shape a fallback would take. Its own tests below
+/// keep that role honest, which is why constructing it is not dead code.
 pub struct TextInputBackend {
     input: gpui::Entity<crate::input::TextInput>,
     dirty: bool,
 }
 
 impl TextInputBackend {
+    /// Build one over an existing field.
+    ///
+    /// The panel builds a [`WincEditorBackend`] now, so nothing calls this on a
+    /// render path; it stays for tests that hold the reference implementation
+    /// to the same contract.
+    #[allow(
+        dead_code,
+        reason = "constructs the reference backend the trait's tests use"
+    )]
     pub fn new(input: gpui::Entity<crate::input::TextInput>) -> Self {
         Self {
             input,
@@ -219,6 +229,98 @@ impl FileEditorBackend for TextInputBackend {
     ) {
         self.input.update(cx, |input, cx| {
             input.set_search_matches(matches, active, cx)
+        });
+    }
+}
+
+/// The rope-backed editor: Winc's headless kernel, drawn by Waku.
+///
+/// This is the backend the integration adds. It keeps a [`WincEditor`] entity,
+/// so the panel still talks to the trait above while the view draws itself.
+pub struct WincEditorBackend {
+    editor: gpui::Entity<super::winc_editor::WincEditor>,
+    dirty: bool,
+}
+
+impl WincEditorBackend {
+    pub fn new(editor: gpui::Entity<super::winc_editor::WincEditor>) -> Self {
+        Self {
+            editor,
+            dirty: false,
+        }
+    }
+
+    pub fn entity(&self) -> &gpui::Entity<super::winc_editor::WincEditor> {
+        &self.editor
+    }
+}
+
+impl FileEditorBackend for WincEditorBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn content(&mut self, cx: &mut gpui::Context<Waku>) -> String {
+        self.editor.read(cx).content()
+    }
+
+    fn set_content(&mut self, content: SharedString, cx: &mut gpui::Context<Waku>) {
+        self.editor
+            .update(cx, |editor, cx| editor.set_content(content.as_ref(), cx));
+    }
+
+    fn set_read_only(&mut self, read_only: bool, cx: &mut gpui::Context<Waku>) {
+        self.editor
+            .update(cx, |editor, cx| editor.set_read_only(read_only, cx));
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    fn set_dirty(&mut self, dirty: bool) {
+        self.dirty = dirty;
+    }
+
+    fn focus_handle(&mut self, cx: &mut gpui::Context<Waku>) -> FocusHandle {
+        let editor = self.editor.read(cx);
+        gpui::Focusable::focus_handle(editor, cx)
+    }
+
+    fn selected_range(&mut self, cx: &mut gpui::Context<Waku>) -> Range<usize> {
+        self.editor.read(cx).selected_range()
+    }
+
+    fn select_range(&mut self, range: Range<usize>, cx: &mut gpui::Context<Waku>) {
+        self.editor
+            .update(cx, |editor, cx| editor.select_range(range, cx));
+    }
+
+    fn position_for_offset(
+        &mut self,
+        offset: usize,
+        cx: &mut gpui::Context<Waku>,
+    ) -> Option<(gpui::Point<gpui::Pixels>, gpui::Pixels)> {
+        self.editor.read(cx).position_for_offset(offset)
+    }
+
+    fn cursor(&mut self, cx: &mut gpui::Context<Waku>) -> usize {
+        self.editor.read(cx).cursor()
+    }
+
+    fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut gpui::Context<Waku>) {
+        self.editor
+            .update(cx, |editor, cx| editor.replace_range(range, text, cx));
+    }
+
+    fn set_search_matches(
+        &mut self,
+        matches: Vec<Range<usize>>,
+        active: Option<usize>,
+        cx: &mut gpui::Context<Waku>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            editor.set_search_matches(matches, active, cx)
         });
     }
 }

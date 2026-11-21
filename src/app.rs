@@ -19,7 +19,8 @@ use gpui::{
 };
 use uuid::Uuid;
 
-use crate::app::file_editor::{FileEditorBackend, TextInputBackend};
+use crate::app::file_editor::{FileEditorBackend, TextInputBackend, WincEditorBackend};
+use crate::app::winc_editor::WincEditor;
 use crate::checkpoint;
 use crate::composer_complete::{FileEntry, SlashCommand};
 use crate::computer_use::{
@@ -751,25 +752,44 @@ impl RightPanelFileEditor {
         self.backend.set_dirty(dirty);
     }
 
-    /// The concrete text field, for the render path.
+    /// The concrete text surface, for the render path.
     ///
     /// Rendering is where the panel is allowed to know what it is drawing: the
-    /// gutter measures rows from the field's layout, and the Markdown preview
-    /// reads its text. Everything that is *behaviour* — reads, saves, dirty,
-    /// find — goes through [`FileEditorBackend`] instead.
-    ///
-    /// Panics for a backend that is not a `TextInput`. That is deliberate: the
-    /// render path is the one place still tied to this implementation, so a new
-    /// backend must add its own drawing rather than inherit one that would
-    /// silently paint an empty pane. When that backend lands, this function is
-    /// what gets replaced.
-    fn text_input(&self) -> Entity<TextInput> {
-        self.backend
+    /// gutter measures rows from the editor's own row height, and the Markdown
+    /// preview reads its text. Everything that is *behaviour* — reads, saves,
+    /// dirty, find — goes through [`FileEditorBackend`] instead.
+    fn surface(&self) -> EditorSurface {
+        if let Some(input) = self
+            .backend
             .as_any()
             .downcast_ref::<TextInputBackend>()
             .map(|backend| backend.entity().clone())
-            .expect("the render path has only a TextInput backend so far")
+        {
+            return EditorSurface::TextInput(input);
+        }
+        if let Some(editor) = self
+            .backend
+            .as_any()
+            .downcast_ref::<WincEditorBackend>()
+            .map(|backend| backend.entity().clone())
+        {
+            return EditorSurface::Winc(editor);
+        }
+        // Every backend must draw itself. Panicking here keeps a new one from
+        // silently painting an empty pane, which is what a shared fallback
+        // would do.
+        panic!("the render path has no drawing for this editor backend")
     }
+}
+
+/// What the panel is drawing for one open file.
+///
+/// Both variants carry an entity the render path hands to GPUI; the row height
+/// is what the gutter beside them measures against, and the two editors do not
+/// have to agree on it.
+pub enum EditorSurface {
+    TextInput(Entity<TextInput>),
+    Winc(Entity<crate::app::winc_editor::WincEditor>),
 }
 
 struct RightPanelSessionState {
@@ -1792,6 +1812,7 @@ mod transcript_view;
 mod usage_meter;
 mod usage_page;
 mod winc_buffer;
+mod winc_editor;
 mod winc_highlight;
 mod winc_paint;
 mod winc_view;
@@ -1816,6 +1837,7 @@ pub use skills_page::init as init_skills_keys;
 use streaming::*;
 use transcript::*;
 use transcript_view::ConversationNavigationRail;
+pub use winc_editor::init as init_winc_editor_keys;
 
 /// Collapse provider- or page-supplied text into a label that cannot contain
 /// hard line breaks. GPUI's `truncate()` prevents wrapping, but explicit
