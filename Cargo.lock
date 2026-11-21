@@ -8699,6 +8699,7 @@ dependencies = [
  "waku-protocol",
  "webview2-com",
  "winc-core",
+ "winc-syntax",
  "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-sys 0.61.2",
@@ -9381,6 +9382,15 @@ dependencies = [
 name = "winc-emoji"
 version = "0.0.0"
 source = "git+https://github.com/DEEIX-AI/Winc?tag=v0.1.857#2ede2b73d045e65a19c388838bbcbecc01dfcf1d"
+
+[[package]]
+name = "winc-syntax"
+version = "0.0.0"
+source = "git+https://github.com/DEEIX-AI/Winc?tag=v0.1.857#2ede2b73d045e65a19c388838bbcbecc01dfcf1d"
+dependencies = [
+ "ropey",
+ "winc-core",
+]
 
 [[package]]
 name = "windows"

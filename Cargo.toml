@@ -67,6 +67,9 @@ tokio = { version = "1", features = ["rt"] }
 # formatting, with no GUI of its own. Pinned to a tag so a Winc release cannot
 # change what this build compiles against; Waku renders it with GPUI.
 winc-core = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
+# Winc's per-line lexer, with the cross-line state a plain per-line scan cannot
+# carry: a block comment or a triple-quoted string stays coloured to its end.
+winc-syntax = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
 
 # `test-support` has to stay test-only. It compiles a loop into gpui's
 # `flush_effects` that draws every dirty window right there, so with the
