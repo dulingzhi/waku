@@ -1794,6 +1794,7 @@ mod usage_page;
 mod winc_buffer;
 mod winc_highlight;
 mod winc_paint;
+mod winc_view;
 mod window_chrome;
 
 pub use autocomplete::init as init_composer_autocomplete;
