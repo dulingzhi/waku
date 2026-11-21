@@ -20,11 +20,6 @@
 //! [`LineHighlighter::highlight`], so nothing downstream sees a char index —
 //! the same discipline `winc_buffer` enforces for the document text.
 
-#![allow(
-    dead_code,
-    reason = "the drawable editor that consumes this lands next; its tests pin the behaviour now"
-)]
-
 use std::ops::Range;
 
 use winc_syntax::{Language, LineState, Token as WincToken, TokenKind, highlight_line};
@@ -47,6 +42,10 @@ pub struct HighlightSpan {
 /// that point first. That is [`Self::ensure_through`], and it is why this type
 /// holds a `Vec` of states rather than asking Winc's `Highlighter` about a single
 /// line: a one-line view cannot say what a multi-line construct opened earlier.
+///
+/// `Clone` so a paint pass can work on its own copy: painting must extend the
+/// chain, and the paint path holds only a shared borrow of the editor.
+#[derive(Clone)]
 pub struct LineHighlighter {
     language: &'static Language,
     /// `states[i]` is the state at the start of line `i`; always holds line 0.
@@ -71,10 +70,6 @@ impl LineHighlighter {
             chars: Vec::new(),
             tokens: Vec::new(),
         })
-    }
-
-    pub fn language(&self) -> &'static Language {
-        self.language
     }
 
     /// Discard state from `line` onward, after an edit changed it.

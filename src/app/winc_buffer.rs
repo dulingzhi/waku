@@ -23,8 +23,6 @@
 //! rather than trusting the caller: an out-of-range byte offset (a stale find
 //! match after an edit, say) becomes "end of buffer" instead of a panic.
 
-#![allow(dead_code, reason = "the drawable editor that uses it lands next")]
-
 use std::ops::Range;
 
 use ropey::Rope;
@@ -56,6 +54,15 @@ impl WincBuffer {
         }
     }
 
+    /// Build a buffer from text.
+    ///
+    /// The panel reaches the buffer through `set_text` once a file is read, so
+    /// this is the constructor the tests use and the one an in-memory source
+    /// (a diff view, an unsaved scratch buffer) would.
+    #[allow(
+        dead_code,
+        reason = "the constructor tests build buffers with; the panel sets text after a read"
+    )]
     pub fn from_text(text: &str) -> Self {
         Self {
             text: Rope::from_str(text),

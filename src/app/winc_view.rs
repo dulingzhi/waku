@@ -19,11 +19,6 @@
 //! then `1` with nothing between. [`runs_for`] therefore fills the gaps with the
 //! editor's foreground, and that is the one thing here worth testing directly.
 
-#![allow(
-    dead_code,
-    reason = "the panel swap that calls this lands next; the run arithmetic is pinned by tests now"
-)]
-
 use std::ops::Range;
 
 use gpui::{Hsla, TextRun};
@@ -76,7 +71,7 @@ impl super::winc_paint::Palette for EditorPalette {
 /// Ranges are byte ranges into `row.text`. Spans are sorted and non-overlapping by
 /// construction; the cursor only ever moves forward, so a span that somehow
 /// overlapped its predecessor would be clipped rather than double-painted.
-fn runs_for(row: &PaintedLine, default_color: Hsla) -> Vec<TextRun> {
+pub fn runs_for(row: &PaintedLine, default_color: Hsla) -> Vec<TextRun> {
     let font = gpui::font(MONO_FAMILY);
     let mut runs = Vec::with_capacity(row.spans.len() * 2 + 1);
     let mut cursor = 0usize;

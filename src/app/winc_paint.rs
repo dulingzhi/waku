@@ -15,11 +15,6 @@
 //! local — it misplaces rows, but it cannot desynchronise the line numbers from
 //! the text, because both derive from the same index.
 
-#![allow(
-    dead_code,
-    reason = "the canvas that consumes these rows lands with the view swap; the arithmetic is pinned by tests now"
-)]
-
 use std::ops::Range;
 
 use gpui::Hsla;
@@ -57,7 +52,7 @@ pub trait Palette {
 /// would make "which line is at this pixel" depend on measured text, which is the
 /// previous editor's trade and the reason it re-laid out on every keystroke.
 pub fn visible_lines(
-    buffer: &mut WincBuffer,
+    buffer: &WincBuffer,
     highlighter: Option<&mut LineHighlighter>,
     scroll_top: f32,
     viewport_height: f32,
@@ -141,7 +136,7 @@ mod tests {
     #[test]
     fn the_top_of_the_file_paints_from_line_zero() {
         let mut buffer = WincBuffer::from_text("a\nb\nc\nd");
-        let painted = visible_lines(&mut buffer, None, 0.0, 40.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, None, 0.0, 40.0, 20.0, &Fixed);
         assert_eq!(text_of(&painted), ["a", "b", "c"]);
         assert_eq!(painted[0].line, 0);
     }
@@ -150,7 +145,7 @@ mod tests {
     fn scrolling_picks_the_rows_the_offset_reaches() {
         let mut buffer = WincBuffer::from_text("a\nb\nc\nd\ne");
         // Four rows down at 20px each is line 2, and two visible rows.
-        let painted = visible_lines(&mut buffer, None, 40.0, 40.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, None, 40.0, 40.0, 20.0, &Fixed);
         assert_eq!(painted[0].line, 2);
         assert_eq!(text_of(&painted), ["c", "d", "e"]);
     }
@@ -158,27 +153,27 @@ mod tests {
     #[test]
     fn the_viewport_stops_at_the_last_line() {
         let mut buffer = WincBuffer::from_text("a\nb");
-        let painted = visible_lines(&mut buffer, None, 0.0, 1000.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, None, 0.0, 1000.0, 20.0, &Fixed);
         assert_eq!(text_of(&painted), ["a", "b"]);
     }
 
     #[test]
     fn scrolling_past_the_end_paints_nothing() {
         let mut buffer = WincBuffer::from_text("a\nb");
-        let painted = visible_lines(&mut buffer, None, 1000.0, 40.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, None, 1000.0, 40.0, 20.0, &Fixed);
         assert!(painted.is_empty(), "an offset below the file has no rows");
     }
 
     #[test]
     fn a_degenerate_row_height_paints_nothing_rather_than_dividing_by_zero() {
         let mut buffer = WincBuffer::from_text("a\nb");
-        assert!(visible_lines(&mut buffer, None, 0.0, 40.0, 0.0, &Fixed).is_empty());
+        assert!(visible_lines(&buffer, None, 0.0, 40.0, 0.0, &Fixed).is_empty());
     }
 
     #[test]
     fn a_crlf_line_keeps_its_text_and_drops_its_carriage_return() {
         let mut buffer = WincBuffer::from_text("one\r\ntwo\r\n");
-        let painted = visible_lines(&mut buffer, None, 0.0, 40.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, None, 0.0, 40.0, 20.0, &Fixed);
         assert_eq!(painted[0].text, "one");
         assert_eq!(painted[1].text, "two");
     }
@@ -187,7 +182,7 @@ mod tests {
     fn spans_carry_the_palette_colour_for_their_class() {
         let mut buffer = WincBuffer::from_text("fn main() {}");
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
-        let painted = visible_lines(&mut buffer, Some(&mut hl), 0.0, 20.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, Some(&mut hl), 0.0, 20.0, 20.0, &Fixed);
         let keyword = painted[0]
             .spans
             .iter()
@@ -202,7 +197,7 @@ mod tests {
         // walked to row 4 before it can know the comment is still open.
         let mut buffer = WincBuffer::from_text("/*\na\nb\nc\nd */\nfn main() {}");
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
-        let painted = visible_lines(&mut buffer, Some(&mut hl), 80.0, 40.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, Some(&mut hl), 80.0, 40.0, 20.0, &Fixed);
         assert_eq!(painted[0].line, 4);
         assert_eq!(painted[0].text, "d */");
         assert!(
@@ -218,7 +213,7 @@ mod tests {
     fn a_line_below_a_closed_comment_paints_as_code() {
         let mut buffer = WincBuffer::from_text("/* a */\nfn main() {}");
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
-        let painted = visible_lines(&mut buffer, Some(&mut hl), 0.0, 80.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, Some(&mut hl), 0.0, 80.0, 20.0, &Fixed);
         assert!(
             painted[1]
                 .spans
@@ -239,7 +234,7 @@ mod tests {
         let source = "let x = \"中文\";";
         let mut buffer = WincBuffer::from_text(source);
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
-        let painted = visible_lines(&mut buffer, Some(&mut hl), 0.0, 20.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, Some(&mut hl), 0.0, 20.0, 20.0, &Fixed);
         let span = painted[0]
             .spans
             .iter()
@@ -256,7 +251,7 @@ mod tests {
     fn spans_stay_within_their_line() {
         let mut buffer = WincBuffer::from_text("fn a() {}\nlet x = \"中文\";");
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
-        let painted = visible_lines(&mut buffer, Some(&mut hl), 0.0, 80.0, 20.0, &Fixed);
+        let painted = visible_lines(&buffer, Some(&mut hl), 0.0, 80.0, 20.0, &Fixed);
         for line in &painted {
             for span in &line.spans {
                 assert!(
