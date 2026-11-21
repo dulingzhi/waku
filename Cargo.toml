@@ -70,6 +70,11 @@ winc-core = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
 # Winc's per-line lexer, with the cross-line state a plain per-line scan cannot
 # carry: a block comment or a triple-quoted string stays coloured to its end.
 winc-syntax = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
+# Winc's whole headless editor kernel: the `Document` Waku draws, with its own
+# selection, undo history, folding, multi-cursor, indent and file encoding. No
+# GUI of its own, so it links here; the trade is that it brings Winc's preview
+# crate along, which is where its image and table types live.
+winc-editor = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
 
 # `test-support` has to stay test-only. It compiles a loop into gpui's
 # `flush_effects` that draws every dirty window right there, so with the
