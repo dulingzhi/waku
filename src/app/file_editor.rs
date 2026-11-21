@@ -26,6 +26,22 @@
 //! the daemon. Returning `String` costs one copy per save and per dirty check,
 //! which is the price of not knowing how the text is stored.
 //!
+//! ## Offsets are bytes
+//!
+//! Every offset and range in this interface is a **byte** offset into the
+//! editor's text, matching `str` indexing. The panel and its find bar slice the
+//! text with these values, so an editor that counts in anything else must
+//! convert at its own boundary.
+//!
+//! This matters more than it looks. Winc's `winc_core` counts positions in
+//! **chars**, and its `Lines`/`EditBuffer` traits are documented in those terms.
+//! A backend built on it therefore has to translate both ways: a byte offset
+//! from the find bar becomes a char index before it reaches the rope, and a
+//! position the rope reports becomes a byte offset before it comes back. Skipping
+//! that translation is not a cosmetic bug — on any text with non-ASCII characters
+//! every match after the first multibyte character would point at the wrong
+//! place, and a replace would splice into the middle of a code point.
+//!
 //! ## What an implementation must not do
 //!
 //! * Read or write the filesystem. The panel decides when a read is stale (its
