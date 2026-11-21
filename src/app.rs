@@ -19,6 +19,7 @@ use gpui::{
 };
 use uuid::Uuid;
 
+use crate::app::file_editor::{FileEditorBackend, TextInputBackend};
 use crate::checkpoint;
 use crate::composer_complete::{FileEntry, SlashCommand};
 use crate::computer_use::{
@@ -723,10 +724,11 @@ impl Render for WakuPane {
 }
 
 struct RightPanelFileEditor {
-    state: Entity<TextInput>,
+    /// The text surface, behind an interface so the panel does not name one
+    /// editor implementation. See `file_editor` for why this is narrow.
+    backend: Box<dyn FileEditorBackend>,
     disk_content: String,
     writable: bool,
-    dirty: bool,
     /// A read is in flight on the background executor. Set from the moment the
     /// editor is created, because `render` may not touch the filesystem: until
     /// the first read lands the editor is empty and locked, and that means
@@ -736,6 +738,38 @@ struct RightPanelFileEditor {
     /// started earlier cannot apply over a newer truth — a save in particular,
     /// which makes any read already in flight describe the pre-save file.
     read_epoch: u64,
+}
+
+impl RightPanelFileEditor {
+    fn is_dirty(&self) -> bool {
+        self.backend.is_dirty()
+    }
+
+    /// Record the dirty verdict on both sides, so the panel's cache and the
+    /// backend cannot disagree about whether there is something to save.
+    fn set_dirty(&mut self, dirty: bool) {
+        self.backend.set_dirty(dirty);
+    }
+
+    /// The concrete text field, for the render path.
+    ///
+    /// Rendering is where the panel is allowed to know what it is drawing: the
+    /// gutter measures rows from the field's layout, and the Markdown preview
+    /// reads its text. Everything that is *behaviour* — reads, saves, dirty,
+    /// find — goes through [`FileEditorBackend`] instead.
+    ///
+    /// Panics for a backend that is not a `TextInput`. That is deliberate: the
+    /// render path is the one place still tied to this implementation, so a new
+    /// backend must add its own drawing rather than inherit one that would
+    /// silently paint an empty pane. When that backend lands, this function is
+    /// what gets replaced.
+    fn text_input(&self) -> Entity<TextInput> {
+        self.backend
+            .as_any()
+            .downcast_ref::<TextInputBackend>()
+            .map(|backend| backend.entity().clone())
+            .expect("the render path has only a TextInput backend so far")
+    }
 }
 
 struct RightPanelSessionState {
@@ -1736,6 +1770,7 @@ mod components;
 mod composer;
 mod daemon_directory_picker;
 mod drafts;
+mod file_editor;
 mod file_search;
 mod goal_dialog;
 mod image_preview;
