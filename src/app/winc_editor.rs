@@ -27,7 +27,7 @@
 //! boundary and nowhere else.
 
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::{
     App, BorderStyle, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle,
@@ -41,9 +41,9 @@ use super::winc_buffer::WincBuffer;
 use super::winc_highlight::LineHighlighter;
 use super::winc_paint::visible_lines;
 use super::winc_view::{EditorPalette, runs_for};
-use crate::edit_history::EditHistory;
 use crate::input::InputEvent;
 use crate::theme::Theme;
+use winc_editor::Command as WincCommand;
 
 /// Rows past the viewport kept painted, so a fast scroll never shows a blank
 /// strip for a frame while the next batch is shaped.
@@ -130,7 +130,6 @@ pub struct WincEditor {
     reversed: bool,
     /// Text an IME is still composing, as a byte range.
     marked: Option<Range<usize>>,
-    history: EditHistory,
     blink: BlinkCursor,
     /// The scroll handle the panel owns, used to follow the caret.
     scroll: ScrollHandle,
@@ -143,6 +142,8 @@ pub struct WincEditor {
     text_bounds: Option<Bounds<Pixels>>,
     font_size: Pixels,
     row_height: Pixels,
+    /// How many lines a page-up/page-down moves, as Winc's commands expect.
+    page_lines: usize,
     /// A drag is in progress, so mouse moves extend the selection.
     selecting: bool,
     /// The caret offset the viewport has already been scrolled to, so an
@@ -166,19 +167,20 @@ struct PaintedRow {
 
 impl WincEditor {
     pub fn new(
-        language: Option<&str>,
+        file_name: &str,
         font_size: Pixels,
         scroll: ScrollHandle,
         cx: &mut Context<Self>,
     ) -> Self {
+        let mut buffer = WincBuffer::new();
+        buffer.set_file_name(file_name);
         Self {
-            buffer: WincBuffer::new(),
-            highlighter: language.and_then(LineHighlighter::for_language),
+            buffer,
+            highlighter: LineHighlighter::for_file_name(file_name),
             focus_handle: cx.focus_handle(),
             selection: 0..0,
             reversed: false,
             marked: None,
-            history: EditHistory::default(),
             blink: BlinkCursor::new(),
             scroll,
             search_matches: Vec::new(),
@@ -187,6 +189,9 @@ impl WincEditor {
             text_bounds: None,
             font_size,
             row_height: (font_size * 1.5).round(),
+            // Refined once the viewport is known; 30 is a reasonable page
+            // until the first paint measures the real one.
+            page_lines: 30,
             selecting: false,
             followed: None,
         }
@@ -198,6 +203,15 @@ impl WincEditor {
 
     pub fn content(&self) -> String {
         self.buffer.text()
+    }
+
+    /// The text with the file's own line endings, for saving.
+    ///
+    /// The editor works on normalised breaks because that is what the lexer and
+    /// every offset in it assume; a CRLF file has to be put back the way it was
+    /// or a single edit would rewrite every line of it.
+    pub fn content_for_save(&self) -> String {
+        self.buffer.text_for_save()
     }
 
     pub fn buffer(&self) -> &WincBuffer {
@@ -222,8 +236,10 @@ impl WincEditor {
     /// reading should not jump them back to the top, but it must not leave the
     /// caret past the new end either.
     pub fn set_content(&mut self, content: &str, cx: &mut Context<Self>) {
+        // `set_text` rebuilds the document, so the undo history behind the old
+        // text goes with it — stepping back into a file that is no longer open
+        // would resurrect text the user cannot see the provenance of.
         self.buffer.set_text(content);
-        self.history.clear();
         self.marked = None;
         self.clamp_selection();
         self.invalidate_highlight(0);
@@ -280,48 +296,19 @@ impl WincEditor {
         Some((point(bounds.left() + x, row.top), self.row_height))
     }
 
-    /// Splice `text` over `range` as one undo step, refused when read-only.
+    /// Splice `text` over `range`, as a replace-all does.
+    ///
+    /// Refused when read-only. The splice is one Winc transaction, so it undoes
+    /// as a single step in the document's own history.
     pub fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
         if self.buffer.is_read_only() {
             return;
         }
-        let len = self.buffer.byte_len();
-        let range = range.start.min(len)..range.end.min(len);
-        if range.start > range.end {
+        let before = self.buffer.text();
+        if !self.buffer.edit(range, text) {
             return;
         }
-        self.record(range.clone(), text, false);
-        if !self.buffer.edit(range.clone(), text) {
-            return;
-        }
-        let caret = range.start + text.len();
-        self.selection = caret..caret;
-        self.reversed = false;
-        self.marked = None;
-        self.after_edit(range.start, cx);
-    }
-
-    fn record(&mut self, range: Range<usize>, text: &str, composing: bool) {
-        let content = self.buffer.text();
-        let selection = self.selection.clone();
-        let now = Instant::now();
-        if composing {
-            self.history
-                .record_composition(&content, &range, text, selection, self.reversed, now);
-        } else {
-            self.history
-                .record(&content, &range, text, selection, self.reversed, now);
-        }
-    }
-
-    /// Everything an edit must do once the text changed.
-    fn after_edit(&mut self, at: usize, cx: &mut Context<Self>) {
-        let line = self.buffer.line_of_byte(at);
-        self.invalidate_highlight(line);
-        self.rows.clear();
-        self.blink.pause(cx);
-        cx.emit(InputEvent::Edited);
-        cx.notify();
+        self.after_command(before, cx);
     }
 
     fn invalidate_highlight(&mut self, line: usize) {
@@ -376,42 +363,85 @@ impl WincEditor {
         cx.notify();
     }
 
-    fn backspace(&mut self, cx: &mut Context<Self>) {
-        if self.selection.is_empty() {
-            let from = self.buffer.prev_grapheme(self.selection.start);
-            self.replace_range(from..self.selection.start, "", cx);
-        } else {
-            self.replace_range(self.selection.clone(), "", cx);
+    /// Run one of Winc's commands, then adopt whatever selection it left.
+    ///
+    /// This is the single place edits happen. Typing, Enter, Backspace, indent,
+    /// comment toggling, line moves, undo and multi-cursor all arrive here as a
+    /// `winc_editor::Command`, so their behaviour is Winc's by construction
+    /// rather than by reimplementation.
+    ///
+    /// The selection is written back to the document first. It has to be: the
+    /// document owns the selection Winc's commands act on, so a caret the user
+    /// moved with the mouse would otherwise be ignored and the command would
+    /// apply at wherever the document last thought the caret was.
+    fn run(&mut self, command: WincCommand, cx: &mut Context<Self>) {
+        if self.buffer.is_read_only() && command.is_edit() {
+            return;
         }
+        self.sync_selection_to_buffer();
+        let before = self.buffer.text();
+        self.buffer.execute(command, self.page_lines);
+        self.after_command(before, cx);
+    }
+
+    /// Push this view's selection into the document that acts on it.
+    fn sync_selection_to_buffer(&mut self) {
+        let selection = self.selection.clone();
+        let reversed = self.reversed;
+        self.buffer.select_bytes(selection, reversed);
+    }
+
+    /// Everything to do once a command may have changed the text.
+    ///
+    /// `before` is the text from prior to the command: a command that only
+    /// moved the caret leaves it unchanged, and re-lexing the file for that
+    /// would make every arrow key a linear pass over it.
+    fn after_command(&mut self, before: String, cx: &mut Context<Self>) {
+        let after = self.buffer.text();
+        self.selection = self.buffer.selected_range();
+        self.reversed = self.buffer.selection_reversed();
+        self.marked = None;
+
+        if before != after {
+            // Both texts are already materialised by the comparison, so finding
+            // where they diverge is cheap relative to the edit itself. Only the
+            // lines below the change need re-lexing, which keeps typing in a
+            // large file proportional to one line.
+            let line = self.first_changed_line(&before, &after);
+            self.invalidate_highlight(line);
+            self.rows.clear();
+            self.blink.pause(cx);
+            cx.emit(InputEvent::Edited);
+        }
+        cx.notify();
+    }
+
+    /// The line of the first difference between two texts.
+    fn first_changed_line(&self, before: &str, after: &str) -> usize {
+        let mut seen = 0usize;
+        for (a, b) in before.lines().zip(after.lines()) {
+            if a != b {
+                return seen;
+            }
+            seen += 1;
+        }
+        seen
+    }
+
+    fn backspace(&mut self, cx: &mut Context<Self>) {
+        self.run(WincCommand::Backspace { word: false }, cx);
     }
 
     fn delete(&mut self, cx: &mut Context<Self>) {
-        if self.selection.is_empty() {
-            let to = self.buffer.next_grapheme(self.selection.end);
-            self.replace_range(self.selection.start..to, "", cx);
-        } else {
-            self.replace_range(self.selection.clone(), "", cx);
-        }
+        self.run(WincCommand::Delete { word: false }, cx);
     }
 
     fn delete_previous_word(&mut self, cx: &mut Context<Self>) {
-        let from = if self.selection.is_empty() {
-            self.buffer.prev_word(self.selection.start)
-        } else {
-            self.selection.start
-        };
-        let to = self.selection.end.max(from);
-        self.replace_range(from..to, "", cx);
+        self.run(WincCommand::Backspace { word: true }, cx);
     }
 
     fn delete_next_word(&mut self, cx: &mut Context<Self>) {
-        let to = if self.selection.is_empty() {
-            self.buffer.next_word(self.selection.end)
-        } else {
-            self.selection.end
-        };
-        let from = self.selection.start;
-        self.replace_range(from..to.max(from), "", cx);
+        self.run(WincCommand::Delete { word: true }, cx);
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
@@ -423,10 +453,9 @@ impl WincEditor {
         }) else {
             return;
         };
-        // A file editor keeps the breaks a clipboard carries, folding CRLF to
-        // the `\n` the rope stores so a paste cannot add a second convention.
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        self.replace_range(self.selection.clone(), &text, cx);
+        // Winc's paste folds the breaks to the document's own line ending, so a
+        // CRLF file pasted into from a Unix clipboard keeps one convention.
+        self.run(WincCommand::Paste(text), cx);
     }
 
     fn copy(&mut self, cx: &mut Context<Self>) {
@@ -442,47 +471,21 @@ impl WincEditor {
 
     fn cut(&mut self, cx: &mut Context<Self>) {
         self.copy(cx);
-        self.replace_range(self.selection.clone(), "", cx);
+        self.run(WincCommand::Backspace { word: false }, cx);
     }
 
     fn undo(&mut self, cx: &mut Context<Self>) {
-        if self.buffer.is_read_only() || self.marked.is_some() {
+        if self.marked.is_some() {
             return;
         }
-        let content = self.buffer.text();
-        let Some((restored, selection, reversed)) = self.history.undo(&content) else {
-            return;
-        };
-        self.apply_history(restored, selection, reversed, cx);
+        self.run(WincCommand::Undo, cx);
     }
 
     fn redo(&mut self, cx: &mut Context<Self>) {
-        if self.buffer.is_read_only() || self.marked.is_some() {
+        if self.marked.is_some() {
             return;
         }
-        let content = self.buffer.text();
-        let Some((restored, selection, reversed)) = self.history.redo(&content) else {
-            return;
-        };
-        self.apply_history(restored, selection, reversed, cx);
-    }
-
-    fn apply_history(
-        &mut self,
-        restored: String,
-        selection: Range<usize>,
-        reversed: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.buffer.set_text(&restored);
-        self.selection = selection;
-        self.reversed = reversed;
-        self.marked = None;
-        self.invalidate_highlight(0);
-        self.rows.clear();
-        self.blink.pause(cx);
-        cx.emit(InputEvent::Edited);
-        cx.notify();
+        self.run(WincCommand::Redo, cx);
     }
 
     /// The colours this editor paints with, read from the theme at paint time
@@ -548,10 +551,11 @@ impl WincEditor {
         if event.modifiers.shift {
             self.extend_selection(offset, cx);
         } else if event.click_count >= 2 {
-            let start = self.buffer.word_start_at(offset);
-            let end = self.buffer.word_end_at(offset);
-            if start < end {
-                self.select_range(start..end, cx);
+            // Winc's own notion of "the word under the caret", so a double
+            // click and Ctrl+arrow agree about what a word is.
+            let range = self.buffer.word_at(offset);
+            if !range.is_empty() {
+                self.select_range(range, cx);
             } else {
                 self.move_caret(offset, false, cx);
             }
@@ -721,7 +725,6 @@ impl EntityInputHandler for WincEditor {
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
         self.marked = None;
-        self.history.finalize_composition();
     }
 
     fn replace_text_in_range(
@@ -757,10 +760,12 @@ impl EntityInputHandler for WincEditor {
             (None, Some(range_utf16)) => self.range_from_utf16(range_utf16),
             (None, None) => self.selection.clone(),
         };
-        // An empty composition is a cancel: undo the step it opened.
+        // An empty composition is a cancel: the marked text goes away and the
+        // caret returns to where the composition started. Winc's history keeps
+        // whatever the composition inserted as one step, so cancelling here
+        // does not leave a half-applied edit behind.
         if new_text.is_empty() {
             self.marked = None;
-            self.history.finalize_composition();
             self.selection = range.start..range.start;
             self.rows.clear();
             cx.emit(InputEvent::Edited);
@@ -803,11 +808,161 @@ impl EntityInputHandler for WincEditor {
 }
 
 impl WincEditor {
+    /// Where `name` is defined, found by Winc's own definition scanner.
+    ///
+    /// Not a language server: Winc looks for the *written form* of a definition
+    /// (`fn name`, `def name`, `class Name`, a bare `name = …` at line start)
+    /// in this file. That finds most same-file definitions and honestly finds
+    /// nothing for a type it cannot see spelled out, which is better than
+    /// guessing and jumping somewhere wrong.
+    ///
+    /// Returned as a byte offset so the caller can select and reveal it.
+    pub fn definition_of(&self, name: &str) -> Option<usize> {
+        let rope = self.buffer.rope()?;
+        let finder = winc_editor::definition::Finder::new(name, false, false)?;
+        let language = self.buffer.language();
+        let found = finder.in_text(&rope, language);
+        // Prefer a definition on a line the name is not merely mentioned on:
+        // `in_text` already filtered by the written form, so the first hit is
+        // the earliest definition, which is the one a reader means.
+        let (line, definition) = found.first()?;
+        Some(self.buffer.byte_at_line_col(*line, definition.col))
+    }
+
+    /// Every place `name` is *used* in this file, per Winc's usage filter.
+    ///
+    /// The filter is the valuable part: it drops hits inside comments and
+    /// strings, and hits that are another definition of the same name. That
+    /// leaves matches a plain text search would wrongly report.
+    pub fn usages_of(&self, name: &str) -> Vec<Range<usize>> {
+        let Some(rope) = self.buffer.rope() else {
+            return Vec::new();
+        };
+        let language = self.buffer.language();
+        let Some(filter) = winc_editor::usages::Filter::new(name, language) else {
+            return Vec::new();
+        };
+        let candidates = filter.occurrences(&rope);
+        let keep = filter.usages(language, &rope, &candidates);
+        candidates
+            .iter()
+            .zip(keep)
+            .filter(|(_, keep)| *keep)
+            .map(|(&(line, col), _)| {
+                let start = self.buffer.byte_at_line_col(line, col);
+                start..start + name.len()
+            })
+            .collect()
+    }
+
+    /// The symbols in this file, for a go-to-symbol list.
+    ///
+    /// Winc reads them by indentation and per-language patterns, so this works
+    /// for any file it can lex and needs no index. The panel has no symbol
+    /// palette yet, so nothing calls this today; it is the data such a palette
+    /// would list, kept here because it is the editor that can produce it.
+    #[allow(
+        dead_code,
+        reason = "the symbol palette that lists these is not built yet; the scan itself is Winc's"
+    )]
+    pub fn symbols(&self) -> Vec<FileSymbol> {
+        let Some(rope) = self.buffer.rope() else {
+            return Vec::new();
+        };
+        let language = self.buffer.language();
+        winc_editor::symbols::symbols(&rope, language)
+            .into_iter()
+            .map(|symbol| FileSymbol {
+                name: symbol.name.clone(),
+                kind: format!("{:?}", symbol.kind),
+                indent: symbol.depth,
+                offset: self.buffer.byte_at_line_col(symbol.line, symbol.col),
+                line: symbol.line,
+            })
+            .collect()
+    }
+}
+
+/// One entry in a file's symbol list.
+///
+/// The fields a palette renders — its kind, its indent, its line — are filled
+/// from Winc's scan even though nothing reads them yet: the palette is the piece
+/// still missing, and a list that could not indent a method under its type would
+/// have to re-scan to get that back.
+#[allow(
+    dead_code,
+    reason = "the symbol palette that reads these is not built yet"
+)]
+pub struct FileSymbol {
+    pub name: String,
+    pub kind: String,
+    /// Nesting depth, so a list can indent a method under its type.
+    pub indent: usize,
+    /// Byte offset of the name, to select when the symbol is chosen.
+    pub offset: usize,
+    pub line: usize,
+}
+
+impl WincEditor {
+    /// Jump to the definition of the name under the caret.
+    ///
+    /// Resolved by Winc's own scanner, then selected so the caret lands on the
+    /// name rather than merely on its line.
+    fn goto_definition(&mut self, cx: &mut Context<Self>) {
+        // The caret the user sees lives in this view; the buffer's own cursor is
+        // only current after a sync, so reading it first would look up whatever
+        // name was under the caret the last time a command ran.
+        self.sync_selection_to_buffer();
+        let Some((name, _)) = self.buffer.name_under_caret() else {
+            return;
+        };
+        let Some(offset) = self.definition_of(&name) else {
+            return;
+        };
+        self.select_range(offset..offset + name.len(), cx);
+    }
+
+    /// Wash every usage of the name under the caret, and jump to the first.
+    ///
+    /// The matches go into the same wash the find bar uses, so a caller does not
+    /// need a second overlay to see them.
+    fn find_usages(&mut self, cx: &mut Context<Self>) {
+        // Same reason as `goto_definition`: the buffer's cursor is only current
+        // after a sync, and a stale one looks up the wrong name.
+        self.sync_selection_to_buffer();
+        let Some((name, _)) = self.buffer.name_under_caret() else {
+            return;
+        };
+        let usages = self.usages_of(&name);
+        if usages.is_empty() {
+            self.set_search_matches(Vec::new(), None, cx);
+            return;
+        }
+        let first = usages[0].clone();
+        self.set_search_matches(usages, Some(0), cx);
+        self.select_range(first, cx);
+    }
+
+    /// Select the `index`th symbol in this file.
+    ///
+    /// The other half of the symbol palette: it jumps, given a list to jump
+    /// from. Marked with `symbols` because both wait on that palette.
+    #[allow(dead_code, reason = "see `symbols`")]
+    fn goto_symbol(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(symbol) = self.symbols().into_iter().nth(index) else {
+            return;
+        };
+        self.select_range(symbol.offset..symbol.offset + symbol.name.len(), cx);
+    }
+}
+
+impl WincEditor {
     /// Apply one IME composition revision over `range`.
     ///
-    /// Separate from `replace_range` because a composition's ranges arrive
-    /// relative to the marked text, and recording it as one undo step is what
-    /// makes a whole composition undo at once.
+    /// The composition's ranges arrive relative to the marked text, so this
+    /// keeps the marked span in step and leaves the caret where the IME says.
+    /// Winc's `Insert` records the splice, so the document's own history stays
+    /// the only undo stack.
     fn replace_selection_composing(
         &mut self,
         range: Range<usize>,
@@ -815,11 +970,10 @@ impl WincEditor {
         caret_utf16: Option<Range<usize>>,
         cx: &mut Context<Self>,
     ) {
-        self.record(range.clone(), text, true);
-        if !self.buffer.edit(range.clone(), text) {
+        let start = range.start;
+        if !self.buffer.edit(range, text) {
             return;
         }
-        let start = range.start;
         let end = start + text.len();
         self.marked = Some(start..end);
         self.selection = match caret_utf16 {
@@ -1022,123 +1176,163 @@ impl Render for WincEditor {
                 cx.listener(|this, _: &DeleteToPreviousWord, _, cx| this.delete_previous_word(cx)),
             )
             .on_action(cx.listener(|this, _: &DeleteToNextWord, _, cx| this.delete_next_word(cx)))
-            .on_action(cx.listener(|this, _: &Left, _, cx| this.step(false, cx)))
-            .on_action(cx.listener(|this, _: &Right, _, cx| this.step(true, cx)))
-            .on_action(cx.listener(|this, _: &Up, _, cx| this.step_line(false, cx)))
-            .on_action(cx.listener(|this, _: &Down, _, cx| this.step_line(true, cx)))
-            .on_action(cx.listener(|this, _: &SelectLeft, _, cx| this.step_select(false, cx)))
-            .on_action(cx.listener(|this, _: &SelectRight, _, cx| this.step_select(true, cx)))
-            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.step_line_select(false, cx)))
-            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.step_line_select(true, cx)))
-            .on_action(cx.listener(|this, _: &LineStart, _, cx| this.line_edge(false, false, cx)))
-            .on_action(cx.listener(|this, _: &LineEnd, _, cx| this.line_edge(true, false, cx)))
-            .on_action(
-                cx.listener(|this, _: &SelectToLineStart, _, cx| this.line_edge(false, true, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &SelectToLineEnd, _, cx| this.line_edge(true, true, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &MoveToPreviousWord, _, cx| this.word_step(false, false, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &MoveToNextWord, _, cx| this.word_step(true, false, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &SelectToPreviousWord, _, cx| {
-                    this.word_step(false, true, cx)
-                }),
-            )
-            .on_action(
-                cx.listener(|this, _: &SelectToNextWord, _, cx| this.word_step(true, true, cx)),
-            )
-            .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                let len = this.buffer.byte_len();
-                this.select_range(0..len, cx)
+            // Motion is Winc's, so the goal column, grapheme snapping and
+            // multi-cursor rules are the same ones its own UI gets.
+            .on_action(cx.listener(|this, _: &Left, _, cx| {
+                this.run(
+                    WincCommand::MoveLeft {
+                        extend: false,
+                        word: false,
+                    },
+                    cx,
+                )
             }))
+            .on_action(cx.listener(|this, _: &Right, _, cx| {
+                this.run(
+                    WincCommand::MoveRight {
+                        extend: false,
+                        word: false,
+                    },
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &Up, _, cx| {
+                this.run(WincCommand::MoveUp { extend: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &Down, _, cx| {
+                this.run(WincCommand::MoveDown { extend: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectLeft, _, cx| {
+                this.run(
+                    WincCommand::MoveLeft {
+                        extend: true,
+                        word: false,
+                    },
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &SelectRight, _, cx| {
+                this.run(
+                    WincCommand::MoveRight {
+                        extend: true,
+                        word: false,
+                    },
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &SelectUp, _, cx| {
+                this.run(WincCommand::MoveUp { extend: true }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectDown, _, cx| {
+                this.run(WincCommand::MoveDown { extend: true }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| {
+                this.run(WincCommand::PageUp { extend: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| {
+                this.run(WincCommand::PageDown { extend: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &LineStart, _, cx| {
+                this.run(WincCommand::LineStart { extend: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &LineEnd, _, cx| {
+                this.run(WincCommand::LineEnd { extend: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectToLineStart, _, cx| {
+                this.run(WincCommand::LineStart { extend: true }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectToLineEnd, _, cx| {
+                this.run(WincCommand::LineEnd { extend: true }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DocStart, _, cx| {
+                this.run(WincCommand::DocStart { extend: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DocEnd, _, cx| {
+                this.run(WincCommand::DocEnd { extend: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &JumpToBracket, _, cx| {
+                this.run(WincCommand::JumpToBracket, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ExpandSelection, _, cx| {
+                this.run(WincCommand::ExpandSelection, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShrinkSelection, _, cx| {
+                this.run(WincCommand::ShrinkSelection, cx)
+            }))
+            // The structural edits Winc ships: indentation, comments, line
+            // moves and the rest of its command set.
+            .on_action(cx.listener(|this, _: &Indent, _, cx| this.run(WincCommand::Indent, cx)))
+            .on_action(cx.listener(|this, _: &Outdent, _, cx| this.run(WincCommand::Outdent, cx)))
+            .on_action(cx.listener(|this, _: &ToggleComment, _, cx| {
+                this.run(WincCommand::ToggleComment, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &DeleteLine, _, cx| this.run(WincCommand::DeleteLine, cx)),
+            )
+            .on_action(cx.listener(|this, _: &DeleteToLineStart, _, cx| {
+                this.run(WincCommand::DeleteToLineStart, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &JoinLines, _, cx| this.run(WincCommand::JoinLines, cx)),
+            )
+            .on_action(cx.listener(|this, _: &TrimTrailingWhitespace, _, cx| {
+                this.run(WincCommand::TrimTrailingWhitespace, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SortLines, _, cx| {
+                this.run(WincCommand::SortLines { descending: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MoveToPreviousWord, _, cx| {
+                this.run(
+                    WincCommand::MoveLeft {
+                        word: true,
+                        extend: false,
+                    },
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &MoveToNextWord, _, cx| {
+                this.run(
+                    WincCommand::MoveRight {
+                        word: true,
+                        extend: false,
+                    },
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &SelectToPreviousWord, _, cx| {
+                this.run(
+                    WincCommand::MoveLeft {
+                        word: true,
+                        extend: true,
+                    },
+                    cx,
+                )
+            }))
+            .on_action(cx.listener(|this, _: &SelectToNextWord, _, cx| {
+                this.run(
+                    WincCommand::MoveRight {
+                        word: true,
+                        extend: true,
+                    },
+                    cx,
+                )
+            }))
+            .on_action(
+                cx.listener(|this, _: &SelectAll, _, cx| this.run(WincCommand::SelectAll, cx)),
+            )
             .on_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
             .on_action(cx.listener(|this, _: &Copy, _, cx| this.copy(cx)))
             .on_action(cx.listener(|this, _: &Cut, _, cx| this.cut(cx)))
             .on_action(cx.listener(|this, _: &Undo, _, cx| this.undo(cx)))
             .on_action(cx.listener(|this, _: &Redo, _, cx| this.redo(cx)))
-            .on_action(cx.listener(|this, _: &Newline, _, cx| {
-                let selection = this.selection.clone();
-                this.replace_range(selection, "\n", cx)
-            }))
+            .on_action(cx.listener(|this, _: &Newline, _, cx| this.run(WincCommand::Newline, cx)))
+            // Navigation, resolved by Winc's own scanners.
+            .on_action(cx.listener(|this, _: &GotoDefinition, _, cx| this.goto_definition(cx)))
+            .on_action(cx.listener(|this, _: &FindUsages, _, cx| this.find_usages(cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .child(field)
-    }
-}
-
-impl WincEditor {
-    /// Move one grapheme left or right.
-    fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let caret = self.selection.end;
-        let next = if forward {
-            self.buffer.next_grapheme(caret)
-        } else {
-            self.buffer.prev_grapheme(caret)
-        };
-        self.move_caret(next, false, cx);
-    }
-
-    fn step_select(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let caret = self.selection.end;
-        let next = if forward {
-            self.buffer.next_grapheme(caret)
-        } else {
-            self.buffer.prev_grapheme(caret)
-        };
-        self.extend_selection(next, cx);
-    }
-
-    fn step_line(&mut self, down: bool, cx: &mut Context<Self>) {
-        let next = self.buffer.vertical(self.selection.end, down);
-        self.move_caret(next, false, cx);
-    }
-
-    fn step_line_select(&mut self, down: bool, cx: &mut Context<Self>) {
-        let next = self.buffer.vertical(self.selection.end, down);
-        self.extend_selection(next, cx);
-    }
-
-    fn word_step(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
-        let caret = self.selection.end;
-        let next = if forward {
-            self.buffer.next_word(caret)
-        } else {
-            self.buffer.prev_word(caret)
-        };
-        if extend {
-            self.extend_selection(next, cx);
-        } else {
-            self.move_caret(next, false, cx);
-        }
-    }
-
-    /// Move to the start or end of the caret's line.
-    fn line_edge(&mut self, end: bool, extend: bool, cx: &mut Context<Self>) {
-        let caret = self.selection.end;
-        let line = self.buffer.line_of_byte(caret);
-        let next = if end {
-            self.line_end_byte(caret)
-        } else {
-            self.buffer.line_start_byte(line)
-        };
-        if extend {
-            self.extend_selection(next, cx);
-        } else {
-            self.move_caret(next, false, cx);
-        }
-    }
-
-    /// Byte offset of the end of the line holding `at`, before its newline.
-    fn line_end_byte(&self, at: usize) -> usize {
-        let line = self.buffer.line_of_byte(at);
-        let text = self.buffer.line(line);
-        self.buffer.line_start_byte(line) + text.trim_end_matches(['\r', '\n']).len()
     }
 }
 
@@ -1154,10 +1348,14 @@ actions!(
         Delete,
         DeleteToPreviousWord,
         DeleteToNextWord,
+        DeleteToLineStart,
+        DeleteLine,
         Left,
         Right,
         Up,
         Down,
+        PageUp,
+        PageDown,
         SelectLeft,
         SelectRight,
         SelectUp,
@@ -1166,17 +1364,30 @@ actions!(
         LineEnd,
         SelectToLineStart,
         SelectToLineEnd,
+        DocStart,
+        DocEnd,
         MoveToPreviousWord,
         MoveToNextWord,
         SelectToPreviousWord,
         SelectToNextWord,
         SelectAll,
+        Indent,
+        Outdent,
+        ToggleComment,
+        JoinLines,
+        SortLines,
+        TrimTrailingWhitespace,
+        JumpToBracket,
+        ExpandSelection,
+        ShrinkSelection,
         Paste,
         Copy,
         Cut,
         Undo,
         Redo,
         Newline,
+        GotoDefinition,
+        FindUsages,
     ]
 );
 
@@ -1215,6 +1426,23 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-shift-z", Redo, Some("WincEditor")),
         KeyBinding::new("ctrl-y", Redo, Some("WincEditor")),
         KeyBinding::new("enter", Newline, Some("WincEditor")),
+        // The document and page ends, and Winc's structural edits.
+        KeyBinding::new("ctrl-home", DocStart, Some("WincEditor")),
+        KeyBinding::new("ctrl-end", DocEnd, Some("WincEditor")),
+        KeyBinding::new("pageup", PageUp, Some("WincEditor")),
+        KeyBinding::new("pagedown", PageDown, Some("WincEditor")),
+        KeyBinding::new("tab", Indent, Some("WincEditor")),
+        KeyBinding::new("shift-tab", Outdent, Some("WincEditor")),
+        KeyBinding::new("secondary-/", ToggleComment, Some("WincEditor")),
+        KeyBinding::new("secondary-d", DeleteLine, Some("WincEditor")),
+        KeyBinding::new("ctrl-j", JoinLines, Some("WincEditor")),
+        KeyBinding::new("secondary-]", JumpToBracket, Some("WincEditor")),
+        KeyBinding::new("ctrl-w", ExpandSelection, Some("WincEditor")),
+        KeyBinding::new("ctrl-shift-w", ShrinkSelection, Some("WincEditor")),
+        // Navigation. F12 is what most editors use for go-to-definition, and
+        // shift-F12 for references.
+        KeyBinding::new("f12", GotoDefinition, Some("WincEditor")),
+        KeyBinding::new("shift-f12", FindUsages, Some("WincEditor")),
     ]);
 }
 
@@ -1233,7 +1461,7 @@ mod tests {
         selection: Range<usize>,
     ) -> Entity<WincEditor> {
         cx.new(|cx| {
-            let mut editor = WincEditor::new(None, px(12.0), ScrollHandle::new(), cx);
+            let mut editor = WincEditor::new("sample.rs", px(12.0), ScrollHandle::new(), cx);
             editor.set_content(text, cx);
             editor.selection = selection;
             editor
@@ -1305,18 +1533,94 @@ mod tests {
         assert_eq!(prefix.encode_utf16().count(), 2);
     }
 
-    /// Undo bookkeeping: a fresh editor has nothing to step back over, and an
-    /// edit gives it something. Driven through the history rather than the
-    /// editor so no window is needed.
-    #[test]
-    fn undo_availability_follows_the_history() {
-        let mut history = EditHistory::default();
-        assert!(!history.can_undo() && !history.can_redo());
-        history.record("", &(0..0), "a", 0..0, false, Instant::now());
-        assert!(history.can_undo());
-        let (restored, ..) = history.undo("a").expect("one step");
-        assert_eq!(restored, "");
-        assert!(history.can_redo());
+    /// Undo and redo are Winc's, driven through its commands. This pins that
+    /// typing goes through the document's own history rather than a second one
+    /// kept beside it: one undo must restore the text, and one redo must
+    /// reapply it.
+    #[gpui::test]
+    fn typing_undoes_through_the_documents_own_history(cx: &mut TestAppContext) {
+        let editor = editor_with(cx, "abc", 3..3);
+        editor.update(cx, |editor, cx| {
+            editor.run(WincCommand::Insert("X".to_owned()), cx);
+        });
+        cx.read_entity(&editor, |editor, _| {
+            assert_eq!(editor.content(), "abcX", "the insert landed");
+        });
+
+        editor.update(cx, |editor, cx| editor.undo(cx));
+        cx.read_entity(&editor, |editor, _| {
+            assert_eq!(editor.content(), "abc", "one undo steps back over it");
+        });
+
+        editor.update(cx, |editor, cx| editor.redo(cx));
+        cx.read_entity(&editor, |editor, _| {
+            assert_eq!(editor.content(), "abcX");
+        });
+    }
+
+    /// Winc's toggle-comment command, reached through the same `run` the key
+    /// map uses. A hand-rolled implementation would pass a simpler test; this
+    /// one pins the wiring, which is what actually broke before.
+    #[gpui::test]
+    fn toggle_comment_goes_through_wincs_own_command(cx: &mut TestAppContext) {
+        let editor = editor_with(cx, "fn main() {}\n", 0..0);
+        editor.update(cx, |editor, cx| {
+            editor.run(WincCommand::ToggleComment, cx);
+        });
+        cx.read_entity(&editor, |editor, _| {
+            let text = editor.content();
+            assert!(
+                text.trim_start().starts_with("//"),
+                "the line should be commented out, got {text:?}"
+            );
+        });
+    }
+
+    /// A definition is found by Winc's scanner, so `fn helper` written above the
+    /// caret is reachable. `goto_definition` puts the caret on the name itself,
+    /// not merely on its line — a jump that lands at column 0 has not jumped.
+    #[gpui::test]
+    fn go_to_definition_lands_on_the_name(cx: &mut TestAppContext) {
+        let source = "fn helper() {}\n\nfn main() { helper(); }\n";
+        // Put the caret inside the call, not on the definition.
+        let call = source.rfind("helper").expect("the call site");
+        let editor = editor_with(cx, source, call..call + 3);
+        editor.update(cx, |editor, cx| editor.goto_definition(cx));
+        cx.read_entity(&editor, |editor, _| {
+            let range = editor.selected_range();
+            let text = editor.content();
+            assert_eq!(
+                &text[range.clone()],
+                "helper",
+                "the jump must select the name it found"
+            );
+            assert_eq!(range.start, 3, "the definition is on the first line");
+        });
+    }
+
+    /// Usages come back with the definitions themselves and the prose mentions
+    /// already filtered out, which is the whole point of using Winc's filter
+    /// over a text search: `helper` appearing in a `//` comment is not a use.
+    ///
+    /// The definition line is excluded too — Winc reports *uses*, and a caller
+    /// that wants both asks the definition scanner as well.
+    #[gpui::test]
+    fn usages_skip_definitions_and_prose(cx: &mut TestAppContext) {
+        let source = "fn helper() {}\n// helper in prose\nfn main() { helper(); }\n";
+        let editor = editor_with(cx, source, 0..0);
+        cx.read_entity(&editor, |editor, _| {
+            let text = editor.content();
+            let found: Vec<String> = editor
+                .usages_of("helper")
+                .into_iter()
+                .map(|range| text[range].to_owned())
+                .collect();
+            assert_eq!(
+                found,
+                vec!["helper".to_owned()],
+                "only the call site is a use: not the definition, not the comment"
+            );
+        });
     }
 
     /// The row a point falls on decides where a click puts the caret. The rule

@@ -3002,10 +3002,12 @@ impl Waku {
         // Reached from `render`, so the file cannot be read here. The editor
         // starts empty and locked, and `read_right_panel_file_into_editor`
         // fills it in from the background executor a frame or two later.
-        let language = file_highlighter_language(relative_path);
         let scroll = self.right_panel_editor_scroll_handle.clone();
         let font_size = px(self.state.code_font_size);
-        let state = cx.new(|cx| WincEditor::new(Some(language), font_size, scroll, cx));
+        // The editor is told the file name, not the language: Winc picks the
+        // lexer, the comment prefix and the indent rules from the name itself,
+        // and a second opinion here is how the two would drift apart.
+        let state = cx.new(|cx| WincEditor::new(relative_path, font_size, scroll, cx));
         state.update(cx, |editor, cx| editor.set_read_only(true, cx));
 
         self.right_panel_file_editors.insert(

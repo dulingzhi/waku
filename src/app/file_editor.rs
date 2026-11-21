@@ -261,7 +261,11 @@ impl FileEditorBackend for WincEditorBackend {
     }
 
     fn content(&mut self, cx: &mut gpui::Context<Waku>) -> String {
-        self.editor.read(cx).content()
+        // Saving must write the file's own line endings back. The editor holds
+        // text with normalised breaks — what the lexer and the caret arithmetic
+        // expect — so a CRLF file would come back as LF and every line would
+        // show as changed in git. The buffer owns that conversion.
+        self.editor.read(cx).content_for_save()
     }
 
     fn set_content(&mut self, content: SharedString, cx: &mut gpui::Context<Waku>) {
