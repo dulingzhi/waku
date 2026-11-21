@@ -1263,6 +1263,64 @@ fn forward_subagent_transcript(
     ));
 }
 
+/// Renders the main conversation's `SendMessage` into the addressed
+/// subagent's pane, marked as a relay.
+///
+/// A relayed message has no wire echo of its own: the CLI folds it into the
+/// subagent's next tool round, and the resumed turn's messages keep the
+/// original `parent_tool_use_id`, so nothing on the subagent's side says these
+/// words came from the parent. The parent's own `SendMessage` tool call is the
+/// only place it is observable, which is why the mark has to be written here
+/// rather than read off the subagent's transcript.
+///
+/// Returns whether the call addressed a known subagent. A message to the main
+/// conversation — `/`, or a teammate outside this task registry — is left
+/// alone.
+fn forward_parent_relay(
+    tool_use: &Value,
+    events: &impl DriverEventSink,
+    state: &ClaudeStreamState,
+) -> bool {
+    if tool_use.get("name").and_then(Value::as_str) != Some("SendMessage") {
+        return false;
+    }
+    let Some(target) = tool_use.pointer("/input/to").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(kind) = state
+        .background_task_kinds
+        .get(target)
+        .copied()
+        .filter(|kind| *kind == BackgroundWorkKind::Subagent)
+    else {
+        return false;
+    };
+    let Some(message) = tool_use
+        .pointer("/input/message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    else {
+        return false;
+    };
+    // The heading sits on its own line and every relayed line is indented, so
+    // a multi-line message cannot be mistaken for the subagent's own words.
+    let mut delta = format!("{}\n", tr!("background.relay_heading"));
+    for line in message.lines() {
+        delta.push_str("  ");
+        delta.push_str(line);
+        delta.push('\n');
+    }
+    delta.push('\n');
+    let _ = events.send(DriverEvent::BackgroundWork(
+        BackgroundWorkEvent::OutputDelta {
+            key: BackgroundWorkKey::new(kind, target),
+            delta,
+        },
+    ));
+    true
+}
+
 /// Claude Code wakes itself. When detached work — a backgrounded shell
 /// command, a subagent, a monitor — settles after the model's reply ended,
 /// the CLI folds its `<task-notification>` into a fresh model call without
@@ -1457,6 +1515,12 @@ fn handle_message(
                         }
                     }
                     Some("tool_use") => {
+                        // A relay to a known subagent is the only record of
+                        // that message: the subagent's own turn carries no
+                        // marker saying its words came from the parent. The
+                        // call still belongs in this session's transcript, so
+                        // it is mirrored rather than diverted.
+                        forward_parent_relay(block, events, state);
                         let id = block.get("id").and_then(Value::as_str).map(str::to_owned);
                         let wire_title = block
                             .get("name")
@@ -2433,6 +2497,88 @@ mod tests {
             panic!("task_notification should settle the background item");
         };
         assert!(settled.output.is_none());
+    }
+
+    #[test]
+    fn a_parent_send_message_is_marked_in_the_target_subagents_pane() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_started",
+                "task_id": "agent-42",
+                "tool_use_id": "toolu-agent",
+                "task_type": "local_agent",
+                "description": "Map the repo"
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let _ = event_rx.try_recv().unwrap();
+
+        // The parent relays a line into the running subagent.
+        handle_message(
+            &json!({"type": "assistant", "parent_tool_use_id": null, "message": {
+                "content": [{"type": "tool_use", "id": "toolu-send", "name": "SendMessage",
+                 "input": {"to": "agent-42", "message": "Also check the docs folder.", "summary": "s"}}]
+            }}),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let relayed = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .find_map(|event| match event {
+                DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { key, delta }) => {
+                    Some((key, delta))
+                }
+                _ => None,
+            })
+            .expect("the relay must land in the target subagent's pane");
+        assert_eq!(relayed.0.provider_id, "agent-42");
+        assert_eq!(
+            relayed.1,
+            format!(
+                "{}\n  Also check the docs folder.\n\n",
+                tr!("background.relay_heading")
+            ),
+            "the relay is labelled and indented so it cannot read as the subagent's own words"
+        );
+    }
+
+    #[test]
+    fn a_send_message_to_a_non_subagent_target_is_not_mirrored() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        // No task_started established `peer-7`, and a bare name is not a task.
+        for target in ["peer-7", "/", ""] {
+            handle_message(
+                &json!({"type": "assistant", "parent_tool_use_id": null, "message": {
+                    "content": [{"type": "tool_use", "id": "toolu-send", "name": "SendMessage",
+                     "input": {"to": target, "message": "hello", "summary": "s"}}]
+                }}),
+                "s",
+                &events,
+                &commands,
+                &turn,
+                true,
+                &mut state,
+            );
+        }
+        let mirrored = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter(|event| {
+                matches!(
+                    event,
+                    DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta { .. })
+                )
+            })
+            .count();
+        assert_eq!(mirrored, 0, "only a known subagent target is mirrored");
     }
 
     #[test]
