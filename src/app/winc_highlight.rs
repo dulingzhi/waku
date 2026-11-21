@@ -55,15 +55,45 @@ pub struct LineHighlighter {
 }
 
 impl LineHighlighter {
-    /// Build a highlighter for the language id Waku already computes
-    /// (`file_highlighter_language`).
+    /// Build a highlighter from a language id.
     ///
-    /// An unknown id — Waku names a language Winc does not carry, or plain text —
-    /// yields `None`, and the caller then paints uncoloured text. That is the
-    /// honest outcome: guessing a language would colour code wrongly, which
-    /// reads as a bug in the code rather than as a missing feature.
+    /// The editor builds its highlighters from a *file name* (`for_file_name`),
+    /// because that is what lets Winc and the document agree on the language.
+    /// This exists for callers that already know the id, which today means the
+    /// tests below: they need one specific language rather than whatever a name
+    /// happens to resolve to.
+    ///
+    /// An unknown id — a language Winc does not carry, or plain text — yields
+    /// `None`, and the caller then paints uncoloured text. That is the honest
+    /// outcome: guessing a language would colour code wrongly, which reads as a
+    /// bug in the code rather than as a missing feature.
+    #[allow(dead_code, reason = "the tests build highlighters by language id")]
     pub fn for_language(id: &str) -> Option<Self> {
         let language = winc_syntax::find(id)?;
+        Some(Self {
+            language,
+            states: vec![LineState::Normal],
+            chars: Vec::new(),
+            tokens: Vec::new(),
+        })
+    }
+
+    /// Build a highlighter for a file, letting Winc decide what language it is.
+    ///
+    /// The same `detect` call the document itself makes, so the colours and the
+    /// document's own idea of its language cannot disagree — which they would
+    /// if this side did its own extension matching.
+    pub fn for_file_name(file_name: &str) -> Option<Self> {
+        let language = winc_syntax::detect(file_name);
+        // Winc answers with its plain-text rules rather than `None` for a name
+        // it does not know. Those rules classify nothing, and painting with them
+        // would be the same as painting uncoloured, so the caller is told there
+        // is nothing to do. `detect` on a name no language claims returns
+        // exactly that rule set, which is how it is recognised here.
+        let plain = winc_syntax::detect("waku-no-such-file");
+        if std::ptr::eq(language, plain) {
+            return None;
+        }
         Some(Self {
             language,
             states: vec![LineState::Normal],

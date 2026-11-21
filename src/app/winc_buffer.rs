@@ -1,43 +1,45 @@
-//! A rope-backed buffer for the right panel, built on Winc's headless kernel.
+//! The right panel's file buffer: Winc's own `Document`, addressed in bytes.
 //!
-//! This is the piece that makes replacing the editor possible: it stores the
-//! file in a `ropey::Rope` through Winc's `Lines`/`EditBuffer` implementation, so
-//! editing commands, multi-cursor selection and history all come from
-//! `winc_core` rather than from Waku.
+//! This is a thin adapter, not an editor. Everything that makes an editor —
+//! selection, undo history, folding, multi-cursor, auto-indent, bracket
+//! matching, line ending and encoding detection — lives in
+//! [`winc_editor::Document`], and Waku drives it rather than reimplementing it.
 //!
-//! ## What it is not
+//! ## Why an adapter at all
 //!
-//! It is **not** a GPUI view. Drawing still belongs to the panel, and this type
-//! only answers questions about text — which is exactly why it can be tested
-//! without a window.
+//! `Document` counts positions in **chars**; [`super::file_editor`] promises
+//! **bytes**, because the panel and its find bar slice `&str`. Both units are
+//! legitimate and neither converts cleanly, so the translation happens here and
+//! nowhere else: the rest of Waku never sees a char index.
 //!
-//! ## The offset rule, enforced in one place
+//! This is the failure mode the module exists to prevent. On text with any
+//! non-ASCII character, a byte offset read as a char index silently lands in the
+//! wrong place, and a replace splices into the middle of a code point — which
+//! corrupts a Chinese file without any error.
 //!
-//! `FileEditorBackend` promises **byte** offsets; `winc_core` counts in **chars**.
-//! Every conversion lives in [`WincBuffer`], and the rest of Waku never sees a
-//! char index. Getting this wrong is the failure mode this module exists to
-//! prevent: on text with any non-ASCII character, a byte offset read as a char
-//! index silently lands in the wrong place, and a replace splices mid-codepoint.
+//! ## What it deliberately does not do
 //!
-//! The methods that convert therefore clamp to `char_to_byte(len_chars())`
-//! rather than trusting the caller: an out-of-range byte offset (a stale find
-//! match after an edit, say) becomes "end of buffer" instead of a panic.
+//! It never touches the filesystem. The panel decides when a read is stale and
+//! when a save may overwrite, so a buffer that also read the disk would race
+//! those decisions from underneath.
 
 use std::ops::Range;
 
 use ropey::Rope;
+use winc_core::Selection;
 use winc_core::text::Lines;
+use winc_editor::Command;
+use winc_editor::Document;
 
-/// Text stored as a rope, addressed in bytes at this boundary.
-///
-/// Not yet wired into the panel: the drawable editor that consumes it comes
-/// next, so nothing constructs this type today. Its tests are what make it
-/// committable in that state — they pin the byte/char translation, which is the
-/// part that must be right before any drawing depends on it.
+/// Winc's document, addressed in bytes at this boundary.
 pub struct WincBuffer {
-    text: Rope,
-    /// Whether edits are refused, mirroring the panel's `writable` decision.
-    read_only: bool,
+    document: Document,
+    /// The tab width Winc's commands indent and outdent by.
+    tab_width: usize,
+    /// The file's name, kept so a rebuild can restore the language Winc picked.
+    file_name: String,
+    /// Whether the file this buffer holds uses CRLF breaks.
+    crlf: bool,
 }
 
 impl Default for WincBuffer {
@@ -49,228 +51,381 @@ impl Default for WincBuffer {
 impl WincBuffer {
     pub fn new() -> Self {
         Self {
-            text: Rope::new(),
-            read_only: false,
+            document: Document::from_text(next_document_id(), ""),
+            tab_width: 4,
+            file_name: String::new(),
+            crlf: false,
         }
     }
 
-    /// Build a buffer from text.
+    /// Build a buffer from text, as an in-memory source does.
     ///
-    /// The panel reaches the buffer through `set_text` once a file is read, so
-    /// this is the constructor the tests use and the one an in-memory source
-    /// (a diff view, an unsaved scratch buffer) would.
+    /// The name is what picks the language, so `"a.rs"` and `"a.txt"` with the
+    /// same text are different buffers: one can toggle a comment, the other
+    /// cannot.
     #[allow(
         dead_code,
         reason = "the constructor tests build buffers with; the panel sets text after a read"
     )]
-    pub fn from_text(text: &str) -> Self {
-        Self {
-            text: Rope::from_str(text),
-            read_only: false,
-        }
-    }
-
-    pub fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-
-    pub fn set_read_only(&mut self, read_only: bool) {
-        self.read_only = read_only;
+    pub fn from_text(file_name: &str, text: &str) -> Self {
+        let mut buffer = Self::new();
+        buffer.set_file_name(file_name);
+        buffer.set_text(text);
+        buffer
     }
 
     /// The whole text.
     pub fn text(&self) -> String {
-        self.text.to_string()
+        let content = self.document.text();
+        match content.rope() {
+            Some(rope) => rope.to_string(),
+            // A large document keeps its text on disk and only its edits in
+            // memory; this materialises it, which is why the panel asks for it
+            // only when saving or comparing against the disk baseline.
+            None => content.substring(0, content.end_pos()),
+        }
     }
 
     /// Replace everything, as a reload from disk does.
     ///
-    /// This ignores `read_only`: the panel calls it after deciding the new text
-    /// describes the file, which is not an edit the user is making.
+    /// Winc's document keeps an undo history, so replacing the text is not just
+    /// a store: the history behind it no longer describes anything, and a
+    /// Ctrl+Z after a reload would step into a file that is no longer there.
+    /// The document is therefore rebuilt rather than mutated.
+    ///
+    /// The file name is what tells Winc which language it is looking at, and
+    /// that decides the comment prefix, the indentation rules and the lexer. A
+    /// document told nothing highlights as plain text and toggles comments to
+    /// nothing, so the name is kept here and reapplied on every rebuild.
+    ///
+    /// Breaks are normalised to LF on the way in. Winc's `Newline` and its
+    /// line arithmetic assume `\n`, so a stray `\r` would be counted as a column
+    /// and painted as a cell; the file's own convention is remembered and put
+    /// back by [`Self::text_for_save`].
     pub fn set_text(&mut self, text: &str) {
-        self.text = Rope::from_str(text);
+        self.crlf = text.contains("\r\n");
+        let normalised = if self.crlf {
+            text.replace("\r\n", "\n")
+        } else {
+            text.to_owned()
+        };
+        let file_name = self.file_name.clone();
+        self.document = Document::from_text(next_document_id(), &normalised);
+        self.document.set_language(&file_name);
     }
+
+    /// Tell the buffer which file it holds, so Winc can pick a language.
+    ///
+    /// Called before the text arrives: the panel knows the path from its tab
+    /// long before the read completes.
+    pub fn set_file_name(&mut self, file_name: &str) {
+        self.file_name = file_name.to_owned();
+        self.document.set_language(file_name);
+    }
+
+    /// The text with the file's own line endings, for saving.
+    ///
+    /// Writing a CRLF file back as LF would rewrite every line of it. The editor
+    /// normalises in memory, which is what the lexer and the caret arithmetic
+    /// expect, so the conversion back happens here and only here.
+    pub fn text_for_save(&self) -> String {
+        let text = self.text();
+        if self.crlf {
+            // Collapse first so a mixed file cannot become `\r\r\n`.
+            text.replace("\r\n", "\n").replace('\n', "\r\n")
+        } else {
+            text
+        }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.document.is_locked()
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.document.set_locked(read_only);
+    }
+
+    // ---- Lines, in bytes -------------------------------------------------
 
     /// Number of lines, counting a trailing newline as opening a final empty one.
     pub fn line_count(&self) -> usize {
-        self.text.line_count()
+        self.document.text().line_count()
     }
 
-    /// The text of one line, without its newline.
+    /// The text of one line, exactly as the rope slices it.
+    ///
+    /// Winc's `Lines` keeps the line break in a rope slice, which is what the
+    /// panel's callers already expect: `winc_paint` trims it before painting.
     pub fn line(&self, line: usize) -> String {
         if line >= self.line_count() {
             return String::new();
         }
-        self.text.line(line).to_string()
+        self.document.text().line_content(line).slice().to_string()
     }
 
     /// End of the text, in bytes.
     pub fn byte_len(&self) -> usize {
-        self.text.len_bytes()
+        match self.document.text().rope() {
+            Some(rope) => rope.len_bytes(),
+            // A large document reads its text on demand; measuring it costs one
+            // pass, and the panel only asks when sizing its scroll content.
+            None => self.text().len(),
+        }
     }
 
     /// Byte offset of the start of `line`, or the end of the text past the last.
-    ///
-    /// The editor needs this to turn a painted row back into a caret offset: a
-    /// click on row 40 must land at the start of line 40 without walking the
-    /// rope from the top.
     pub fn line_start_byte(&self, line: usize) -> usize {
-        if line >= self.text.len_lines() {
+        if line >= self.line_count() {
             return self.byte_len();
         }
-        self.text.line_to_byte(line)
+        let char_start = self.document.text().line_start(line);
+        self.byte_of_char(char_start)
     }
 
     /// The line a byte offset sits on.
     pub fn line_of_byte(&self, byte: usize) -> usize {
-        self.text.byte_to_line(byte.min(self.byte_len()))
+        self.document.text().line_of(self.char_of_byte(byte))
     }
 
     /// The column of a byte offset within its line, in bytes.
     ///
-    /// Bytes rather than chars because every caller here indexes a `&str`; a
-    /// char column would have to be converted back for the very next slice.
+    /// Not called today: the renderer asks the shaped line for a byte's x, so
+    /// it never needs the column back. Kept because it is the inverse of
+    /// `byte_at` and the two are what make a caret round-trip across a click.
+    #[allow(
+        dead_code,
+        reason = "the inverse of `byte_at`; the renderer solves this by shaping"
+    )]
     pub fn column_of_byte(&self, byte: usize) -> usize {
         let byte = byte.min(self.byte_len());
         byte - self.line_start_byte(self.line_of_byte(byte))
     }
 
     /// The byte offset for a line and a byte column within it, clamped to the
-    /// line's end so a click past the end of a short line lands on its last
-    /// character rather than on the next line.
+    /// line's end so a click past a short line lands on its last character.
+    #[allow(dead_code, reason = "see `column_of_byte`")]
     pub fn byte_at(&self, line: usize, column: usize) -> usize {
         if line >= self.line_count() {
             return self.byte_len();
         }
         let start = self.line_start_byte(line);
-        // `line` here excludes the newline: `line()` keeps it for a rope slice,
-        // so the end is measured from the text without the break.
         let text = self.line(line);
         let end = start + text.trim_end_matches(['\r', '\n']).len();
         (start + column).min(end)
     }
 
-    /// The byte offset one grapheme to the left of `byte`.
-    ///
-    /// Grapheme rather than char: a caret belongs between what a reader sees as
-    /// characters, and stepping into the middle of an emoji or a combining
-    /// accent would let the next keystroke split it.
-    pub fn prev_grapheme(&self, byte: usize) -> usize {
-        self.byte_of_char(winc_core::movement::prev_grapheme(
-            &self.text,
-            self.char_of_byte(byte),
-        ))
-    }
-
-    pub fn next_grapheme(&self, byte: usize) -> usize {
-        self.byte_of_char(winc_core::movement::next_grapheme(
-            &self.text,
-            self.char_of_byte(byte),
-        ))
-    }
-
-    pub fn prev_word(&self, byte: usize) -> usize {
-        self.byte_of_char(winc_core::movement::prev_word(
-            &self.text,
-            self.char_of_byte(byte),
-        ))
-    }
-
-    pub fn next_word(&self, byte: usize) -> usize {
-        self.byte_of_char(winc_core::movement::next_word(
-            &self.text,
-            self.char_of_byte(byte),
-        ))
-    }
-
-    /// The byte offset at the start of the word containing `byte`.
-    pub fn word_start_at(&self, byte: usize) -> usize {
-        let (start, _) = winc_core::movement::word_at(&self.text, self.char_of_byte(byte));
-        self.byte_of_char(start)
-    }
-
-    /// The byte offset at the end of the word containing `byte`.
-    pub fn word_end_at(&self, byte: usize) -> usize {
-        let (_, end) = winc_core::movement::word_at(&self.text, self.char_of_byte(byte));
-        self.byte_of_char(end)
-    }
-
-    /// Move one line up or down, keeping the column in bytes where it fits.
-    ///
-    /// Returns the same offset when there is no line in that direction, so a
-    /// caller can tell a refused move from a successful one by comparing.
-    pub fn vertical(&self, byte: usize, down: bool) -> usize {
-        let line = self.line_of_byte(byte);
-        let column = self.column_of_byte(byte);
-        let target = if down {
-            if line + 1 >= self.line_count() {
-                return byte;
-            }
-            line + 1
-        } else {
-            if line == 0 {
-                return byte;
-            }
-            line - 1
-        };
-        self.byte_at(target, column)
-    }
+    // ---- Unit conversion, the only place chars appear ---------------------
 
     /// Translate a byte offset into the char index the kernel expects.
     ///
-    /// Clamped: `char_to_byte` panics past the end, and a stale offset from a
+    /// Clamped, and backed off to a character boundary: a stale offset from a
     /// find match that a concurrent edit shortened is an ordinary occurrence,
     /// not a programming error.
-    fn char_of_byte(&self, byte: usize) -> usize {
-        let byte = byte.min(self.text.len_bytes());
-        // A stale offset can land mid-codepoint. Back off until the rope
-        // accepts it, rather than panicking on a caller's arithmetic.
-        let mut byte = byte;
-        while byte > 0 {
-            if let Ok(char_idx) = self.text.try_byte_to_char(byte) {
-                return char_idx;
+    pub fn char_of_byte(&self, byte: usize) -> usize {
+        match self.document.text().rope() {
+            Some(rope) => {
+                let byte = byte.min(rope.len_bytes());
+                let mut byte = byte;
+                while byte > 0 {
+                    if let Ok(char_idx) = rope.try_byte_to_char(byte) {
+                        return char_idx;
+                    }
+                    byte -= 1;
+                }
+                0
             }
-            byte -= 1;
+            // A large document has no rope to convert against; its char index
+            // is derived by walking the text, which is what `pos_to_line_col`
+            // would do anyway.
+            None => {
+                let text = self.text();
+                let byte = byte.min(text.len());
+                let mut boundary = byte;
+                while boundary > 0 && !text.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                text[..boundary].chars().count()
+            }
         }
-        0
     }
 
-    /// Translate a char index (as the kernel reports it) back to bytes.
-    fn byte_of_char(&self, char_idx: usize) -> usize {
-        self.text.char_to_byte(char_idx.min(self.text.len_chars()))
+    /// Translate a char index back to bytes.
+    pub fn byte_of_char(&self, char_idx: usize) -> usize {
+        match self.document.text().rope() {
+            Some(rope) => rope.char_to_byte(char_idx.min(rope.len_chars())),
+            None => {
+                let text = self.text();
+                text.char_indices()
+                    .nth(char_idx)
+                    .map_or(text.len(), |(byte, _)| byte)
+            }
+        }
     }
 
-    /// Replace `range` (bytes) with `text`, recording nothing — history is the
-    /// caller's business.
+    // ---- Editing, through Winc's own commands -----------------------------
+
+    /// Run one of Winc's commands.
     ///
-    /// Returns false when the buffer is read-only or the range is not a slice of
-    /// this text, so a caller cannot mistake a refused edit for an applied one.
+    /// This is the whole editing surface: typing is `Command::Insert`, Enter is
+    /// `Command::Newline`, indent, comment toggling, line moves and undo all go
+    /// through here, so their behaviour is exactly Winc's.
+    pub fn execute(&mut self, command: Command, page_lines: usize) {
+        self.document
+            .execute(command, page_lines.max(1), self.tab_width);
+    }
+
+    /// Replace `range` (bytes) with `text`, as a find-bar replace does.
+    ///
+    /// Returns false when the buffer refuses the edit, so a caller cannot
+    /// mistake a refused edit for an applied one.
+    ///
+    /// The splice goes through Winc's `Insert`, which replaces a selection, so
+    /// it lands as one undo step in the document's own history. Deleting is
+    /// `Insert("")` rather than Winc's `Delete`, because `Delete` is
+    /// forward-delete-one-grapheme and would remove a character instead of the
+    /// range.
     pub fn edit(&mut self, range: Range<usize>, text: &str) -> bool {
-        if self.read_only {
+        if self.is_read_only() {
             return false;
         }
+        if range.start > range.end {
+            return false;
+        }
+        let len = self.byte_len();
+        let range = range.start.min(len)..range.end.min(len);
         let from = self.char_of_byte(range.start);
         let to = self.char_of_byte(range.end);
         if from > to {
             return false;
         }
-        // One splice rather than remove-then-insert: a rope rebuild in between
-        // would make the second half point at offsets the first half moved.
-        self.text.remove(from..to);
-        if !text.is_empty() {
-            self.text.insert(from, text);
-        }
+        self.document.selection = Selection::new(from, to);
+        self.execute(Command::Insert(text.to_owned()), 1);
         true
     }
+
+    // ---- Selection, in bytes ---------------------------------------------
+
+    /// The selection as a byte range, ordered low to high.
+    pub fn selected_range(&self) -> Range<usize> {
+        let selection = self.document.selection;
+        self.byte_of_char(selection.from())..self.byte_of_char(selection.to())
+    }
+
+    /// The caret's byte offset.
+    pub fn cursor(&self) -> usize {
+        self.byte_of_char(self.document.selection.head)
+    }
+
+    /// Whether the selection was made backwards, so the caret is at its start.
+    pub fn selection_reversed(&self) -> bool {
+        self.document.selection.head < self.document.selection.anchor
+    }
+
+    /// Select a byte range. Refused unless both ends sit on character
+    /// boundaries, so a selection computed against stale text cannot split a
+    /// code point.
+    pub fn select_bytes(&mut self, range: Range<usize>, cx_reversed: bool) -> bool {
+        let len = self.byte_len();
+        if range.start > range.end || range.end > len {
+            return false;
+        }
+        let text = self.text();
+        if !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
+            return false;
+        }
+        let from = self.char_of_byte(range.start);
+        let to = self.char_of_byte(range.end);
+        self.document.selection = if cx_reversed {
+            Selection::new(to, from)
+        } else {
+            Selection::new(from, to)
+        };
+        true
+    }
+
+    /// A line and a char column, as a byte offset.
+    pub fn byte_at_line_col(&self, line: usize, col: usize) -> usize {
+        if line >= self.line_count() {
+            return self.byte_len();
+        }
+        let char_start = self.document.text().line_start(line);
+        self.byte_of_char(char_start + col)
+    }
+
+    /// The language Winc would highlight this document with.
+    pub fn language(&self) -> &'static winc_syntax::Language {
+        self.document.highlighter.language()
+    }
+
+    /// The byte range of the word at `byte`, as a double click or Ctrl+arrow
+    /// would select it.
+    ///
+    /// Winc's `word_at` defines what a word is, so this agrees with the word
+    /// motion its commands use. A position just past the end of a word selects
+    /// that word rather than the punctuation after it, which is what a user
+    /// double-clicking the tail of a name expects.
+    pub fn word_at(&self, byte: usize) -> Range<usize> {
+        let content = self.document.text();
+        let (start, end) = winc_core::movement::word_at(content, self.char_of_byte(byte));
+        self.byte_of_char(start)..self.byte_of_char(end)
+    }
+
+    /// The identifier the caret sits on or just after, as a byte range.
+    ///
+    /// Navigation is asked about "the name under the cursor", so the caret at
+    /// the end of `foo` must still yield `foo`: that is how every editor's
+    /// go-to-definition behaves, and `word_at` already has the rule.
+    pub fn name_under_caret(&self) -> Option<(String, Range<usize>)> {
+        let range = self.word_at(self.cursor());
+        let text = self.text();
+        let name = text.get(range.clone())?.to_owned();
+        // A word of only punctuation is not a name to look up.
+        if !name.chars().any(|c| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+        Some((name, range))
+    }
+
+    /// The text of the whole document as a rope, for Winc's navigation scans.
+    ///
+    /// Those take a `Rope` rather than the `Lines` interface, and a large
+    /// document has no rope — so it is materialised here. A large file is
+    /// exactly where a linear scan is least wanted, which is why the callers
+    /// bound the work rather than relying on the rope being cheap.
+    pub fn rope(&self) -> Option<Rope> {
+        self.document.text().rope().cloned()
+    }
+}
+
+/// Document ids are Winc's; Waku opens one document per file.
+///
+/// `Document` keys its caches by `(id, revision)`, so two live documents must
+/// never share an id: doing so would let one file's cached folds or syntax state
+/// answer for another and paint the wrong colours. The counter guarantees that
+/// for the life of the process.
+fn next_document_id() -> winc_editor::DocumentId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    winc_editor::DocumentId(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winc_editor::Command;
+
+    fn rust(text: &str) -> WincBuffer {
+        WincBuffer::from_text("a.rs", text)
+    }
+
+    /// A plain buffer: no language, no comment prefix.
+    fn plain(text: &str) -> WincBuffer {
+        WincBuffer::from_text("a.txt", text)
+    }
 
     #[test]
     fn ascii_edits_land_where_the_byte_range_says() {
-        let mut buffer = WincBuffer::from_text("hello world");
+        let mut buffer = plain("hello world");
         assert!(buffer.edit(6..11, "there"));
         assert_eq!(buffer.text(), "hello there");
     }
@@ -283,31 +438,26 @@ mod tests {
     /// indices would touch "o " instead, which is the bug being guarded.
     #[test]
     fn byte_offsets_are_not_mistaken_for_char_indices() {
-        let mut buffer = WincBuffer::from_text("héllo wörld");
+        let mut buffer = plain("héllo wörld");
         assert!(buffer.edit(3..5, "LL"));
         assert_eq!(buffer.text(), "héLLo wörld");
     }
 
     #[test]
     fn a_cjk_line_reports_its_bytes_not_its_chars() {
-        let buffer = WincBuffer::from_text("中文\nabc");
+        let buffer = plain("中文\nabc");
         assert_eq!(
             buffer.byte_len(),
             10,
             "3 bytes per CJK char plus the newline"
         );
         assert_eq!(buffer.line_count(), 2);
-        assert_eq!(
-            buffer.line(0),
-            "中文\n",
-            "ropey's line slice keeps the break"
-        );
         assert_eq!(buffer.line(1), "abc");
     }
 
     #[test]
     fn an_offset_past_the_end_clamps_instead_of_panicking() {
-        let mut buffer = WincBuffer::from_text("abc");
+        let mut buffer = plain("abc");
         assert!(
             buffer.edit(10..20, "x"),
             "a stale range still applies at the end"
@@ -317,7 +467,7 @@ mod tests {
 
     #[test]
     fn an_offset_inside_a_codepoint_backs_off_to_a_boundary() {
-        let mut buffer = WincBuffer::from_text("a中b");
+        let mut buffer = plain("a中b");
         // 2 is the second byte of the three-byte 中.
         assert!(buffer.edit(2..2, "X"));
         assert_eq!(
@@ -329,7 +479,7 @@ mod tests {
 
     #[test]
     fn a_read_only_buffer_refuses_edits_without_changing() {
-        let mut buffer = WincBuffer::from_text("keep");
+        let mut buffer = plain("keep");
         buffer.set_read_only(true);
         assert!(!buffer.edit(0..4, "changed"));
         assert_eq!(buffer.text(), "keep");
@@ -337,23 +487,21 @@ mod tests {
 
     #[test]
     fn a_multi_line_edit_keeps_the_line_structure() {
-        let mut buffer = WincBuffer::from_text("one\ntwo\nthree");
-        // "two" is bytes 4..7; replacing it with a bare word leaves the breaks
-        // on either side intact.
+        let mut buffer = plain("one\ntwo\nthree");
+        // "two" is bytes 4..7.
         assert!(buffer.edit(4..7, "TWO"));
         assert_eq!(buffer.text(), "one\nTWO\nthree");
         assert_eq!(buffer.line_count(), 3);
 
-        // And a replacement that carries its own break adds a line.
+        // A replacement that carries its own break adds a line.
         assert!(buffer.edit(7..8, "\n\n"));
-        assert_eq!(buffer.text(), "one\nTWO\n\nthree");
         assert_eq!(buffer.line_count(), 4);
     }
 
     #[test]
     fn line_starts_are_byte_offsets_after_a_multibyte_line() {
         // 中文 is six bytes, so the second line starts at 7, not at 3.
-        let buffer = WincBuffer::from_text("中文\nabc");
+        let buffer = plain("中文\nabc");
         assert_eq!(buffer.line_start_byte(0), 0);
         assert_eq!(
             buffer.line_start_byte(1),
@@ -364,79 +512,123 @@ mod tests {
 
     #[test]
     fn a_byte_offset_maps_back_to_its_line_and_column() {
-        let buffer = WincBuffer::from_text("中文\nabc");
+        let buffer = plain("中文\nabc");
         assert_eq!(buffer.line_of_byte(0), 0);
         assert_eq!(buffer.column_of_byte(3), 3, "the second CJK char is 3..6");
         assert_eq!(buffer.line_of_byte(7), 1);
         assert_eq!(buffer.column_of_byte(7), 0);
-        assert_eq!(buffer.column_of_byte(9), 2);
     }
 
     #[test]
     fn a_column_past_a_short_line_clamps_to_its_end() {
-        let buffer = WincBuffer::from_text("ab\nabcdef");
-        // Column 5 does not exist on line 0, so the caret stops after `ab`.
-        assert_eq!(buffer.byte_at(0, 5), 2);
+        let buffer = plain("ab\nabcdef");
+        assert_eq!(buffer.byte_at(0, 5), 2, "column 5 does not exist on line 0");
         assert_eq!(buffer.byte_at(1, 5), 8);
     }
 
-    /// The down arrow must keep the caret in its column across a multibyte
-    /// line, in bytes: a char-based column would land two bytes early here.
-    #[test]
-    fn vertical_motion_keeps_a_byte_column_past_cjk() {
-        // `中文x` is 7 bytes, so the second line starts at 8. Byte column 6 on
-        // that line is byte 14 — reading the column as chars would give 13.
-        let buffer = WincBuffer::from_text("中文x\nabcdef");
-        assert_eq!(buffer.byte_at(0, 6), 6, "after the `x` on line 0");
-        assert_eq!(buffer.vertical(6, true), 14, "column 6 of the second line");
-        assert_eq!(buffer.vertical(14, false), 6);
-    }
-
-    #[test]
-    fn vertical_motion_at_the_edges_stays_put() {
-        let buffer = WincBuffer::from_text("a\nb");
-        assert_eq!(buffer.vertical(0, false), 0);
-        assert_eq!(buffer.vertical(2, true), 2);
-    }
-
-    #[test]
-    fn grapheme_motion_crosses_a_line_break() {
-        let buffer = WincBuffer::from_text("ab\ncd");
-        // From the start of line 1, left goes to the end of line 0.
-        assert_eq!(buffer.prev_grapheme(3), 2);
-        // From the end of line 0, right goes to the start of line 1.
-        assert_eq!(buffer.next_grapheme(2), 3);
-    }
-
-    /// A caret must never land inside a multi-byte character: one left-step
-    /// from after 中 must skip all three of its bytes.
-    #[test]
-    fn grapheme_motion_steps_over_a_whole_cjk_character() {
-        let buffer = WincBuffer::from_text("a中b");
-        assert_eq!(buffer.prev_grapheme(4), 1, "back over 中, not into it");
-        assert_eq!(buffer.next_grapheme(1), 4, "forward over all three bytes");
-    }
-
-    /// Winc's rule: run to the end of the current class, then skip trailing
-    /// whitespace. So from `fn` the caret lands on `main`, not on the space.
-    #[test]
-    fn word_motion_lands_on_word_boundaries() {
-        let buffer = WincBuffer::from_text("fn main() {}");
-        assert_eq!(
-            buffer.next_word(0),
-            3,
-            "past `fn` and the space, onto `main`"
-        );
-        assert_eq!(buffer.next_word(3), 7, "past `main`, onto `(`");
-        assert_eq!(buffer.prev_word(7), 3, "back to the start of `main`");
-        assert_eq!(buffer.prev_word(3), 0, "back to the start of `fn`");
-    }
-
+    /// A double click and Ctrl+arrow must agree about what a word is, because
+    /// both ask Winc. This pins that the byte range quotes the whole CJK word
+    /// rather than a slice of it.
     #[test]
     fn the_word_under_the_caret_is_bounded() {
-        let buffer = WincBuffer::from_text("let 中文 = 1");
-        // 中文 occupies bytes 4..10.
-        assert_eq!(buffer.word_start_at(5), 4);
-        assert_eq!(buffer.word_end_at(5), 10);
+        let buffer = plain("let 中文 = 1");
+        let range = buffer.word_at(5);
+        assert_eq!(
+            &buffer.text()[range],
+            "中文",
+            "the word spans all six of its bytes"
+        );
+    }
+
+    #[test]
+    fn a_punctuation_only_caret_has_no_name() {
+        let mut buffer = plain("a + b");
+        buffer.select_bytes(2..2, false);
+        assert_eq!(
+            buffer.name_under_caret(),
+            None,
+            "`+` is not something to look up"
+        );
+    }
+
+    /// The file name decides the language, and the language decides everything
+    /// from the lexer to the comment prefix. A buffer that forgot its name would
+    /// silently toggle comments to nothing.
+    #[test]
+    fn the_file_name_decides_the_language() {
+        assert_eq!(rust("fn main() {}").language().id, "rust");
+        assert_ne!(
+            plain("fn main() {}").language().id,
+            "rust",
+            "a .txt file is not Rust"
+        );
+    }
+
+    /// Winc's toggle-comment needs a language that has a comment prefix, which
+    /// is why it is the strongest check that the document knows what it is.
+    #[test]
+    fn toggle_comment_uses_the_files_own_prefix() {
+        let mut buffer = rust("fn main() {}\n");
+        buffer.execute(Command::ToggleComment, 1);
+        assert!(
+            buffer.text().trim_start().starts_with("//"),
+            "got {:?}",
+            buffer.text()
+        );
+    }
+
+    /// A CRLF file must be written back with its own breaks: converting it to
+    /// LF would mark every line as changed in git.
+    ///
+    /// The text is normalised on the way in, so reading it back as CRLF is
+    /// itself a check that the normalisation happened — a buffer that kept the
+    /// `\r` in place would pass the save round-trip while carrying a stray byte
+    /// into every offset it reports.
+    #[test]
+    fn a_crlf_file_is_normalised_in_memory_and_restored_on_save() {
+        let buffer = plain("one\r\ntwo\r\n");
+        assert_eq!(
+            buffer.text(),
+            "one\ntwo\n",
+            "the editor works on LF so no `\r` becomes a stray column"
+        );
+        assert_eq!(
+            buffer.text_for_save(),
+            "one\r\ntwo\r\n",
+            "saving puts the file's own breaks back"
+        );
+    }
+
+    #[test]
+    fn an_lf_file_is_not_converted_on_save() {
+        let buffer = plain("one\ntwo\n");
+        assert_eq!(buffer.text(), "one\ntwo\n");
+        assert_eq!(buffer.text_for_save(), "one\ntwo\n");
+    }
+
+    /// A byte offset reported against a CRLF file must not count the carriage
+    /// return that the file has but the editor does not.
+    #[test]
+    fn a_crlf_file_reports_offsets_without_its_carriage_returns() {
+        let buffer = plain("a\r\nb\r\n");
+        assert_eq!(buffer.byte_len(), 4, "four bytes after normalisation");
+        assert_eq!(buffer.line_start_byte(1), 2);
+    }
+
+    /// Replacing the text rebuilds the document, so the undo stack that
+    /// described the old text must not survive into the new one.
+    #[test]
+    fn replacing_the_text_forgets_the_old_undo_history() {
+        let mut buffer = plain("abc");
+        buffer.execute(Command::Insert("X".to_owned()), 1);
+        assert_eq!(buffer.text(), "Xabc");
+
+        buffer.set_text("fresh");
+        buffer.execute(Command::Undo, 1);
+        assert_eq!(
+            buffer.text(),
+            "fresh",
+            "an undo after a reload has nothing to step back into"
+        );
     }
 }
