@@ -1583,3 +1583,4 @@ background.steer_placeholder: このサブエージェントへの次の指示�
 background.steer_caption: メイン会話を通じて伝えます。メイン会話が id でサブエージェントに送ります。
 background.steer_unavailable: 現在のターンはメッセージを受け取れません
 background.steer_prompt: サブエージェント %{target} にこれを伝えてから続けてください：%{message}
+background.relay_heading: ↩ メイン会話から転送：

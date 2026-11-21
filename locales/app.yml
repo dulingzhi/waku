@@ -2992,3 +2992,5 @@ background.steer_unavailable:
   en: The current turn cannot take a message right now
 background.steer_prompt:
   en: "Pass this on to the subagent %{target}, then continue: %{message}"
+background.relay_heading:
+  en: "↩ Relayed from the main conversation:"
