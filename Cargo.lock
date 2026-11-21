@@ -6415,10 +6415,11 @@ dependencies = [
 
 [[package]]
 name = "ropey"
-version = "2.0.0-beta.1"
+version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4045a00dc327d084a2bbf126976e14125b54f23bd30511d45b842eba76c52d74"
+checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
 dependencies = [
+ "smallvec",
  "str_indices",
 ]
 
@@ -8697,6 +8698,7 @@ dependencies = [
  "waku-client",
  "waku-protocol",
  "webview2-com",
+ "winc-core",
  "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-sys 0.61.2",
@@ -9363,6 +9365,22 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
+
+[[package]]
+name = "winc-core"
+version = "0.0.0"
+source = "git+https://github.com/DEEIX-AI/Winc?tag=v0.1.857#2ede2b73d045e65a19c388838bbcbecc01dfcf1d"
+dependencies = [
+ "ropey",
+ "unicode-segmentation",
+ "unicode-width",
+ "winc-emoji",
+]
+
+[[package]]
+name = "winc-emoji"
+version = "0.0.0"
+source = "git+https://github.com/DEEIX-AI/Winc?tag=v0.1.857#2ede2b73d045e65a19c388838bbcbecc01dfcf1d"
 
 [[package]]
 name = "windows"

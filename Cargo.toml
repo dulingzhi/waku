@@ -55,11 +55,18 @@ regex = "1"
 rust-i18n = "4"
 rust-umami = "0.1.1"
 smol = "2"
-ropey = "=2.0.0-beta.1"
+# Pinned to the version `winc-core` builds against: its `Lines` and
+# `EditBuffer` traits are implemented for `ropey::Rope` and nothing else, so a
+# second rope version in the tree would mean a rope Waku cannot hand to it.
+ropey = "1.6"
 futures-lite = "2"
 futures = "0.3"
 nucleo-matcher = "0.3.1"
 tokio = { version = "1", features = ["rt"] }
+# The headless half of Winc's editor: documents, cursors, folding, search and
+# formatting, with no GUI of its own. Pinned to a tag so a Winc release cannot
+# change what this build compiles against; Waku renders it with GPUI.
+winc-core = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
 
 # `test-support` has to stay test-only. It compiles a loop into gpui's
 # `flush_effects` that draws every dirty window right there, so with the
