@@ -89,6 +89,7 @@ mod browser;
 mod computer_use;
 pub mod daemon;
 mod driver;
+mod edit_history;
 mod input;
 mod md;
 mod platform;
