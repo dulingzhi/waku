@@ -1429,6 +1429,26 @@ mod tests {
         }
     }
 
+    /// The panel must never read the backend's dirty flag and its own copy
+    /// separately: two sources of truth would drift, and the tab's dot would
+    /// then disagree with whether Save is allowed.
+    ///
+    /// A source-level check, like the filesystem guard above, because the drift
+    /// it prevents has no runtime signature — both readings compile, and the
+    /// wrong one only shows up as a tab that lies.
+    #[test]
+    fn the_panel_reads_dirty_only_through_the_editor_interface() {
+        let source = include_str!("right_panel.rs");
+        // Search for the field access the old code used, built at run time so
+        // this assertion's own text does not match itself.
+        let forbidden = concat!("editor", ".", "dirty");
+        assert!(
+            !source.contains(forbidden),
+            "read `editor.is_dirty()` / write `editor.set_dirty()` instead; \
+             the backend owns the flag so a second editor cannot disagree"
+        );
+    }
+
     #[test]
     fn working_tree_only_descends_into_expanded_directories() {
         let root = std::env::temp_dir().join(format!("waku-working-tree-{}", Uuid::new_v4()));
@@ -1927,7 +1947,7 @@ impl Waku {
     fn right_panel_file_is_dirty(&self, relative_path: &str) -> bool {
         self.right_panel_file_editors
             .get(relative_path)
-            .is_some_and(|editor| editor.dirty)
+            .is_some_and(|editor| editor.is_dirty())
     }
 
     fn right_panel_surface_is_dirty(&self, surface: &RightPanelSurface) -> bool {
@@ -2969,7 +2989,7 @@ impl Waku {
         cx: &mut Context<Self>,
     ) -> (Entity<TextInput>, bool, bool) {
         if let Some(editor) = self.right_panel_file_editors.get(relative_path) {
-            return (editor.state.clone(), editor.writable, editor.dirty);
+            return (editor.text_input(), editor.writable, editor.is_dirty());
         }
 
         // Reached from `render`, so the file cannot be read here. The editor
@@ -2986,10 +3006,9 @@ impl Waku {
         self.right_panel_file_editors.insert(
             relative_path.to_owned(),
             RightPanelFileEditor {
-                state: state.clone(),
+                backend: Box::new(TextInputBackend::new(state.clone())),
                 disk_content: String::new(),
                 writable: false,
-                dirty: false,
                 reading: false,
                 read_epoch: 0,
             },
@@ -3011,8 +3030,8 @@ impl Waku {
                     .get_mut(subscribed_path.as_str())
                 {
                     let dirty = editor.writable && value != editor.disk_content;
-                    if editor.dirty != dirty {
-                        editor.dirty = dirty;
+                    if editor.is_dirty() != dirty {
+                        editor.set_dirty(dirty);
                         cx.notify();
                     }
                 }
@@ -3056,9 +3075,8 @@ impl Waku {
                 editor.reading = false;
                 editor.disk_content = tr!("files.no_project_is_open");
                 editor.writable = false;
-                let state = editor.state.clone();
                 let content = editor.disk_content.clone();
-                state.update(cx, |state, cx| state.set_content(content, cx));
+                editor.backend.set_content(content.into(), cx);
             }
             return;
         };
@@ -3109,7 +3127,7 @@ impl Waku {
                 editor.reading = false;
                 // An edit landed while the read was in flight; the user's text
                 // wins over the copy on disk.
-                if editor.dirty {
+                if editor.is_dirty() {
                     return;
                 }
                 if editor.disk_content == content && editor.writable == writable {
@@ -3117,12 +3135,9 @@ impl Waku {
                 }
                 editor.disk_content = content.clone();
                 editor.writable = writable;
-                editor.dirty = false;
-                let state = editor.state.clone();
-                state.update(cx, |state, cx| {
-                    state.set_read_only(!writable);
-                    state.set_content(content, cx);
-                });
+                editor.set_dirty(false);
+                editor.backend.set_read_only(!writable, cx);
+                editor.backend.set_content(content.into(), cx);
                 cx.notify();
             })
             .ok();
@@ -3358,7 +3373,7 @@ impl Waku {
         if self
             .right_panel_file_editors
             .get(relative_path)
-            .is_none_or(|editor| editor.dirty)
+            .is_none_or(|editor| editor.is_dirty())
         {
             return;
         }
@@ -3369,7 +3384,7 @@ impl Waku {
         let paths = self
             .right_panel_file_editors
             .iter()
-            .filter(|(_, editor)| !editor.dirty)
+            .filter(|(_, editor)| !editor.is_dirty())
             .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
         for path in paths {
@@ -3405,7 +3420,10 @@ impl Waku {
             return;
         }
 
-        let content = editor.state.read(cx).content().to_owned();
+        let Some(editor) = self.right_panel_file_editors.get_mut(&relative_path) else {
+            return;
+        };
+        let content = editor.backend.content(cx);
         let Some(session_id) = self.state.selected_session else {
             return;
         };
@@ -3449,9 +3467,9 @@ impl Waku {
                         if let Some(editor) = waku.right_panel_file_editors.get_mut(&relative_path)
                             && editor.read_epoch == epoch
                         {
-                            let current = editor.state.read(cx).content();
+                            let current = editor.backend.content(cx);
                             editor.disk_content = content.clone();
-                            editor.dirty = current != content;
+                            editor.set_dirty(current != content);
                         }
                     }
                     Err(error) => waku.show_toast(tr!(

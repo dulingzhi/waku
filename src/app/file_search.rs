@@ -229,7 +229,7 @@ impl Waku {
         self.file_search.as_ref().is_some_and(|search| search.open)
     }
 
-    fn file_search_target_focused(&self, window: &Window, cx: &App) -> bool {
+    fn file_search_target_focused(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
         if self.file_search.as_ref().is_some_and(|search| {
             search.open
                 && (search.query.read(cx).focus().is_focused(window)
@@ -237,17 +237,13 @@ impl Waku {
         }) {
             return true;
         }
-        self.visible_right_panel_file_path()
-            .and_then(|path| self.right_panel_file_editors.get(&path))
-            .is_some_and(|editor| editor.state.read(cx).focus().is_focused(window))
-    }
-
-    /// The editor entity the open search operates on.
-    fn file_search_editor(&self) -> Option<Entity<TextInput>> {
-        let search = self.file_search.as_ref().filter(|search| search.open)?;
-        self.right_panel_file_editors
-            .get(&search.path)
-            .map(|editor| editor.state.clone())
+        let Some(path) = self.visible_right_panel_file_path() else {
+            return false;
+        };
+        let Some(editor) = self.right_panel_file_editors.get_mut(&path) else {
+            return false;
+        };
+        editor.backend.focus_handle(cx).is_focused(window)
     }
 
     fn ensure_file_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -305,12 +301,14 @@ impl Waku {
         // Seed the query from the editor's selection, the way editors
         // conventionally do, but only a single-line one: a multi-line
         // selection means "search within", which this bar does not model.
-        let seed = self.right_panel_file_editors.get(&path).and_then(|editor| {
-            let editor = editor.state.read(cx);
-            let selection = editor.selected_range();
-            let text = editor.content().get(selection)?;
-            (!text.is_empty() && !text.contains('\n')).then(|| text.to_owned())
-        });
+        let seed = self
+            .right_panel_file_editors
+            .get_mut(&path)
+            .and_then(|editor| {
+                let selection = editor.backend.selected_range(cx);
+                let text = editor.backend.content(cx).get(selection)?.to_owned();
+                (!text.is_empty() && !text.contains('\n')).then_some(text)
+            });
 
         let search = self
             .file_search
@@ -349,16 +347,14 @@ impl Waku {
         search.open = false;
         search.matches = Vec::new();
         search.current = None;
-        for editor in self.right_panel_file_editors.values() {
-            editor.state.update(cx, |editor, cx| {
-                editor.set_search_matches(Vec::new(), None, cx)
-            });
+        for editor in self.right_panel_file_editors.values_mut() {
+            editor.backend.set_search_matches(Vec::new(), None, cx);
         }
         if restore_editor_focus
             && let Some(path) = self.visible_right_panel_file_path()
-            && let Some(editor) = self.right_panel_file_editors.get(&path)
+            && let Some(editor) = self.right_panel_file_editors.get_mut(&path)
         {
-            let focus = editor.state.read(cx).focus();
+            let focus = editor.backend.focus_handle(cx);
             window.focus(&focus, cx);
         }
         cx.notify();
@@ -374,10 +370,8 @@ impl Waku {
             search.matches = Vec::new();
             search.current = None;
         }
-        for editor in self.right_panel_file_editors.values() {
-            editor.state.update(cx, |editor, cx| {
-                editor.set_search_matches(Vec::new(), None, cx)
-            });
+        for editor in self.right_panel_file_editors.values_mut() {
+            editor.backend.set_search_matches(Vec::new(), None, cx);
         }
     }
 
@@ -429,38 +423,42 @@ impl Waku {
 
         // The editor the search is leaving keeps no washes.
         if path != previous_path
-            && let Some(editor) = self.right_panel_file_editors.get(&previous_path)
+            && let Some(editor) = self.right_panel_file_editors.get_mut(&previous_path)
         {
-            editor.state.update(cx, |editor, cx| {
-                editor.set_search_matches(Vec::new(), None, cx)
-            });
+            editor.backend.set_search_matches(Vec::new(), None, cx);
         }
 
-        let editor = self
-            .right_panel_file_editors
-            .get(&path)
-            .map(|editor| editor.state.clone());
-        let (matches, limited, invalid) = match (
-            &editor,
-            compile_search(&query_text, case_sensitive, whole_word, use_regex),
-        ) {
-            (None, _) | (_, CompiledSearch::Empty) => (Vec::new(), false, false),
-            (_, CompiledSearch::Invalid) => (Vec::new(), false, true),
-            (Some(editor), CompiledSearch::Ready(regex)) => {
-                let (matches, limited) = collect_search_matches(
-                    editor.read(cx).content(),
-                    &regex,
-                    Some(MAX_FILE_SEARCH_MATCHES),
-                );
-                (matches, limited, false)
-            }
-        };
+        let (matches, limited, invalid) =
+            match compile_search(&query_text, case_sensitive, whole_word, use_regex) {
+                CompiledSearch::Empty => (Vec::new(), false, false),
+                CompiledSearch::Invalid => (Vec::new(), false, true),
+                CompiledSearch::Ready(regex) => {
+                    // The searched text is read through the backend: a rope-backed
+                    // editor has no `content()` to borrow from.
+                    let text = self
+                        .right_panel_file_editors
+                        .get_mut(&path)
+                        .map(|editor| editor.backend.content(cx));
+                    match text {
+                        Some(text) => {
+                            let (matches, limited) = collect_search_matches(
+                                &text,
+                                &regex,
+                                Some(MAX_FILE_SEARCH_MATCHES),
+                            );
+                            (matches, limited, false)
+                        }
+                        None => (Vec::new(), false, false),
+                    }
+                }
+            };
 
         let current = match &refresh {
             SearchRefresh::Query => {
-                let origin = editor
-                    .as_ref()
-                    .map(|editor| editor.read(cx).selected_range().start)
+                let origin = self
+                    .right_panel_file_editors
+                    .get_mut(&path)
+                    .map(|editor| editor.backend.selected_range(cx).start)
                     .unwrap_or(0);
                 match_at_or_after(&matches, origin)
             }
@@ -493,18 +491,25 @@ impl Waku {
         let matches = search.matches.clone();
         let active = search.current;
         let active_range = active.and_then(|index| matches.get(index)).cloned();
-        let Some(editor) = self.file_search_editor() else {
+        let Some(path) = self
+            .file_search
+            .as_ref()
+            .filter(|search| search.open)
+            .map(|search| search.path.clone())
+        else {
             cx.notify();
             return;
         };
-        editor.update(cx, |editor, cx| {
-            editor.set_search_matches(matches, active, cx);
-            if select && let Some(range) = active_range.clone() {
-                editor.select_range(range, cx);
-            }
-        });
+        let Some(editor) = self.right_panel_file_editors.get_mut(&path) else {
+            cx.notify();
+            return;
+        };
+        editor.backend.set_search_matches(matches, active, cx);
+        if select && let Some(range) = active_range.clone() {
+            editor.backend.select_range(range, cx);
+        }
         if reveal && let Some(range) = active_range {
-            self.reveal_file_search_match(&editor, range.start, cx);
+            self.reveal_file_search_match(&path, range.start, cx);
         }
         cx.notify();
     }
@@ -512,13 +517,11 @@ impl Waku {
     /// Scrolls the shared editor viewport so the match at `offset` is
     /// visible. Uses the last painted layout, so right after an edit it can
     /// land a line off; the next navigation corrects it.
-    fn reveal_file_search_match(
-        &self,
-        editor: &Entity<TextInput>,
-        offset: usize,
-        cx: &Context<Self>,
-    ) {
-        let Some((position, line_height)) = editor.read(cx).position_for_offset(offset) else {
+    fn reveal_file_search_match(&mut self, path: &str, offset: usize, cx: &mut Context<Self>) {
+        let Some(editor) = self.right_panel_file_editors.get_mut(path) else {
+            return;
+        };
+        let Some((position, line_height)) = editor.backend.position_for_offset(offset, cx) else {
             return;
         };
         let scroll = &self.right_panel_editor_scroll_handle;
@@ -537,7 +540,12 @@ impl Waku {
     }
 
     fn file_search_navigate(&mut self, backwards: bool, cx: &mut Context<Self>) {
-        let Some(editor) = self.file_search_editor() else {
+        let Some(path) = self
+            .file_search
+            .as_ref()
+            .filter(|search| search.open)
+            .map(|search| search.path.clone())
+        else {
             return;
         };
         let Some(search) = self.file_search.as_mut().filter(|search| search.open) else {
@@ -547,11 +555,19 @@ impl Waku {
             return;
         }
         let count = search.matches.len();
+        let origin = self
+            .right_panel_file_editors
+            .get_mut(&path)
+            .map(|editor| editor.backend.selected_range(cx).start)
+            .unwrap_or(0);
+        let search = self
+            .file_search
+            .as_mut()
+            .expect("still present: nothing above removes it");
         search.current = match search.current {
             Some(current) if backwards => Some((current + count - 1) % count),
             Some(current) => Some((current + 1) % count),
             None => {
-                let origin = editor.read(cx).selected_range().start;
                 if backwards {
                     match_before(&search.matches, origin)
                 } else {
@@ -574,17 +590,28 @@ impl Waku {
         if !self.file_search_writable() {
             return;
         }
-        let Some(editor) = self.file_search_editor() else {
+        let Some(path) = self
+            .file_search
+            .as_ref()
+            .filter(|search| search.open)
+            .map(|search| search.path.clone())
+        else {
+            return;
+        };
+        let Some(range) = self
+            .file_search
+            .as_ref()
+            .and_then(|search| search.current)
+            .and_then(|index| {
+                self.file_search
+                    .as_ref()
+                    .and_then(|search| search.matches.get(index))
+            })
+            .cloned()
+        else {
             return;
         };
         let Some(search) = self.file_search.as_ref() else {
-            return;
-        };
-        let Some(range) = search
-            .current
-            .and_then(|index| search.matches.get(index))
-            .cloned()
-        else {
             return;
         };
         let CompiledSearch::Ready(regex) = compile_search(
@@ -597,20 +624,22 @@ impl Waku {
         };
         let template = search.replace.read(cx).content().to_owned();
         let use_regex = search.use_regex;
-        let expanded = expand_replacement(
-            &regex,
-            editor.read(cx).content(),
-            &range,
-            &template,
-            use_regex,
-        );
-        editor.update(cx, |editor, cx| {
-            editor.replace_range(range, &expanded, cx);
-        });
+        let Some(editor) = self.right_panel_file_editors.get_mut(&path) else {
+            return;
+        };
+        let content = editor.backend.content(cx);
+        let expanded = expand_replacement(&regex, &content, &range, &template, use_regex);
+        editor.backend.replace_range(range, &expanded, cx);
         // Recompute now rather than waiting for the queued edit event, then
         // walk on to the next match after the caret the replacement left.
         self.refresh_file_search(SearchRefresh::Content, cx);
-        let caret = editor.read(cx).cursor();
+        let Some(caret) = self
+            .right_panel_file_editors
+            .get_mut(&path)
+            .map(|editor| editor.backend.cursor(cx))
+        else {
+            return;
+        };
         if let Some(search) = self.file_search.as_mut().filter(|search| search.open)
             && !search.matches.is_empty()
         {
@@ -623,7 +652,12 @@ impl Waku {
         if !self.file_search_writable() {
             return;
         }
-        let Some(editor) = self.file_search_editor() else {
+        let Some(path) = self
+            .file_search
+            .as_ref()
+            .filter(|search| search.open)
+            .map(|search| search.path.clone())
+        else {
             return;
         };
         let Some(search) = self.file_search.as_ref() else {
@@ -641,21 +675,20 @@ impl Waku {
         let use_regex = search.use_regex;
         // Rescan without the cap: a limited highlight list must not make
         // Replace All silently skip the tail of the file.
-        let replaced = {
-            let content = editor.read(cx).content();
-            let (matches, _) = collect_search_matches(content, &regex, None);
-            if matches.is_empty() {
-                return;
-            }
-            replace_all_content(content, &regex, &matches, &template, use_regex)
+        let Some(editor) = self.right_panel_file_editors.get_mut(&path) else {
+            return;
         };
+        let content = editor.backend.content(cx);
+        let (matches, _) = collect_search_matches(&content, &regex, None);
+        if matches.is_empty() {
+            return;
+        }
+        let replaced = replace_all_content(&content, &regex, &matches, &template, use_regex);
         // Through `replace_range`, not `set_content`: a whole-content splice
         // is a recorded edit, so Replace All is one undo step, while
         // `set_content` would reset the editor's undo history as a reload.
-        editor.update(cx, |editor, cx| {
-            let len = editor.content().len();
-            editor.replace_range(0..len, &replaced, cx);
-        });
+        let len = content.len();
+        editor.backend.replace_range(0..len, &replaced, cx);
         self.refresh_file_search(SearchRefresh::Content, cx);
     }
 
