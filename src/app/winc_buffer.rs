@@ -102,6 +102,113 @@ impl WincBuffer {
         self.text.len_bytes()
     }
 
+    /// Byte offset of the start of `line`, or the end of the text past the last.
+    ///
+    /// The editor needs this to turn a painted row back into a caret offset: a
+    /// click on row 40 must land at the start of line 40 without walking the
+    /// rope from the top.
+    pub fn line_start_byte(&self, line: usize) -> usize {
+        if line >= self.text.len_lines() {
+            return self.byte_len();
+        }
+        self.text.line_to_byte(line)
+    }
+
+    /// The line a byte offset sits on.
+    pub fn line_of_byte(&self, byte: usize) -> usize {
+        self.text.byte_to_line(byte.min(self.byte_len()))
+    }
+
+    /// The column of a byte offset within its line, in bytes.
+    ///
+    /// Bytes rather than chars because every caller here indexes a `&str`; a
+    /// char column would have to be converted back for the very next slice.
+    pub fn column_of_byte(&self, byte: usize) -> usize {
+        let byte = byte.min(self.byte_len());
+        byte - self.line_start_byte(self.line_of_byte(byte))
+    }
+
+    /// The byte offset for a line and a byte column within it, clamped to the
+    /// line's end so a click past the end of a short line lands on its last
+    /// character rather than on the next line.
+    pub fn byte_at(&self, line: usize, column: usize) -> usize {
+        if line >= self.line_count() {
+            return self.byte_len();
+        }
+        let start = self.line_start_byte(line);
+        // `line` here excludes the newline: `line()` keeps it for a rope slice,
+        // so the end is measured from the text without the break.
+        let text = self.line(line);
+        let end = start + text.trim_end_matches(['\r', '\n']).len();
+        (start + column).min(end)
+    }
+
+    /// The byte offset one grapheme to the left of `byte`.
+    ///
+    /// Grapheme rather than char: a caret belongs between what a reader sees as
+    /// characters, and stepping into the middle of an emoji or a combining
+    /// accent would let the next keystroke split it.
+    pub fn prev_grapheme(&self, byte: usize) -> usize {
+        self.byte_of_char(winc_core::movement::prev_grapheme(
+            &self.text,
+            self.char_of_byte(byte),
+        ))
+    }
+
+    pub fn next_grapheme(&self, byte: usize) -> usize {
+        self.byte_of_char(winc_core::movement::next_grapheme(
+            &self.text,
+            self.char_of_byte(byte),
+        ))
+    }
+
+    pub fn prev_word(&self, byte: usize) -> usize {
+        self.byte_of_char(winc_core::movement::prev_word(
+            &self.text,
+            self.char_of_byte(byte),
+        ))
+    }
+
+    pub fn next_word(&self, byte: usize) -> usize {
+        self.byte_of_char(winc_core::movement::next_word(
+            &self.text,
+            self.char_of_byte(byte),
+        ))
+    }
+
+    /// The byte offset at the start of the word containing `byte`.
+    pub fn word_start_at(&self, byte: usize) -> usize {
+        let (start, _) = winc_core::movement::word_at(&self.text, self.char_of_byte(byte));
+        self.byte_of_char(start)
+    }
+
+    /// The byte offset at the end of the word containing `byte`.
+    pub fn word_end_at(&self, byte: usize) -> usize {
+        let (_, end) = winc_core::movement::word_at(&self.text, self.char_of_byte(byte));
+        self.byte_of_char(end)
+    }
+
+    /// Move one line up or down, keeping the column in bytes where it fits.
+    ///
+    /// Returns the same offset when there is no line in that direction, so a
+    /// caller can tell a refused move from a successful one by comparing.
+    pub fn vertical(&self, byte: usize, down: bool) -> usize {
+        let line = self.line_of_byte(byte);
+        let column = self.column_of_byte(byte);
+        let target = if down {
+            if line + 1 >= self.line_count() {
+                return byte;
+            }
+            line + 1
+        } else {
+            if line == 0 {
+                return byte;
+            }
+            line - 1
+        };
+        self.byte_at(target, column)
+    }
+
     /// Translate a byte offset into the char index the kernel expects.
     ///
     /// Clamped: `char_to_byte` panics past the end, and a stale offset from a
@@ -234,5 +341,95 @@ mod tests {
         assert!(buffer.edit(7..8, "\n\n"));
         assert_eq!(buffer.text(), "one\nTWO\n\nthree");
         assert_eq!(buffer.line_count(), 4);
+    }
+
+    #[test]
+    fn line_starts_are_byte_offsets_after_a_multibyte_line() {
+        // 中文 is six bytes, so the second line starts at 7, not at 3.
+        let buffer = WincBuffer::from_text("中文\nabc");
+        assert_eq!(buffer.line_start_byte(0), 0);
+        assert_eq!(
+            buffer.line_start_byte(1),
+            7,
+            "a CJK line must not shift the next line's start"
+        );
+    }
+
+    #[test]
+    fn a_byte_offset_maps_back_to_its_line_and_column() {
+        let buffer = WincBuffer::from_text("中文\nabc");
+        assert_eq!(buffer.line_of_byte(0), 0);
+        assert_eq!(buffer.column_of_byte(3), 3, "the second CJK char is 3..6");
+        assert_eq!(buffer.line_of_byte(7), 1);
+        assert_eq!(buffer.column_of_byte(7), 0);
+        assert_eq!(buffer.column_of_byte(9), 2);
+    }
+
+    #[test]
+    fn a_column_past_a_short_line_clamps_to_its_end() {
+        let buffer = WincBuffer::from_text("ab\nabcdef");
+        // Column 5 does not exist on line 0, so the caret stops after `ab`.
+        assert_eq!(buffer.byte_at(0, 5), 2);
+        assert_eq!(buffer.byte_at(1, 5), 8);
+    }
+
+    /// The down arrow must keep the caret in its column across a multibyte
+    /// line, in bytes: a char-based column would land two bytes early here.
+    #[test]
+    fn vertical_motion_keeps_a_byte_column_past_cjk() {
+        // `中文x` is 7 bytes, so the second line starts at 8. Byte column 6 on
+        // that line is byte 14 — reading the column as chars would give 13.
+        let buffer = WincBuffer::from_text("中文x\nabcdef");
+        assert_eq!(buffer.byte_at(0, 6), 6, "after the `x` on line 0");
+        assert_eq!(buffer.vertical(6, true), 14, "column 6 of the second line");
+        assert_eq!(buffer.vertical(14, false), 6);
+    }
+
+    #[test]
+    fn vertical_motion_at_the_edges_stays_put() {
+        let buffer = WincBuffer::from_text("a\nb");
+        assert_eq!(buffer.vertical(0, false), 0);
+        assert_eq!(buffer.vertical(2, true), 2);
+    }
+
+    #[test]
+    fn grapheme_motion_crosses_a_line_break() {
+        let buffer = WincBuffer::from_text("ab\ncd");
+        // From the start of line 1, left goes to the end of line 0.
+        assert_eq!(buffer.prev_grapheme(3), 2);
+        // From the end of line 0, right goes to the start of line 1.
+        assert_eq!(buffer.next_grapheme(2), 3);
+    }
+
+    /// A caret must never land inside a multi-byte character: one left-step
+    /// from after 中 must skip all three of its bytes.
+    #[test]
+    fn grapheme_motion_steps_over_a_whole_cjk_character() {
+        let buffer = WincBuffer::from_text("a中b");
+        assert_eq!(buffer.prev_grapheme(4), 1, "back over 中, not into it");
+        assert_eq!(buffer.next_grapheme(1), 4, "forward over all three bytes");
+    }
+
+    /// Winc's rule: run to the end of the current class, then skip trailing
+    /// whitespace. So from `fn` the caret lands on `main`, not on the space.
+    #[test]
+    fn word_motion_lands_on_word_boundaries() {
+        let buffer = WincBuffer::from_text("fn main() {}");
+        assert_eq!(
+            buffer.next_word(0),
+            3,
+            "past `fn` and the space, onto `main`"
+        );
+        assert_eq!(buffer.next_word(3), 7, "past `main`, onto `(`");
+        assert_eq!(buffer.prev_word(7), 3, "back to the start of `main`");
+        assert_eq!(buffer.prev_word(3), 0, "back to the start of `fn`");
+    }
+
+    #[test]
+    fn the_word_under_the_caret_is_bounded() {
+        let buffer = WincBuffer::from_text("let 中文 = 1");
+        // 中文 occupies bytes 4..10.
+        assert_eq!(buffer.word_start_at(5), 4);
+        assert_eq!(buffer.word_end_at(5), 10);
     }
 }
