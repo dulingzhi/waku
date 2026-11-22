@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use gpui::{BorderStyle, Hsla, MouseButton, Pixels, ScrollHandle, SharedString};
+use gpui::{quad, transparent_black};
+
 use super::*;
 
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
@@ -828,6 +831,126 @@ fn file_highlighter_language(relative_path: &str) -> &'static str {
         Some("diff" | "patch") => "diff",
         Some("md" | "markdown" | "mdx") => "markdown",
         _ => "text",
+    }
+}
+
+/// What the line-number gutter paints for one frame.
+///
+/// A struct rather than a dozen parameters: the set is read together at paint
+/// time and every field comes from the same frame's layout, so passing them
+/// separately makes it too easy to mix one frame's scroll with another's lines.
+struct GutterPaint<'a> {
+    /// The document line each display row shows. Collapsed rows are absent from
+    /// it, which is what makes a folded block's lines stop being numbered.
+    row_lines: &'a [usize],
+    /// Per-row heights for a wrapping backend; `None` means every row is
+    /// `line_height` tall.
+    heights: &'a Option<Vec<Pixels>>,
+    line_height: f32,
+    text_size: f32,
+    number_color: Hsla,
+}
+
+/// Paints the line numbers, fold arrows and bookmark dots.
+///
+/// Numbers are display rows, not document lines: with a block collapsed the two
+/// diverge, so the number printed is the line that row resolves to, which is what
+/// keeps the gutter honest about a folded file.
+///
+/// The arrows are drawn, not laid out, for the same reason the numbers are: one
+/// canvas that shapes only what is on screen, rather than a `div` per line.
+#[allow(clippy::too_many_arguments)]
+fn paint_gutter(
+    paint: &GutterPaint<'_>,
+    bounds: gpui::Bounds<Pixels>,
+    viewport: &ScrollHandle,
+    foldable: &[usize],
+    bookmarks: &[usize],
+    collapsed: &[usize],
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let visible = viewport.bounds();
+    let mut y = bounds.origin.y;
+    for (row, line) in paint.row_lines.iter().copied().enumerate() {
+        let height = paint
+            .heights
+            .as_ref()
+            .and_then(|heights| heights.get(row).copied())
+            .unwrap_or_else(|| px(paint.line_height));
+        // Everything below the viewport is unreachable from here on.
+        if y > visible.bottom() {
+            break;
+        }
+        if y + height < visible.top() {
+            y += height;
+            continue;
+        }
+
+        let number = SharedString::from((line + 1).to_string());
+        let run = gpui::TextRun {
+            len: number.len(),
+            font: gpui::font(md::render::MONO_FAMILY),
+            color: paint.number_color,
+            ..Default::default()
+        };
+        let shaped = window
+            .text_system()
+            .shape_line(number, px(paint.text_size), &[run], None);
+        let origin = point(bounds.right() - shaped.width, y);
+        let _ = shaped.paint(
+            origin,
+            px(paint.line_height),
+            gpui::TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+
+        // A bookmark turns the number into a filled dot in the leading strip
+        // rather than adding a glyph beside it.
+        if bookmarks.binary_search(&line).is_ok() {
+            window.paint_quad(quad(
+                Bounds::from_corners(
+                    point(bounds.left(), y + px(4.0)),
+                    point(bounds.left() + px(5.0), y + px(9.0)),
+                ),
+                px(1.0),
+                paint.number_color,
+                px(0.0),
+                transparent_black(),
+                BorderStyle::default(),
+            ));
+        }
+
+        // The fold arrow sits right of the number. Collapsed blocks point right,
+        // open ones down — the same convention every editor uses.
+        if foldable.binary_search(&line).is_ok() {
+            let closed = collapsed.binary_search(&line).is_ok();
+            let centre = point(bounds.right() + px(6.0), y + height / 2.0);
+            let arm = px(3.5);
+            let points = if closed {
+                [
+                    point(centre.x - arm / 2.0, centre.y - arm),
+                    point(centre.x + arm / 2.0, centre.y),
+                    point(centre.x - arm / 2.0, centre.y + arm),
+                ]
+            } else {
+                [
+                    point(centre.x - arm, centre.y - arm / 2.0),
+                    point(centre.x, centre.y + arm / 2.0),
+                    point(centre.x + arm, centre.y - arm / 2.0),
+                ]
+            };
+            let mut builder = gpui::PathBuilder::stroke(px(1.2));
+            builder.move_to(points[0]);
+            builder.line_to(points[1]);
+            builder.line_to(points[2]);
+            if let Ok(path) = builder.build() {
+                window.paint_path(path, paint.number_color);
+            }
+        }
+        y += height;
     }
 }
 
@@ -3007,7 +3130,7 @@ impl Waku {
         // The editor is told the file name, not the language: Winc picks the
         // lexer, the comment prefix and the indent rules from the name itself,
         // and a second opinion here is how the two would drift apart.
-        let state = cx.new(|cx| WincEditor::new(relative_path, font_size, scroll, cx));
+        let state = cx.new(|cx| WincEditor::new(relative_path, None, font_size, scroll, cx));
         state.update(cx, |editor, cx| editor.set_read_only(true, cx));
 
         self.right_panel_file_editors.insert(
@@ -3145,6 +3268,13 @@ impl Waku {
                 editor.set_dirty(false);
                 editor.backend.set_read_only(!writable, cx);
                 editor.backend.set_content(content.into(), cx);
+                // The formatter runs a tool against a real path and looks for
+                // the project's config beside it, so the editor needs the
+                // absolute one rather than the tab's relative label.
+                if let EditorSurface::Winc(entity) = editor.surface() {
+                    let absolute = project_path.join(&relative_path);
+                    entity.update(cx, |editor, _| editor.set_file_path(absolute));
+                }
                 cx.notify();
             })
             .ok();
@@ -3173,6 +3303,10 @@ impl Waku {
     ) -> Div {
         const GUTTER_PAD_RIGHT: f32 = 8.0;
         const CONTENT_PAD_TOP: f32 = 6.0;
+        /// Gap between the number's right edge and the fold arrow.
+        const FOLD_ARROW_GAP: f32 = 6.0;
+        /// The bookmark dot painted in the gutter's leading strip.
+        const BOOKMARK_DOT: f32 = 5.0;
 
         let text_size = self.state.code_font_size;
 
@@ -3181,6 +3315,9 @@ impl Waku {
         // visible file actually changes.
         self.sync_file_search_target(relative_path, cx);
         let find_bar = self.render_file_search_bar(pane_width, writable, window, cx);
+        // The symbol list floats over the editor's top right, the way a
+        // go-to-symbol popup does, rather than pushing the content down.
+        let symbol_list = self.render_file_symbols(pane_width, cx);
 
         let theme = Theme::current(cx);
 
@@ -3201,7 +3338,10 @@ impl Waku {
             EditorSurface::Winc(editor) => {
                 let editor = editor.read(cx);
                 (
-                    editor.buffer().line_count().max(1),
+                    // The gutter counts display rows, not document lines: with a
+                    // block collapsed the two diverge, and a line count would
+                    // put the last numbers far below the last painted row.
+                    editor.buffer().row_count().max(1),
                     None,
                     // `Pixels` and `f32` both appear below, so the row height is
                     // carried as the plain float both can be made from.
@@ -3210,9 +3350,17 @@ impl Waku {
                 )
             }
         };
-        // A mono digit advances ~0.6em, so the gutter tracks the font size.
+        // A mono digit advances ~0.6em, so the gutter tracks the font size. The
+        // extra on the left is the bookmark dot's strip; the fold arrow is
+        // drawn past the number.
         let digit_width = (font_size * 0.6).ceil();
-        let gutter_width = 20.0 + digit_width * (line_count.to_string().len() as f32);
+        let whole = 8.0 + BOOKMARK_DOT;
+        let fold_strip = if matches!(surface, EditorSurface::Winc(_)) {
+            FOLD_ARROW_GAP + 8.0
+        } else {
+            0.0
+        };
+        let gutter_width = whole + digit_width * (line_count.to_string().len() as f32) + fold_strip;
         let content_height = match &heights {
             Some(heights) if !heights.is_empty() => {
                 heights.iter().fold(Pixels::ZERO, |total, h| total + *h)
@@ -3222,49 +3370,130 @@ impl Waku {
 
         let viewport = self.right_panel_editor_scroll_handle.clone();
         let number_color = theme.text_ghost;
+        // The gutter's fold arrows and bookmark dots, plus the row→line map it
+        // needs. Both are asked about the rows this frame can reach rather than
+        // the whole file: each answer walks upward looking for a block start, so
+        // a long file would pay for every line to draw twenty.
+        let (row_lines, foldable, bookmarks, collapsed) = match surface {
+            EditorSurface::TextInput(_) => (
+                (0..line_count).collect(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            EditorSurface::Winc(editor) => {
+                let editor = editor.clone();
+                editor.update(cx, |editor, _| {
+                    let buffer = editor.buffer();
+                    let total_rows = buffer.row_count().max(1);
+                    // With nothing folded, row and line are the same number, so
+                    // the mapping is the identity and the scan below is the only
+                    // work worth doing.
+                    let row_lines: Vec<usize> = if editor.has_folds() {
+                        (0..total_rows).map(|row| buffer.line_of_row(row)).collect()
+                    } else {
+                        (0..total_rows).collect()
+                    };
+                    // One screenful either side of the viewport, which is what a
+                    // scroll can reveal before the next frame asks again.
+                    let offset = viewport.offset();
+                    let top = (-offset.y).max(Pixels::ZERO);
+                    let visible = viewport.bounds().size.height;
+                    let first = (f32::from(top) / line_height).floor().max(0.0) as usize;
+                    let span = (f32::from(visible) / line_height).ceil() as usize + 4;
+                    let first_row = first.saturating_sub(2);
+                    let last_row = (first + span).min(total_rows);
+                    let lines: Vec<usize> = row_lines
+                        [first_row.min(row_lines.len())..last_row.min(row_lines.len())]
+                        .to_vec();
+                    let starts = editor.block_starts(&lines);
+                    let marks = editor.bookmarked_lines();
+                    let closed = starts
+                        .iter()
+                        .copied()
+                        .filter(|line| editor.is_line_collapsed(*line))
+                        .collect::<Vec<_>>();
+                    (row_lines, starts, marks, closed)
+                })
+            }
+        };
+        // The paint closure takes these by value, so the click handler below
+        // gets its own copies rather than reaching for what the canvas moved.
+        let click_foldable = foldable.clone();
+        let click_heights = heights.clone();
         let gutter = canvas(
             |_, _, _| (),
-            move |bounds: gpui::Bounds<Pixels>, _, window: &mut Window, cx: &mut App| {
-                let visible = viewport.bounds();
-                let mut y = bounds.origin.y;
-                for number in 1..=line_count {
-                    let height = heights
-                        .as_ref()
-                        .and_then(|heights| heights.get(number - 1).copied())
-                        .unwrap_or_else(|| px(line_height));
-                    // Everything below the viewport is unreachable from here on.
-                    if y > visible.bottom() {
-                        break;
-                    }
-                    if y + height >= visible.top() {
-                        let text = SharedString::from(number.to_string());
-                        let run = gpui::TextRun {
-                            len: text.len(),
-                            font: gpui::font(md::render::MONO_FAMILY),
-                            color: number_color,
-                            ..Default::default()
-                        };
-                        let line =
-                            window
-                                .text_system()
-                                .shape_line(text, px(text_size), &[run], None);
-                        let origin = point(bounds.right() - line.width, y);
-                        let _ = line.paint(
-                            origin,
-                            px(line_height),
-                            gpui::TextAlign::Left,
-                            None,
-                            window,
-                            cx,
-                        );
-                    }
-                    y += height;
-                }
+            move |bounds, _, window, cx| {
+                paint_gutter(
+                    &GutterPaint {
+                        row_lines: &row_lines,
+                        heights: &heights,
+                        line_height,
+                        text_size,
+                        number_color,
+                    },
+                    bounds,
+                    &viewport,
+                    &foldable,
+                    &bookmarks,
+                    &collapsed,
+                    window,
+                    cx,
+                );
             },
         )
         .flex_none()
         .w(px(gutter_width - GUTTER_PAD_RIGHT))
         .h(content_height);
+
+        // Clicking a fold arrow toggles that block. The hit test reuses the
+        // layout the paint pass just used — the content's own scroll offset and
+        // the same row advance — so a click lands on the arrow the user sees
+        // rather than on a recomputed guess.
+        //
+        // The listener sits on a wrapper `div` because a `Canvas` takes no mouse
+        // events of its own.
+        let gutter: AnyElement = match surface {
+            EditorSurface::Winc(editor) => {
+                let editor = editor.clone();
+                let foldable = click_foldable;
+                let scroll = self.right_panel_editor_scroll_handle.clone();
+                let heights = click_heights;
+                div()
+                    .flex_none()
+                    .w(px(gutter_width - GUTTER_PAD_RIGHT))
+                    .h(content_height)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_, event: &gpui::MouseDownEvent, _, cx| {
+                            let offset = scroll.offset();
+                            let top = (-offset.y).max(Pixels::ZERO);
+                            // The gutter scrolls with the content, so the
+                            // click's window y has to come back to the
+                            // content's own coordinates first.
+                            let local = event.position.y - scroll.bounds().top() - top;
+                            let mut row = 0usize;
+                            let mut y = Pixels::ZERO;
+                            while y + px(line_height) <= local && row < line_count + 1 {
+                                y += heights
+                                    .as_ref()
+                                    .and_then(|heights| heights.get(row).copied())
+                                    .unwrap_or_else(|| px(line_height));
+                                row += 1;
+                            }
+                            let line = editor.read(cx).buffer().line_of_row(row);
+                            if foldable.binary_search(&line).is_ok() {
+                                let editor = editor.clone();
+                                editor.update(cx, |editor, cx| editor.toggle_fold_at(line, cx));
+                                cx.stop_propagation();
+                            }
+                        }),
+                    )
+                    .child(gutter)
+                    .into_any_element()
+            }
+            EditorSurface::TextInput(_) => gutter.into_any_element(),
+        };
 
         let body: AnyElement = match surface {
             EditorSurface::TextInput(field) => field.clone().into_any_element(),
@@ -3311,7 +3540,8 @@ impl Waku {
                     .child(scrollbar::vertical(
                         &self.right_panel_editor_scroll_handle,
                         &self.right_panel_editor_scrollbar,
-                    )),
+                    ))
+                    .children(symbol_list),
             )
     }
 

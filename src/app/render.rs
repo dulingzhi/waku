@@ -329,6 +329,12 @@ impl Render for Waku {
             .on_action(cx.listener(Self::toggle_find_whole_word_action))
             .on_action(cx.listener(Self::toggle_find_regex_action))
             .on_action(cx.listener(Self::replace_all_matches_action))
+            // Go to symbol, in the visible file.
+            .on_action(cx.listener(Self::toggle_file_symbols_action))
+            .on_action(cx.listener(Self::file_symbol_next_action))
+            .on_action(cx.listener(Self::file_symbol_previous_action))
+            .on_action(cx.listener(Self::accept_file_symbol_action))
+            .on_action(cx.listener(Self::close_file_symbols_action))
             .on_modifiers_changed(cx.listener(Self::task_switcher_modifiers_changed))
             .capture_any_mouse_down(cx.listener(Self::navigation_mouse_down))
             .on_mouse_move(cx.listener(Self::resize_panel_mouse_move))

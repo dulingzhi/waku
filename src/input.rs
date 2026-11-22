@@ -2870,7 +2870,6 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
-    use std::time::{Duration, Instant};
 
     use gpui::{
         ClipboardEntry, ClipboardItem, Context, Entity, EntityInputHandler, ExternalPaths, Image,
@@ -2885,10 +2884,6 @@ mod tests {
         media_paste_entries, next_word_boundary, pasted_text_for_mode, previous_word_boundary,
         single_line_scroll, visual_row_count, word_range_at,
     };
-    // The undo machinery is shared with the file editor, so its own tests live
-    // beside it in `crate::edit_history`; these tests exercise it through the
-    // field that also uses it.
-    use crate::edit_history::EditHistory;
 
     struct InputHarness {
         input: Entity<TextInput>,

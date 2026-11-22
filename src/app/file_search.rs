@@ -192,7 +192,11 @@ fn match_before(matches: &[Range<usize>], offset: usize) -> Option<usize> {
 /// (window coordinates from the last paint) to be comfortably visible, or
 /// `None` if it already is. An off-screen match lands about a third of the
 /// way down the viewport, the way editors conventionally reveal a find hit.
-fn revealed_scroll_offset(
+///
+/// Shared with the symbol list, which jumps the same way: both ask "this offset
+/// is where on screen, and should the viewport move for it?" rather than
+/// deriving a scroll position of their own.
+pub(super) fn revealed_scroll_offset(
     current_offset: Pixels,
     max_offset: Pixels,
     match_top: Pixels,

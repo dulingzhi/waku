@@ -71,10 +71,11 @@ use crate::ui::{
     toggle_switch,
 };
 use crate::{
-    CancelTaskSwitch, CancelTurn, CloseFind, CloseWindow, ConfirmTaskSwitch, CopySelection,
-    FindNext, FindPrevious, FocusComposer, NavigateBack, NavigateForward, NewProject, NewSession,
-    OpenFind, OpenFindReplace, OpenResumePicker, OpenSettings, ReplaceAllMatches, SaveFile,
-    SelectFirstTask, SelectLastTask, SwitchTaskBackward, SwitchTaskForward, ToggleCommandPalette,
+    AcceptFileSymbol, CancelTaskSwitch, CancelTurn, CloseFileSymbols, CloseFind, CloseWindow,
+    ConfirmTaskSwitch, CopySelection, FileSymbolNext, FileSymbolPrevious, FindNext, FindPrevious,
+    FocusComposer, NavigateBack, NavigateForward, NewProject, NewSession, OpenFind,
+    OpenFindReplace, OpenResumePicker, OpenSettings, ReplaceAllMatches, SaveFile, SelectFirstTask,
+    SelectLastTask, SwitchTaskBackward, SwitchTaskForward, ToggleCommandPalette, ToggleFileSymbols,
     ToggleFindCaseSensitive, ToggleFindRegex, ToggleFindWholeWord, ToggleFpsCounter,
     ToggleModelPicker, ToggleRightPanel, ToggleSidebar, ToggleUsagePanel,
 };
@@ -722,6 +723,35 @@ impl Render for WakuPane {
         let content = self.content;
         waku.update(cx, |waku, cx| content(waku, window, cx))
     }
+}
+
+/// The go-to-symbol list for one open file.
+///
+/// Winc's symbol scan is a regex pass over the whole document, so it runs once
+/// when the list opens and is thrown away when it closes. Holding the result —
+/// rather than rescanning per frame — is what keeps a long file from paying for
+/// the list on every repaint.
+struct FileSymbolPicker {
+    /// The file the entries came from, so a tab switch closes a stale list.
+    relative_path: String,
+    entries: Vec<SymbolEntry>,
+    /// Which entry Enter would jump to.
+    selected: usize,
+    scroll: ScrollHandle,
+    scrollbar: Rc<ScrollbarState>,
+}
+
+/// One row of the symbol list: what the picker needs from Winc's scan.
+struct SymbolEntry {
+    name: String,
+    /// The symbol's kind, as Winc names it (function, struct, heading…).
+    kind: String,
+    /// Nesting depth, so a method indents under its type.
+    indent: usize,
+    /// 0-based line, shown to the right of the name.
+    line: usize,
+    /// Byte offset of the name, selected when the entry is chosen.
+    offset: usize,
 }
 
 struct RightPanelFileEditor {
@@ -1489,6 +1519,14 @@ pub struct Waku {
     /// the primary find shortcut and kept for the window's lifetime so the
     /// query and toggles survive closing the bar; `open` says whether it shows.
     file_search: Option<file_search::FileSearch>,
+    /// The go-to-symbol list for the visible file, if one is open.
+    ///
+    /// Winc's `symbols` scan produces the entries; this holds the picker's own
+    /// state so the scan runs when the list opens rather than every frame.
+    file_symbols: Option<FileSymbolPicker>,
+    /// A one-line notice for the file panel, as a command that found nothing
+    /// sets. Cleared when the visible file changes.
+    file_hint: Option<String>,
     right_panel_diff_source: ReviewDiffSource,
     right_panel_diff_snapshot: Option<Arc<ReviewDiffSnapshot>>,
     right_panel_diff_loading: bool,
@@ -1792,6 +1830,7 @@ mod daemon_directory_picker;
 mod drafts;
 mod file_editor;
 mod file_search;
+mod file_symbols;
 mod goal_dialog;
 mod image_preview;
 mod project_picker;
@@ -3164,6 +3203,8 @@ impl Waku {
                 right_panel_file_tree_width: DEFAULT_FILE_TREE_WIDTH,
                 right_panel_file_editors: HashMap::new(),
                 file_search: None,
+                file_symbols: None,
+                file_hint: None,
                 right_panel_diff_source: ReviewDiffSource::default(),
                 right_panel_diff_snapshot: None,
                 right_panel_diff_loading: false,
