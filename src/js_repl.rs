@@ -199,6 +199,7 @@ fn serve<R: BufRead, W: Write>(mut input: R, mut output: W) -> anyhow::Result<()
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 struct SessionConfig {
     server_path: PathBuf,
+    server_arguments: Vec<String>,
     process_directory: PathBuf,
     cwd: PathBuf,
 }
@@ -965,6 +966,18 @@ impl Drop for RequestWatchdog {
     }
 }
 
+/// The mode arguments a consumer passed beside the helper program.
+///
+/// A packaged Waku ships one executable, so `WAKU_COMPUTER_USE_SERVER` names the
+/// program and this carries the word that selects the Cua Driver host inside it.
+/// An older Waku that ships a dedicated helper sets nothing here, so a missing
+/// or malformed value means "run the program as-is".
+fn helper_arguments(encoded: Option<&str>) -> Vec<String> {
+    encoded
+        .and_then(|encoded| serde_json::from_str::<Vec<String>>(encoded).ok())
+        .unwrap_or_default()
+}
+
 impl HelperConnection {
     fn start(deadline: Option<Instant>, config: Option<&SessionConfig>) -> anyhow::Result<Self> {
         // The SDK host ships in every bundle, but only development builds may
@@ -973,15 +986,26 @@ impl HelperConnection {
         if !waku_protocol::computer_use::is_available() {
             bail!("Waku Computer Use is not available in this build");
         }
-        let command = config
-            .map(|config| config.server_path.clone())
-            .or_else(|| std::env::var_os("WAKU_COMPUTER_USE_SERVER").map(PathBuf::from))
-            .ok_or_else(|| {
-                anyhow!(
-                    "WAKU_COMPUTER_USE_SERVER is required before the first Cua Driver operation"
-                )
-            })?;
+        // A merged `waku.exe` reaches the helper through `--computer-use`, so
+        // the mode words travel with the program instead of being appended
+        // blindly. The environment pair carries the same two halves, which is
+        // how a consumer that only deals in strings passes a merged binary.
+        let (command, arguments) = match config {
+            Some(config) => (config.server_path.clone(), config.server_arguments.clone()),
+            None => {
+                let command = std::env::var_os("WAKU_COMPUTER_USE_SERVER")
+                    .map(PathBuf::from)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "WAKU_COMPUTER_USE_SERVER is required before the first Cua Driver operation"
+                        )
+                    })?;
+                let encoded = std::env::var("WAKU_COMPUTER_USE_SERVER_ARGUMENTS").ok();
+                (command, helper_arguments(encoded.as_deref()))
+            }
+        };
         let mut helper = Command::new(&command);
+        helper.args(&arguments);
         if let Some(config) = config {
             helper
                 .env(
@@ -1149,6 +1173,21 @@ mod tests {
         repl.execute(code, Duration::from_secs(1), json!({}))
     }
 
+    /// The helper program and its mode word arrive as two separate environment
+    /// values, so dropping the arguments would launch the GUI instead of the Cua
+    /// Driver host. Absent and malformed values keep the old behaviour.
+    #[test]
+    fn helper_arguments_carry_the_mode_word_without_breaking_older_callers() {
+        assert_eq!(
+            helper_arguments(Some(r#"["--computer-use"]"#)),
+            ["--computer-use".to_owned()]
+        );
+        assert_eq!(helper_arguments(Some("[]")), Vec::<String>::new());
+        assert_eq!(helper_arguments(None), Vec::<String>::new());
+        assert_eq!(helper_arguments(Some("not json")), Vec::<String>::new());
+        assert_eq!(helper_arguments(Some(r#"{"a":1}"#)), Vec::<String>::new());
+    }
+
     #[test]
     fn opencode_sessions_isolate_bindings_reset_and_registration_lifetime() {
         let root =
@@ -1161,6 +1200,10 @@ mod tests {
                 session_config_path(&root, session),
                 json!({
                     "server_path": "unused-in-this-test",
+                    // The real registration always carries the mode words, so
+                    // the fixture does too; a missing field is a malformed
+                    // registration, not an old one.
+                    "server_arguments": [],
                     "process_directory": directory,
                     "cwd": directory,
                 })

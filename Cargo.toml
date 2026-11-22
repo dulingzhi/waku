@@ -49,6 +49,11 @@ waku-protocol = { path = "crates/waku-protocol" }
 # `waku-daemon` binary are one implementation. The desktop never calls into it
 # directly; it only dispatches to it before starting the GUI.
 waku-daemon = { path = "crates/waku-daemon" }
+# The Cua Driver host, linked into `waku` so `waku --computer-use mcp` and the
+# standalone `waku_computer_use` binary are one implementation. A package ships
+# only `waku`; the standalone binary stays for the dev watcher and the SDK
+# smoke tests.
+waku-computer-use = { path = "crates/waku-computer-use" }
 pulldown-cmark = "0.13"
 # Native, offline math typesetting; all layout and raster work runs on workers.
 ratex-parser = "=0.1.14"

@@ -91,6 +91,7 @@ pub mod daemon;
 mod driver;
 mod edit_history;
 mod input;
+pub mod js_repl;
 mod md;
 mod platform;
 mod query;
