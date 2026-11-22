@@ -111,6 +111,7 @@ mod tests {
 
     fn row(text: &str, spans: Vec<(Range<usize>, u32)>) -> PaintedLine {
         PaintedLine {
+            row: 0,
             line: 0,
             text: text.to_owned(),
             spans: spans

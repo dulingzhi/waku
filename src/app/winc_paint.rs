@@ -23,10 +23,15 @@ use super::winc_buffer::WincBuffer;
 use super::winc_highlight::LineHighlighter;
 use crate::md::highlight::TokenClass;
 
-/// One visible row: its line number, text, and coloured spans as byte ranges
-/// **within that line's text**.
+/// One visible row: its display row, its line number, text, and coloured spans
+/// as byte ranges **within that line's text**.
+///
+/// `row` and `line` differ once a block is collapsed: several lines are hidden
+/// behind one row, so the row index is what the viewport scrolls through and the
+/// line index is what the text and the gutter's number come from.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaintedLine {
+    pub row: usize,
     pub line: usize,
     pub text: String,
     pub spans: Vec<ColoredSpan>,
@@ -51,6 +56,18 @@ pub trait Palette {
 /// visible height. Rows are `row_height` tall and never soft-wrapped: wrapping
 /// would make "which line is at this pixel" depend on measured text, which is the
 /// previous editor's trade and the reason it re-laid out on every keystroke.
+///
+/// ## Display rows, not document lines
+///
+/// A row is Winc's *display* row: when a block is collapsed, its lines share the
+/// header's row and stop being painted, so rows and line numbers diverge. The
+/// viewport is therefore indexed by row and each row resolves back to a line
+/// through the document, which is what makes folded code disappear instead of
+/// merely being covered.
+///
+/// `walk` is called for every row in order with its line and whether that line
+/// opens a block, so the caller can extend the highlighter chain and mark gutter
+/// arrows without a second pass over the same rows.
 pub fn visible_lines(
     buffer: &WincBuffer,
     highlighter: Option<&mut LineHighlighter>,
@@ -59,7 +76,7 @@ pub fn visible_lines(
     row_height: f32,
     palette: &impl Palette,
 ) -> Vec<PaintedLine> {
-    let total = buffer.line_count();
+    let total = buffer.row_count();
     if total == 0 || row_height <= 0.0 || viewport_height <= 0.0 {
         return Vec::new();
     }
@@ -75,7 +92,8 @@ pub fn visible_lines(
     // Take the highlighter out once: `Option<&mut _>` is not `Copy`, so matching
     // on it inside the loop would move it on the first iteration.
     let mut highlighter = highlighter;
-    for line in first..last {
+    for row in first..last {
+        let line = buffer.line_of_row(row);
         let text = buffer.line(line);
         // The lexer trims nothing, but a CRLF file leaves a `\r` that would paint
         // as a stray cell and shift the caret one column.
@@ -85,7 +103,7 @@ pub fn visible_lines(
             // Walking the chain as it draws is what keeps a block comment
             // coloured on rows the viewport jumps straight into.
             Some(hl) => {
-                // The chain may need lines above `first`, so it is walked from
+                // The chain may need lines above `line`, so it is walked from
                 // the rope directly before this row is highlighted.
                 let above: Vec<String> = if hl.known_state(line).is_none() {
                     (0..line)
@@ -105,7 +123,12 @@ pub fn visible_lines(
             }
             None => Vec::new(),
         };
-        painted.push(PaintedLine { line, text, spans });
+        painted.push(PaintedLine {
+            row,
+            line,
+            text,
+            spans,
+        });
     }
     painted
 }
@@ -135,7 +158,7 @@ mod tests {
 
     #[test]
     fn the_top_of_the_file_paints_from_line_zero() {
-        let mut buffer = WincBuffer::from_text("a.rs", "a\nb\nc\nd");
+        let buffer = WincBuffer::from_text("a.rs", "a\nb\nc\nd");
         let painted = visible_lines(&buffer, None, 0.0, 40.0, 20.0, &Fixed);
         assert_eq!(text_of(&painted), ["a", "b", "c"]);
         assert_eq!(painted[0].line, 0);
@@ -143,7 +166,7 @@ mod tests {
 
     #[test]
     fn scrolling_picks_the_rows_the_offset_reaches() {
-        let mut buffer = WincBuffer::from_text("a.rs", "a\nb\nc\nd\ne");
+        let buffer = WincBuffer::from_text("a.rs", "a\nb\nc\nd\ne");
         // Four rows down at 20px each is line 2, and two visible rows.
         let painted = visible_lines(&buffer, None, 40.0, 40.0, 20.0, &Fixed);
         assert_eq!(painted[0].line, 2);
@@ -152,27 +175,27 @@ mod tests {
 
     #[test]
     fn the_viewport_stops_at_the_last_line() {
-        let mut buffer = WincBuffer::from_text("a.rs", "a\nb");
+        let buffer = WincBuffer::from_text("a.rs", "a\nb");
         let painted = visible_lines(&buffer, None, 0.0, 1000.0, 20.0, &Fixed);
         assert_eq!(text_of(&painted), ["a", "b"]);
     }
 
     #[test]
     fn scrolling_past_the_end_paints_nothing() {
-        let mut buffer = WincBuffer::from_text("a.rs", "a\nb");
+        let buffer = WincBuffer::from_text("a.rs", "a\nb");
         let painted = visible_lines(&buffer, None, 1000.0, 40.0, 20.0, &Fixed);
         assert!(painted.is_empty(), "an offset below the file has no rows");
     }
 
     #[test]
     fn a_degenerate_row_height_paints_nothing_rather_than_dividing_by_zero() {
-        let mut buffer = WincBuffer::from_text("a.rs", "a\nb");
+        let buffer = WincBuffer::from_text("a.rs", "a\nb");
         assert!(visible_lines(&buffer, None, 0.0, 40.0, 0.0, &Fixed).is_empty());
     }
 
     #[test]
     fn a_crlf_line_keeps_its_text_and_drops_its_carriage_return() {
-        let mut buffer = WincBuffer::from_text("a.rs", "one\r\ntwo\r\n");
+        let buffer = WincBuffer::from_text("a.rs", "one\r\ntwo\r\n");
         let painted = visible_lines(&buffer, None, 0.0, 40.0, 20.0, &Fixed);
         assert_eq!(painted[0].text, "one");
         assert_eq!(painted[1].text, "two");
@@ -180,7 +203,7 @@ mod tests {
 
     #[test]
     fn spans_carry_the_palette_colour_for_their_class() {
-        let mut buffer = WincBuffer::from_text("a.rs", "fn main() {}");
+        let buffer = WincBuffer::from_text("a.rs", "fn main() {}");
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
         let painted = visible_lines(&buffer, Some(&mut hl), 0.0, 20.0, 20.0, &Fixed);
         let keyword = painted[0]
@@ -195,7 +218,7 @@ mod tests {
     fn a_viewport_opened_inside_a_block_comment_still_paints_it_as_comment() {
         // Five rows of comment, viewport starting at row 4: the chain must be
         // walked to row 4 before it can know the comment is still open.
-        let mut buffer = WincBuffer::from_text("a.rs", "/*\na\nb\nc\nd */\nfn main() {}");
+        let buffer = WincBuffer::from_text("a.rs", "/*\na\nb\nc\nd */\nfn main() {}");
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
         let painted = visible_lines(&buffer, Some(&mut hl), 80.0, 40.0, 20.0, &Fixed);
         assert_eq!(painted[0].line, 4);
@@ -211,7 +234,7 @@ mod tests {
 
     #[test]
     fn a_line_below_a_closed_comment_paints_as_code() {
-        let mut buffer = WincBuffer::from_text("a.rs", "/* a */\nfn main() {}");
+        let buffer = WincBuffer::from_text("a.rs", "/* a */\nfn main() {}");
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
         let painted = visible_lines(&buffer, Some(&mut hl), 0.0, 80.0, 20.0, &Fixed);
         assert!(
@@ -232,7 +255,7 @@ mod tests {
     #[test]
     fn a_string_span_quotes_exactly_the_source_text() {
         let source = "let x = \"中文\";";
-        let mut buffer = WincBuffer::from_text("a.rs", source);
+        let buffer = WincBuffer::from_text("a.rs", source);
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
         let painted = visible_lines(&buffer, Some(&mut hl), 0.0, 20.0, 20.0, &Fixed);
         let span = painted[0]
@@ -249,7 +272,7 @@ mod tests {
 
     #[test]
     fn spans_stay_within_their_line() {
-        let mut buffer = WincBuffer::from_text("a.rs", "fn a() {}\nlet x = \"中文\";");
+        let buffer = WincBuffer::from_text("a.rs", "fn a() {}\nlet x = \"中文\";");
         let mut hl = LineHighlighter::for_language("rust").expect("rust");
         let painted = visible_lines(&buffer, Some(&mut hl), 0.0, 80.0, 20.0, &Fixed);
         for line in &painted {
@@ -269,5 +292,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A collapsed block must not be painted. This is the whole point of
+    /// folding reaching the paint path: rows are what the viewport walks, so a
+    /// hidden line that still had a row would still be drawn.
+    #[test]
+    fn a_collapsed_block_is_not_painted() {
+        let mut buffer =
+            WincBuffer::from_text("a.rs", "fn outer() {\n    let a = 1;\n}\nfn next() {}\n");
+        let before = visible_lines(&buffer, None, 0.0, 200.0, 20.0, &Fixed);
+        // The trailing newline opens a final empty line, which the buffer counts
+        // and the painter draws — the same as any editor's last blank row.
+        assert_eq!(
+            text_of(&before),
+            ["fn outer() {", "    let a = 1;", "}", "fn next() {}", ""]
+        );
+
+        assert!(buffer.toggle_fold_at(0), "line 0 opens a block");
+        let after = visible_lines(&buffer, None, 0.0, 200.0, 20.0, &Fixed);
+        // The expectation is built from `is_hidden` rather than from a guessed
+        // span: this test is about whether the *painter* skips hidden lines,
+        // not about which lines Winc decides a block covers.
+        let expected: Vec<&str> = before
+            .iter()
+            .filter(|row| !buffer.is_hidden(row.line))
+            .map(|row| row.text.as_str())
+            .collect();
+        assert!(
+            expected.len() < before.len(),
+            "the fold hides at least one line: {} -> {}",
+            before.len(),
+            expected.len()
+        );
+        assert_eq!(
+            text_of(&after),
+            expected,
+            "exactly the lines the fold hides are missing"
+        );
+        // The row indices stay contiguous, which is what lets the viewport be
+        // indexed by row while the line numbers on screen skip.
+        assert_eq!(
+            after.iter().map(|row| row.row).collect::<Vec<_>>(),
+            (0..after.len()).collect::<Vec<_>>(),
+            "the painted rows are the display rows, without gaps"
+        );
+        assert_eq!(
+            after.iter().map(|row| row.line).collect::<Vec<_>>(),
+            after
+                .iter()
+                .map(|row| buffer.line_of_row(row.row))
+                .collect::<Vec<_>>(),
+            "each row paints the line the document says it holds"
+        );
+    }
+
+    /// Scrolling is in rows, so a collapsed file must not paint past its last
+    /// row — the old line-count arithmetic would scroll into blank space.
+    #[test]
+    fn scrolling_stops_at_the_last_display_row() {
+        let mut buffer =
+            WincBuffer::from_text("a.rs", "fn a() {\n    x();\n}\nfn b() {\n    y();\n}\n");
+        assert!(buffer.toggle_fold_at(0));
+        let rows = buffer.row_count();
+        // One row past the last must paint nothing rather than clamping to a
+        // hidden line.
+        let painted = visible_lines(&buffer, None, rows as f32 * 20.0, 40.0, 20.0, &Fixed);
+        assert!(
+            painted.is_empty(),
+            "past the last display row there is nothing: {painted:?}"
+        );
     }
 }
