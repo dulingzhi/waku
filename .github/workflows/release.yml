@@ -140,6 +140,13 @@ jobs:
           bun scripts/cua-driver.ts bundle target/debug target/debug/resources debug
           bun scripts/test-computer-use.ts
 
+      # The release artifact is one executable for four jobs; check that every
+      # mode still dispatches before anything is signed or uploaded.
+      - name: Verify one executable dispatches every mode
+        run: |
+          cargo build --locked --package waku --bin waku
+          bun scripts/test-mode-dispatch.ts
+
       - name: Install JavaScript dependencies
         if: runner.os == 'Linux'
         run: bun install --frozen-lockfile

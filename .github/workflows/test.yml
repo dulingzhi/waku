@@ -90,6 +90,15 @@ jobs:
           bun scripts/cua-driver.ts bundle target/debug target/debug/resources debug
           bun scripts/test-computer-use.ts
 
+      # A package ships one executable for four jobs. That only works if the mode
+      # word selects the right one, and a lost flag fails silently by starting the
+      # window system instead of answering. No SDK or network is needed, so this
+      # runs on every operating system before the SDK smoke test above.
+      - name: Verify one executable dispatches every mode
+        run: |
+          cargo build --locked --package waku --bin waku
+          bun scripts/test-mode-dispatch.ts
+
       # The generated protocol and browser client are platform-independent, so
       # one runner is enough to catch a drifted checked-in artifact.
       - name: Install JavaScript dependencies
