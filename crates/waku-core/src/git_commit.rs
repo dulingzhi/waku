@@ -46,16 +46,42 @@ struct CapturedOutput {
 
 pub fn inspect(cwd: &Path) -> anyhow::Result<Snapshot> {
     ensure_repository(cwd)?;
-    let branch = git_optional_stdout(cwd, &["branch", "--show-current"])?
-        .filter(|branch| !branch.is_empty())
-        .or_else(|| {
-            git_optional_stdout(cwd, &["rev-parse", "--short", "HEAD"])
-                .ok()
-                .flatten()
-        })
-        .unwrap_or_else(|| "HEAD".to_owned());
-    let status = git_stdout(cwd, &["status", "--porcelain=v1", "--untracked-files=all"])?;
-    let (has_staged, has_unstaged) = status_flags(&status);
+    // The branch and the staged/unstaged split come from Winc's own `git
+    // status --porcelain=v2`, which reports both in one call and classifies
+    // entries the same way its staging UI does. Waku used to run a v1 status and
+    // parse the two-letter codes itself, which is a second opinion about what a
+    // code means.
+    let status = winc_status(cwd);
+    let branch =
+        match status
+            .as_ref()
+            .and_then(|status| status.head.as_ref())
+            .map(|head| match head {
+                winc_editor::git::Head::Branch(name) => name.clone(),
+                winc_editor::git::Head::Detached(oid) => oid.clone(),
+            }) {
+            Some(branch) => branch,
+            // Winc only answers for a repository it can read. Falling back keeps a
+            // half-read repository usable instead of showing no branch at all.
+            None => git_optional_stdout(cwd, &["branch", "--show-current"])?
+                .filter(|branch| !branch.is_empty())
+                .or_else(|| {
+                    git_optional_stdout(cwd, &["rev-parse", "--short", "HEAD"])
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| "HEAD".to_owned()),
+        };
+    let (has_staged, has_unstaged) = match &status {
+        Some(status) => (
+            status.entries.iter().any(|entry| entry.staged.is_some()),
+            status.entries.iter().any(|entry| entry.unstaged.is_some()),
+        ),
+        None => {
+            let status = git_stdout(cwd, &["status", "--porcelain=v1", "--untracked-files=all"])?;
+            status_flags(&status)
+        }
+    };
     let (additions, deletions) = numstat(cwd, &["diff", "--numstat", "HEAD", "--"])
         .unwrap_or_else(|_| combined_numstat(cwd));
     let (staged_additions, staged_deletions) =
@@ -79,6 +105,20 @@ pub fn inspect(cwd: &Path) -> anyhow::Result<Snapshot> {
         has_unstaged,
         can_push,
     })
+}
+
+/// Winc's read of a repository's working state, or `None` when it has nothing to
+/// say about this directory.
+///
+/// `None` is not an error: it covers "no `git` on this host" and "not a
+/// repository", both of which the caller answers by falling back rather than by
+/// failing the whole snapshot. A repository that *is* readable but reports an
+/// error still yields `None`, because a status Winc could not parse says nothing
+/// about what is staged.
+fn winc_status(cwd: &Path) -> Option<winc_editor::git::Status> {
+    let git = winc_editor::git::Git::find(&Default::default()).ok()?;
+    let cancel = winc_editor::format::Cancel::default();
+    git.status(cwd, &cancel).ok()
 }
 
 pub fn generate_message(
@@ -690,6 +730,54 @@ mod tests {
         let snapshot = inspect(&root).unwrap();
         assert!(!snapshot.has_staged);
         assert!(snapshot.has_unstaged);
+    }
+
+    /// The staged/unstaged split now comes from Winc's `porcelain=v2` reader
+    /// rather than Waku's own parsing of v1's two-letter codes. Both readers
+    /// must agree on the cases that matter, and this pins the one where a naive
+    /// v1 parse is easiest to get wrong: a file that is *both* staged and then
+    /// edited again reports as both, not as one or the other.
+    #[test]
+    fn inspect_separates_staged_from_unstaged_for_the_same_file() {
+        let root = repository();
+        fs::write(root.join("README.md"), "one\nstaged\n").unwrap();
+        run_git(&root, &["add", "README.md"]);
+        fs::write(root.join("README.md"), "one\nstaged\nunstaged\n").unwrap();
+
+        // Winc answers for this repository; if it did not, the fallback would
+        // still produce flags and this test would pass for the wrong reason.
+        assert!(
+            winc_status(&root).is_some(),
+            "Winc must be able to read this repository, or the split under test is Waku's own"
+        );
+
+        let snapshot = inspect(&root).unwrap();
+        assert_eq!(snapshot.branch, "main");
+        assert!(
+            snapshot.has_staged,
+            "the staged edit is still staged after a later worktree edit"
+        );
+        assert!(snapshot.has_unstaged, "the later edit is unstaged");
+        // Both counts: `staged_additions` is the staged side only, which is what
+        // makes the split observable rather than just a pair of booleans.
+        assert_eq!(snapshot.staged_additions, 1, "the staged line");
+        assert_eq!(snapshot.additions, 2, "both lines against HEAD");
+    }
+
+    /// A detached HEAD still reports something usable. Winc names it by short
+    /// commit id, and the snapshot must carry that rather than an empty branch.
+    #[test]
+    fn inspect_reports_a_detached_head_by_commit() {
+        let root = repository();
+        let head = git_stdout(&root, &["rev-parse", "--short", "HEAD"]).unwrap();
+        run_git(&root, &["checkout", "--detach", "HEAD"]);
+
+        let snapshot = inspect(&root).unwrap();
+        assert_eq!(
+            snapshot.branch,
+            head.trim(),
+            "a detached HEAD is its commit"
+        );
     }
 
     #[test]

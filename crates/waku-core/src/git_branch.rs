@@ -4,6 +4,7 @@
 //! from the background executor; render paths consume only the cached
 //! [`BranchSnapshot`] values they return.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -48,35 +49,22 @@ pub fn inspect(cwd: &Path) -> anyhow::Result<Option<BranchSnapshot>> {
         None
     };
 
-    // `%(worktreepath)` is empty for an available branch and points at the
-    // owning checkout otherwise. A NUL separates it from the branch name so
-    // paths containing spaces need no shell-style decoding.
+    // Which branches are checked out elsewhere comes from Winc's own worktree
+    // reader, not from `for-each-ref`'s `%(worktreepath)`. The two answer the
+    // same question, but Winc's answer is the one its worktree UI acts on, so a
+    // branch this reports as taken is the same one that UI refuses to check out.
+    let occupied = winc_occupied_branches(&repository);
     let refs = git_stdout(
         cwd,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)%00%(worktreepath)",
-            "refs/heads",
-        ],
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
     )?;
     let mut branches = refs
         .lines()
-        .filter_map(|line| {
-            let (name, worktree_path) = line.split_once('\0')?;
-            if name.is_empty() {
-                return None;
-            }
-            let checked_out_elsewhere = if worktree_path.is_empty() {
-                false
-            } else {
-                let worktree_path = PathBuf::from(worktree_path);
-                let worktree_path = fs::canonicalize(&worktree_path).unwrap_or(worktree_path);
-                worktree_path != repository
-            };
-            Some(BranchEntry {
-                name: name.to_owned(),
-                checked_out_elsewhere,
-            })
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| BranchEntry {
+            name: name.to_owned(),
+            checked_out_elsewhere: occupied.contains(name),
         })
         .collect::<Vec<_>>();
 
@@ -233,6 +221,40 @@ fn path_from_git_bytes(path: &[u8]) -> PathBuf {
 #[cfg(not(unix))]
 fn path_from_git_bytes(path: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(path).into_owned())
+}
+
+/// The branches some *other* worktree of `repository` currently has checked out.
+///
+/// The worktree the caller is looking at is not "elsewhere": its own branch is
+/// available to switch back to, and listing it as taken would grey out the very
+/// branch the user is on. Winc's `worktrees` resolves each worktree's path
+/// through symlinks, which is why the comparison canonicalises both sides.
+///
+/// An unreadable worktree list yields an empty set rather than an error: the
+/// branch list is still worth showing, and every entry then simply claims to be
+/// free. Reporting "nothing is occupied" is the failure a user notices least
+/// loudly — checking out would fail with git's own message, which names the
+/// owning worktree.
+fn winc_occupied_branches(repository: &Path) -> HashSet<String> {
+    let Ok(git) = winc_editor::git::Git::find(&Default::default()) else {
+        return HashSet::new();
+    };
+    let cancel = winc_editor::format::Cancel::default();
+    let Ok(worktrees) = git.worktrees(repository, &cancel) else {
+        return HashSet::new();
+    };
+    let here = fs::canonicalize(repository).unwrap_or_else(|_| repository.to_path_buf());
+    worktrees
+        .into_iter()
+        .filter_map(|worktree| {
+            let path = fs::canonicalize(&worktree.path).unwrap_or_else(|_| worktree.path.clone());
+            // The checkout the caller asked about is not elsewhere.
+            if path == here {
+                return None;
+            }
+            worktree.branch().map(str::to_owned)
+        })
+        .collect()
 }
 
 pub fn checkout(cwd: &Path, branch: &str) -> anyhow::Result<BranchSnapshot> {
