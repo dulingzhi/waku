@@ -8953,6 +8953,7 @@ dependencies = [
  "waku-client",
  "waku-protocol",
  "waku-relay",
+ "winc-editor",
  "windows-sys 0.61.2",
  "x25519-dalek",
  "zeroize",

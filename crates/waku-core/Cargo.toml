@@ -61,6 +61,11 @@ x25519-dalek = { version = "2", default-features = false, features = [
     "getrandom",
 ] }
 zeroize = { version = "1", features = ["derive"] }
+# Winc's headless git and workspace: the same implementation the editor drives,
+# so the daemon and the editor cannot disagree about what a repository or a
+# directory listing is. Pinned to a tag for the same reason the desktop's
+# dependencies are: a Winc release must not change what this builds against.
+winc-editor = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
