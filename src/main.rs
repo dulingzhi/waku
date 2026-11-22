@@ -14,12 +14,37 @@ fn main() {
     // Each mode reads its options from the environment and its own arguments
     // after the first word, so `waku --daemon --bind 127.0.0.1:4312` behaves
     // exactly as `waku-daemon --bind 127.0.0.1:4312` does.
-    let mode = std::env::args().nth(1);
-    match mode.as_deref() {
-        Some("--daemon") => run_daemon(),
-        Some("--js-repl") => run_js_repl(),
-        Some("--computer-use") => run_computer_use(),
-        _ => waku::run(),
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    match Mode::parse(&arguments) {
+        Mode::Daemon => run_daemon(),
+        Mode::JsRepl => run_js_repl(),
+        // The word after `--computer-use` is the helper's own mode.
+        Mode::ComputerUse(mode) => run_computer_use(mode),
+        Mode::Gui => waku::run(),
+    }
+}
+
+/// Which job this process was started for.
+///
+/// Dispatch is a value rather than a chain of `if`s so the rule that decides it
+/// can be tested: a package ships one executable, and a helper whose mode word
+/// was lost would otherwise start the window system instead of failing.
+#[derive(Debug, Eq, PartialEq)]
+enum Mode<'a> {
+    Gui,
+    Daemon,
+    JsRepl,
+    ComputerUse(Option<&'a str>),
+}
+
+impl<'a> Mode<'a> {
+    fn parse(arguments: &'a [String]) -> Self {
+        match arguments.first().map(String::as_str) {
+            Some("--daemon") => Self::Daemon,
+            Some("--js-repl") => Self::JsRepl,
+            Some("--computer-use") => Self::ComputerUse(arguments.get(1).map(String::as_str)),
+            _ => Self::Gui,
+        }
     }
 }
 
@@ -41,9 +66,8 @@ fn run_daemon() {
 
 /// Run the Cua Driver stdio host. The word after `--computer-use` selects the
 /// mode, exactly as it does for the standalone `waku_computer_use` binary.
-fn run_computer_use() {
-    let mode = std::env::args().nth(2);
-    if let Err(error) = waku_computer_use::run(mode.as_deref()) {
+fn run_computer_use(mode: Option<&str>) {
+    if let Err(error) = waku_computer_use::run(mode) {
         eprintln!("Waku Computer Use: {error:#}");
         std::process::exit(1);
     }
@@ -54,5 +78,44 @@ fn run_js_repl() {
     if let Err(error) = waku::js_repl::serve_stdio() {
         eprintln!("Waku JavaScript REPL: {error:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mode;
+
+    fn arguments(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
+    }
+
+    /// A package ships one executable, so the mode word is the only thing that
+    /// keeps a helper from starting the GUI instead. Losing it would make an
+    /// agent's MCP server fail to launch while a window opened behind it, which
+    /// is why each mode is pinned here rather than only exercised by hand.
+    #[test]
+    fn each_mode_word_selects_its_job_and_nothing_else_does() {
+        assert_eq!(Mode::parse(&[]), Mode::Gui);
+        assert_eq!(Mode::parse(&arguments(&["--daemon"])), Mode::Daemon);
+        assert_eq!(
+            Mode::parse(&arguments(&["--daemon", "--bind", "127.0.0.1:0"])),
+            Mode::Daemon
+        );
+        assert_eq!(Mode::parse(&arguments(&["--js-repl"])), Mode::JsRepl);
+        // The helper's own mode travels after the flag, and is optional.
+        assert_eq!(
+            Mode::parse(&arguments(&["--computer-use"])),
+            Mode::ComputerUse(None)
+        );
+        assert_eq!(
+            Mode::parse(&arguments(&["--computer-use", "mcp"])),
+            Mode::ComputerUse(Some("mcp"))
+        );
+        assert_eq!(
+            Mode::parse(&arguments(&["--computer-use", "list-tools"])),
+            Mode::ComputerUse(Some("list-tools"))
+        );
+        // Anything else is the GUI, including an unknown flag.
+        assert_eq!(Mode::parse(&arguments(&["--unknown"])), Mode::Gui);
     }
 }
