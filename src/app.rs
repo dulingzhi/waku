@@ -1850,6 +1850,7 @@ mod transcript_search;
 mod transcript_view;
 mod usage_meter;
 mod usage_page;
+mod winc_backup;
 mod winc_buffer;
 mod winc_editor;
 mod winc_highlight;

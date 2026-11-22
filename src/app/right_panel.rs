@@ -5,8 +5,17 @@ use gpui::{BorderStyle, Hsla, MouseButton, Pixels, ScrollHandle, SharedString};
 use gpui::{quad, transparent_black};
 
 use super::*;
+use crate::app::winc_backup;
 
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
+
+/// How long typing has to pause before an unsaved file is written to its
+/// recovery copy.
+///
+/// Long enough that ordinary typing serialises once rather than once per key,
+/// short enough that a crash loses no more than the last sentence.
+const FILE_BACKUP_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
+
 const REVIEW_DIFF_FILE_HEADER_HEIGHT: f32 = 36.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3164,6 +3173,10 @@ impl Waku {
                         editor.set_dirty(dirty);
                         cx.notify();
                     }
+                    // Whatever is unsaved right now is what a crash would take.
+                    if dirty {
+                        this.schedule_file_backup(subscribed_path.as_str(), cx);
+                    }
                 }
                 // Any content change — typing, a replace, a reload from disk —
                 // moves the text out from under an open find's match list.
@@ -3274,6 +3287,17 @@ impl Waku {
                 if let EditorSurface::Winc(entity) = editor.surface() {
                     let absolute = project_path.join(&relative_path);
                     entity.update(cx, |editor, _| editor.set_file_path(absolute));
+                }
+                // The file as read is what a save would write; anything a
+                // previous run left unsaved goes back on top of it, so the
+                // user's uncommitted text is what they see rather than the
+                // version they had already moved past. This runs after the
+                // borrow above ends: restoring touches the map itself.
+                let restored = waku.restore_file_backup(&relative_path, writable, cx);
+                if restored
+                    && let Some(editor) = waku.right_panel_file_editors.get_mut(&relative_path)
+                {
+                    editor.set_dirty(true);
                 }
                 cx.notify();
             })
@@ -3659,6 +3683,139 @@ impl Waku {
         }
     }
 
+    /// Schedule a recovery copy of an unsaved file.
+    ///
+    /// Debounced, because a keystroke is not the unit of work worth writing:
+    /// serialising and syncing on every character would put the disk in the
+    /// typing path. One write per pause in typing is what the promise needs —
+    /// "the process died, give me back what I typed" — without the cost of a
+    /// write per key.
+    ///
+    /// The write itself runs on the background executor: a slow disk must not
+    /// stall a frame, and the text is already owned by the time it starts.
+    pub(super) fn schedule_file_backup(&mut self, relative_path: &str, cx: &mut Context<Self>) {
+        let Some(project) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        let Some(editor) = self.right_panel_file_editors.get_mut(relative_path) else {
+            return;
+        };
+        // Only what is unsaved is worth a recovery copy, and a read-only file
+        // cannot have unsaved work the user could act on.
+        if !editor.writable || !editor.is_dirty() {
+            return;
+        }
+        // `content` goes through the backend, which needs it mutable: the
+        // editor is the one that owns the text, and a second copy here would
+        // be a second truth.
+        let text = editor.backend.content(cx);
+        let cursor = match editor.surface() {
+            EditorSurface::Winc(entity) => entity.read(cx).cursor(),
+            EditorSurface::TextInput(_) => 0,
+        };
+        let relative_path = relative_path.to_owned();
+
+        cx.spawn(async move |waku, cx| {
+            // Let a burst of typing settle before serialising. The handle is
+            // dropped if the panel changes its mind, which cancels nothing that
+            // already reached the disk — only the write that has not started.
+            cx.background_executor().timer(FILE_BACKUP_DELAY).await;
+            let _ = waku.update(cx, |_, _| {
+                let Some(backups) = winc_backup::Backups::for_project_in_data_directory(&project)
+                else {
+                    return;
+                };
+                let backup = winc_backup::Backup {
+                    relative_path: Some(relative_path),
+                    text,
+                    cursor,
+                };
+                // A failed backup is not worth interrupting the user for: it
+                // would appear as a toast on every keystroke if the data
+                // directory is unwritable, and the next one may succeed.
+                let _ = backups.write(&backup);
+            });
+        })
+        .detach();
+    }
+
+    /// Delete the recovery copy of a file that has been saved.
+    pub(super) fn forget_file_backup(&mut self, relative_path: &str, _: &mut Context<Self>) {
+        let Some(project) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        let Some(backups) = winc_backup::Backups::for_project_in_data_directory(&project) else {
+            return;
+        };
+        let _ = backups.remove(Some(relative_path));
+    }
+
+    /// Put a previous run's unsaved text back into a file that has just been
+    /// read from disk.
+    ///
+    /// Returns whether anything was restored, which is what tells the caller the
+    /// editor is dirty again: the text on screen is no longer the text in the
+    /// file.
+    ///
+    /// The backup is kept rather than deleted. Restoring it makes the editor
+    /// dirty, and deleting the copy now would leave the window between here and
+    /// the next save with nothing on disk to recover — a crash in that gap would
+    /// lose the very work just recovered.
+    pub(super) fn restore_file_backup(
+        &mut self,
+        relative_path: &str,
+        writable: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !writable {
+            return false;
+        }
+        let Some(project) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return false;
+        };
+        let Some(backups) = winc_backup::Backups::for_project_in_data_directory(&project) else {
+            return false;
+        };
+        let Some(backup) = backups
+            .read_all()
+            .into_iter()
+            .find(|backup| backup.relative_path.as_deref() == Some(relative_path))
+        else {
+            return false;
+        };
+        let Some(editor) = self.right_panel_file_editors.get_mut(relative_path) else {
+            return false;
+        };
+        // Restoring over what is already in the editor would throw away a read
+        // that landed between the disk copy and this call.
+        if editor.is_dirty() {
+            return false;
+        }
+        if editor.backend.content(cx) == backup.text {
+            // The backup describes what is already on disk, so the save that
+            // wrote it also made it redundant.
+            let _ = backups.remove(Some(relative_path));
+            return false;
+        }
+        editor.backend.set_content(backup.text.into(), cx);
+        if let EditorSurface::Winc(entity) = editor.surface() {
+            let cursor = backup.cursor;
+            entity.update(cx, |editor, cx| {
+                editor.select_range(cursor..cursor, cx);
+            });
+        }
+        true
+    }
+
     pub(super) fn save_right_panel_file_action(
         &mut self,
         _: &SaveFile,
@@ -3738,6 +3895,10 @@ impl Waku {
                             editor.disk_content = content.clone();
                             editor.set_dirty(current != content);
                         }
+                        // The text is on disk now, so the recovery copy is
+                        // stale: restoring it later would offer the user their
+                        // own saved file back as unsaved work.
+                        waku.forget_file_backup(&relative_path, cx);
                     }
                     Err(error) => waku.show_toast(tr!(
                         "files.could_not_save",
