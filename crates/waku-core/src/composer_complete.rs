@@ -700,11 +700,14 @@ pub fn resolved_skill_submission(
 
 /// Index the project's files for `@` mentions. Background executor only.
 ///
-/// `git ls-files` — tracked plus unignored untracked — is the authoritative
-/// listing for a repository and costs one subprocess for the whole tree. A
-/// plain directory gets a bounded walk instead.
+/// The listing comes from Winc's file index, which is the same enumeration its
+/// quick-open searches: it walks the tree once, honours `.gitignore` (plus the
+/// global and in-repo excludes) and skips the directories no one wants in an
+/// `@` list. Waku used to shell out to `git ls-files` for a repository and walk
+/// by hand otherwise; both are now one implementation, so a file that appears in
+/// quick-open appears here too.
 pub fn list_project_files(root: &Path, cap: usize) -> Vec<FileEntry> {
-    let files = git_listed_files(root, cap).unwrap_or_else(|| walked_files(root, cap));
+    let files = winc_project_files(root, cap);
     let mut directories = BTreeSet::new();
     for file in &files {
         let mut path = file.as_str();
@@ -736,80 +739,18 @@ pub fn list_project_files(root: &Path, cap: usize) -> Vec<FileEntry> {
     entries
 }
 
-fn git_listed_files(root: &Path, cap: usize) -> Option<Vec<String>> {
-    let output = crate::command_env::plain_command("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let listing = String::from_utf8(output.stdout).ok()?;
-    Some(
-        listing
-            .split('\0')
-            .filter(|path| !path.is_empty())
-            .take(cap)
-            .map(str::to_owned)
-            .collect(),
-    )
-}
-
-/// Directories a non-git walk never descends into: dependency and build output
-/// trees drown the useful paths and can be arbitrarily large.
-const WALK_SKIP: [&str; 7] = [
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    "out",
-    "vendor",
-    "__pycache__",
-];
-
-fn walked_files(root: &Path, cap: usize) -> Vec<String> {
-    let mut files = Vec::new();
-    let mut stack = vec![(root.to_path_buf(), String::new(), 0usize)];
-    while let Some((dir, prefix, depth)) = stack.pop() {
-        if depth > WALK_MAX_DEPTH || files.len() >= cap {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if files.len() >= cap {
-                break;
-            }
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            if name.starts_with('.') || WALK_SKIP.contains(&name.as_str()) {
-                continue;
-            }
-            let relative = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            // `fs::metadata` follows symlinks; the depth cap bounds any
-            // symlink cycle a walk could wander into.
-            match std::fs::metadata(entry.path()) {
-                Ok(meta) if meta.is_dir() => stack.push((entry.path(), relative, depth + 1)),
-                Ok(meta) if meta.is_file() => files.push(relative),
-                _ => {}
-            }
-        }
-    }
-    files
+/// The project's file paths, relative to `root`, via Winc's index.
+///
+/// `collect_now` builds the index on this thread rather than in the background
+/// watcher Winc's UI uses: the callers here are already on the daemon's
+/// background executor and want an answer, not a subscription.
+fn winc_project_files(root: &Path, cap: usize) -> Vec<String> {
+    let index = winc_editor::FileIndex::collect_now(root);
+    let total = index.len().min(cap);
+    (0..total)
+        .filter_map(|position| index.file(position))
+        .map(|file| file.path.to_owned())
+        .collect()
 }
 
 // ── Fuzzy filtering ────────────────────────────────────────────────────────
@@ -1570,6 +1511,85 @@ mod tests {
             paths.iter().position(|p| *p == "main.rs").unwrap()
                 < paths.iter().position(|p| *p == "src/deep/lib.rs").unwrap()
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The `@` list now comes from Winc's file index, so the property that index
+    /// actually guarantees must hold: `.gitignore` is honoured.
+    ///
+    /// It does *not* skip build directories by name — `target/`, `node_modules/`
+    /// and friends only stay out when a `.gitignore` excludes them. That is a
+    /// real behaviour change from the old walker, which skipped them
+    /// unconditionally; the test records it instead of pretending otherwise, so
+    /// the next person to touch this knows the list leans on ignore rules.
+    #[test]
+    fn the_file_list_follows_the_indexing_rules() {
+        let root = std::env::temp_dir().join(format!("waku-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "x").unwrap();
+        std::fs::write(root.join("kept.txt"), "x").unwrap();
+        std::fs::write(root.join("ignored.log"), "x").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\n/target/\n").unwrap();
+        std::fs::write(root.join("target/debug/artifact.bin"), "x").unwrap();
+        let git = |args: &[&str]| {
+            let output = crate::command_env::plain_command("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}");
+        };
+        git(&["init", "-b", "main"]);
+
+        let paths = list_project_files(&root, 200)
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>();
+
+        assert!(
+            paths.iter().any(|path| path == "src/lib.rs"),
+            "a real source file is listed: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|path| path == "kept.txt"),
+            "an untracked file that is not ignored is listed: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|path| path.ends_with("ignored.log")),
+            "`.gitignore` keeps `*.log` out inside a repository: {paths:?}"
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|path| path.starts_with("target/") || path.contains("/artifact.bin")),
+            "an ignored build directory stays out of the list: {paths:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The counterpart to the test above: with no ignore rule, a build directory
+    /// *is* indexed. Written down because it is the surprising half — anyone
+    /// expecting `target/` to be skipped by name will otherwise chase it.
+    #[test]
+    fn a_build_directory_without_an_ignore_rule_is_indexed() {
+        let root = std::env::temp_dir().join(format!("waku-index-raw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("main.rs"), "x").unwrap();
+        std::fs::write(root.join("target/debug/artifact.bin"), "x").unwrap();
+
+        let paths = list_project_files(&root, 200)
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect::<Vec<_>>();
+        assert!(
+            paths.iter().any(|path| path.contains("artifact.bin")),
+            "nothing ignores it, so the index lists it: {paths:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

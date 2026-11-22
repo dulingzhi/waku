@@ -237,23 +237,20 @@ fn list_tree(root: &Path, expanded_paths: &HashSet<PathBuf>) -> Vec<WorkingTreeE
         expanded_paths: &HashSet<PathBuf>,
         output: &mut Vec<WorkingTreeEntry>,
     ) {
-        let Ok(entries) = fs::read_dir(directory) else {
+        // Winc's directory reader, so the tree is sorted and filtered exactly as
+        // the editor's own file list is: directories first, then a natural order
+        // where `file2` precedes `file10`, skipping the same names (VCS metadata,
+        // editor caches). Waku keeps the flat "visible rows" shape the protocol
+        // speaks, because that is what a client can render without holding a
+        // whole tree.
+        let Ok(children) = winc_editor::list_dir(directory) else {
             return;
         };
-        let mut children = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name == ".git" {
-                    return None;
-                }
-                let is_dir = entry.file_type().ok()?.is_dir();
-                Some((entry.path(), name, is_dir))
-            })
-            .collect::<Vec<_>>();
-        children.sort_by_key(|(_, name, is_dir)| (!*is_dir, name.to_lowercase()));
-        for (absolute_path, name, is_dir) in children {
+        for child in children {
+            let name = child.name;
+            let is_dir = matches!(child.kind, winc_editor::EntryKind::Dir);
             let relative_path = relative_directory.join(&name);
+            let absolute_path = child.path;
             let expanded = is_dir && expanded_paths.contains(&absolute_path);
             output.push(WorkingTreeEntry {
                 relative_path: relative_path.to_string_lossy().into_owned(),
@@ -515,6 +512,80 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", command_error(&output));
+    }
+
+    /// The tree comes from Winc's directory reader, which orders names
+    /// naturally and skips VCS metadata. Both properties are observable, so the
+    /// swap is checked rather than assumed.
+    #[test]
+    fn the_tree_sorts_naturally_and_skips_metadata() {
+        let root = std::env::temp_dir().join(format!("waku-tree-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("dir")).unwrap();
+        for name in ["file2.txt", "file10.txt", "file1.txt"] {
+            fs::write(root.join(name), "x\n").unwrap();
+        }
+        fs::write(root.join("dir/inner.txt"), "x\n").unwrap();
+        // Metadata directories Winc's reader skips by name.
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("__pycache__")).unwrap();
+        // A dotfile is *not* metadata: `.github` and `.editorconfig` belong in
+        // the tree, and Winc's reader only drops the names on its fixed list.
+        fs::write(root.join(".editorconfig"), "root = true\n").unwrap();
+
+        let entries = list_tree(&root, &HashSet::new());
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+
+        assert!(
+            names
+                .iter()
+                .all(|name| *name != ".git" && *name != "__pycache__"),
+            "metadata directories are skipped: {names:?}"
+        );
+        assert!(
+            names.contains(&".editorconfig"),
+            "a dotfile that is not metadata stays: {names:?}"
+        );
+        // Directories first, then files in natural order.
+        assert_eq!(
+            names,
+            [
+                "dir",
+                ".editorconfig",
+                "file1.txt",
+                "file2.txt",
+                "file10.txt"
+            ],
+            "directories lead, and `file2` precedes `file10`"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Expanding a directory shows its children at the next depth, which is the
+    /// part of the flat-row model the client depends on.
+    #[test]
+    fn expanding_a_directory_adds_its_children_one_level_down() {
+        let root = std::env::temp_dir().join(format!("waku-tree-expand-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::write(root.join("dir/inner.txt"), "x\n").unwrap();
+
+        let collapsed = list_tree(&root, &HashSet::new());
+        assert_eq!(collapsed.len(), 1, "only the directory row: {collapsed:?}");
+        assert!(!collapsed[0].expanded);
+
+        let expanded_paths: HashSet<PathBuf> = [root.join("dir")].into_iter().collect();
+        let expanded = list_tree(&root, &expanded_paths);
+        assert_eq!(expanded.len(), 2, "the child is listed too: {expanded:?}");
+        assert!(expanded[0].expanded);
+        assert_eq!(expanded[1].name, "inner.txt");
+        assert_eq!(expanded[1].depth, 1, "the child sits one level down");
+        assert_eq!(
+            expanded[1].relative_path,
+            Path::new("dir").join("inner.txt").to_string_lossy(),
+            "the child's relative path includes its parent"
+        );
+
+        fs::remove_dir_all(root).ok();
     }
 
     fn repository() -> PathBuf {
