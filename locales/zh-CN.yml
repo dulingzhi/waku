@@ -824,6 +824,21 @@ files.refresh: 刷新文件
 files.loading: 正在加载文件…
 files.workspace_files: 工作区文件
 files.loading_file: 正在加载文件
+files.format_no_tool: 这个文件没有可用的格式化工具
+files.format_failed: "格式化失败：%{error}"
+files.format_running: 正在格式化…
+files.fold: 折叠
+files.unfold: 展开
+files.toggle_bookmark: 切换书签
+files.next_bookmark: 下一个书签
+files.previous_bookmark: 上一个书签
+files.clear_bookmarks: 清除所有书签
+files.go_to_symbol: 转到符号
+files.symbol_count: "%{count} 个符号"
+files.no_symbols: 这个文件里没有找到符号
+files.no_definition: 没有找到定义
+files.no_usages: 没有找到其他用法
+files.no_name_under_caret: 光标处没有可查找的名字
 files.reading_from_daemon: 正在从守护进程主机读取。
 files.file_unavailable: 文件不可用
 files.loading_editor: 正在加载编辑器

@@ -1688,6 +1688,36 @@ files.workspace_files:
   en: Workspace files
 files.loading_file:
   en: Loading file
+files.format_no_tool:
+  en: No formatter is available for this file
+files.format_failed:
+  en: "Formatting failed: %{error}"
+files.format_running:
+  en: Formatting…
+files.fold:
+  en: Fold
+files.unfold:
+  en: Unfold
+files.toggle_bookmark:
+  en: Toggle bookmark
+files.next_bookmark:
+  en: Next bookmark
+files.previous_bookmark:
+  en: Previous bookmark
+files.clear_bookmarks:
+  en: Clear all bookmarks
+files.go_to_symbol:
+  en: Go to symbol
+files.symbol_count:
+  en: "%{count} symbols"
+files.no_symbols:
+  en: No symbols were found in this file
+files.no_definition:
+  en: No definition found
+files.no_usages:
+  en: No other usages found
+files.no_name_under_caret:
+  en: There is no name under the caret to look up
 files.reading_from_daemon:
   en: Reading from the daemon host.
 files.file_unavailable:
