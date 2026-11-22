@@ -149,9 +149,33 @@ impl DaemonProcess {
         Self::spawn_configured(executable, DaemonExposureSettings::default())
     }
 
+    /// Launch a daemon from `executable`, with `leading_args` before the
+    /// daemon's own options.
+    ///
+    /// `leading_args` is what lets one binary hold both jobs: the desktop passes
+    /// `["--daemon"]` and spawns itself, while a standalone daemon binary passes
+    /// nothing. Everything after them (`--bind`, `--parent-pid`, the origins) is
+    /// appended here, so both forms read the same option set.
+    pub fn spawn_configured_with(
+        executable: &Path,
+        settings: DaemonExposureSettings,
+        leading_args: &[&str],
+    ) -> anyhow::Result<Self> {
+        Self::spawn_inner(executable, settings, leading_args, true)
+    }
+
     fn spawn_configured(
         executable: &Path,
         settings: DaemonExposureSettings,
+    ) -> anyhow::Result<Self> {
+        Self::spawn_inner(executable, settings, &[], true)
+    }
+
+    fn spawn_inner(
+        executable: &Path,
+        settings: DaemonExposureSettings,
+        leading_args: &[&str],
+        _watched: bool,
     ) -> anyhow::Result<Self> {
         let settings = settings.validate()?;
         let token = settings.token.clone();
@@ -168,6 +192,7 @@ impl DaemonProcess {
             command.creation_flags(CREATE_NO_WINDOW);
         }
         command
+            .args(leading_args)
             .arg("--bind")
             .arg(settings.bind_address())
             .arg("--parent-pid")
@@ -344,6 +369,10 @@ impl ExecutableStamp {
 
 struct SupervisorInner {
     executable: Option<PathBuf>,
+    /// Arguments this supervisor puts before the daemon's own options, so a
+    /// restart launches the same thing the first start did. `["--daemon"]` when
+    /// the desktop spawns its own binary, empty for a standalone daemon.
+    leading_args: Vec<String>,
     target: Mutex<DaemonTarget>,
     exposure: Mutex<Option<DaemonExposureSettings>>,
     restart: Mutex<()>,
@@ -395,13 +424,30 @@ impl DaemonSupervisor {
         watch_for_rebuilds: bool,
         exposure: DaemonExposureSettings,
     ) -> anyhow::Result<Self> {
+        Self::spawn_configured_with(executable, watch_for_rebuilds, exposure, &[])
+    }
+
+    /// Same as [`Self::spawn_configured`], with arguments placed before the
+    /// daemon's own options.
+    ///
+    /// The desktop passes `["--daemon"]` and spawns its own executable; a
+    /// standalone daemon binary passes nothing. The arguments are kept on the
+    /// supervisor so a restart after a rebuild launches the same thing.
+    pub fn spawn_configured_with(
+        executable: &Path,
+        watch_for_rebuilds: bool,
+        exposure: DaemonExposureSettings,
+        leading_args: &[&str],
+    ) -> anyhow::Result<Self> {
         let exposure = exposure.validate()?;
-        let process = DaemonProcess::spawn_configured(executable, exposure.clone())?;
+        let process =
+            DaemonProcess::spawn_configured_with(executable, exposure.clone(), leading_args)?;
         let settings = read_settings(&process.client())?;
         let initial_stamp = ExecutableStamp::read(executable)?;
         let supervisor = Self::from_target(
             DaemonTarget::Local(process),
             Some(executable.to_owned()),
+            leading_args.iter().map(|arg| (*arg).to_owned()).collect(),
             Some(exposure),
             settings,
         )?;
@@ -425,6 +471,7 @@ impl DaemonSupervisor {
                 token,
             },
             None,
+            Vec::new(),
             None,
             settings,
         )?;
@@ -439,12 +486,14 @@ impl DaemonSupervisor {
     fn from_target(
         target: DaemonTarget,
         executable: Option<PathBuf>,
+        leading_args: Vec<String>,
         exposure: Option<DaemonExposureSettings>,
         settings: DaemonSettings,
     ) -> anyhow::Result<Self> {
         let (settings_updates, settings_update_rx) = unbounded();
         let inner = Arc::new(SupervisorInner {
             executable,
+            leading_args,
             target: Mutex::new(target),
             exposure: Mutex::new(exposure),
             restart: Mutex::new(()),
@@ -727,7 +776,15 @@ fn replace_local_daemon(
     // Dropping can wait briefly for graceful shutdown, but the target lock is
     // already released so UI actions never block behind process teardown.
     drop(previous);
-    let replacement = DaemonProcess::spawn_configured(executable, exposure.clone())?;
+    let replacement = DaemonProcess::spawn_configured_with(
+        executable,
+        exposure.clone(),
+        &inner
+            .leading_args
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+    )?;
     let client = replacement.client();
     *inner.target.lock() = DaemonTarget::Local(replacement);
     inner
