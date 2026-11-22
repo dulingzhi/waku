@@ -45,6 +45,10 @@ url = "2"
 uuid = { version = "1.18", features = ["v4", "serde"] }
 waku-client = { path = "crates/waku-client" }
 waku-protocol = { path = "crates/waku-protocol" }
+# The daemon body, linked into `waku` so `waku --daemon` and the standalone
+# `waku-daemon` binary are one implementation. The desktop never calls into it
+# directly; it only dispatches to it before starting the GUI.
+waku-daemon = { path = "crates/waku-daemon" }
 pulldown-cmark = "0.13"
 # Native, offline math typesetting; all layout and raster work runs on workers.
 ratex-parser = "=0.1.14"

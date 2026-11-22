@@ -9,6 +9,13 @@ readme = "README.md"
 [features]
 dev-binary = []
 
+# The daemon's body, so it can be linked into another binary. `waku --daemon`
+# and the standalone `waku-daemon` both call `waku_daemon::run`, which is what
+# keeps a single implementation of what a daemon is.
+[lib]
+name = "waku_daemon"
+path = "src/lib.rs"
+
 [[bin]]
 name = "waku-daemon"
 path = "src/main.rs"

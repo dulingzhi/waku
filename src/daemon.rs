@@ -1,8 +1,8 @@
 //! Desktop ownership of the Waku daemon process.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, anyhow, bail};
+use anyhow::{Context as _, bail};
 
 pub fn start_process() -> anyhow::Result<waku_client::DaemonSupervisor> {
     let address = std::env::var(waku_client::DAEMON_ADDRESS_ENV)
@@ -29,10 +29,14 @@ pub fn start_process() -> anyhow::Result<waku_client::DaemonSupervisor> {
     }
     let app_settings = waku_client::persistence::load_or_create_app_settings()
         .context("could not load desktop daemon settings")?;
-    waku_client::DaemonSupervisor::spawn_configured(
-        &daemon_executable_path()?,
+    // The desktop spawns its own executable with `--daemon`, so shipping one
+    // binary is enough: the same file is the GUI and the daemon.
+    let (executable, leading) = daemon_launch_target()?;
+    waku_client::DaemonSupervisor::spawn_configured_with(
+        &executable,
         cfg!(debug_assertions),
         app_settings.daemon_exposure,
+        &leading,
     )
 }
 
@@ -63,9 +67,28 @@ pub fn local_hostname() -> Option<String> {
         .find(|hostname| !hostname.is_empty())
 }
 
-fn daemon_executable_path() -> anyhow::Result<PathBuf> {
+/// The program to launch as the daemon, and the arguments that select that mode.
+///
+/// Normally this is the running executable plus `--daemon`: one file holds the
+/// GUI and the daemon, so a package ships a single program.
+///
+/// A separate `waku-daemon` binary still wins when one is present, and
+/// `WAKU_DAEMON_PATH` overrides both. That escape hatch is what lets a
+/// development build run the daemon from Cargo's `debug` directory — the
+/// watcher relinks that file and the supervisor swaps only the daemon — and it
+/// is also how a host that wants the daemon under a service manager points at
+/// it explicitly.
+fn daemon_launch_target() -> anyhow::Result<(PathBuf, Vec<&'static str>)> {
     if let Some(path) = std::env::var_os("WAKU_DAEMON_PATH").filter(|path| !path.is_empty()) {
-        return Ok(path.into());
+        // An explicit path names a daemon binary, which needs no mode flag. If
+        // it *is* this executable, `--daemon` is still required.
+        let path: PathBuf = path.into();
+        let leading = if same_file(&path)? {
+            vec!["--daemon"]
+        } else {
+            Vec::new()
+        };
+        return Ok((path, leading));
     }
     let executable = format!("waku-daemon{}", std::env::consts::EXE_SUFFIX);
     let current = std::env::current_exe().context("could not locate the Waku executable")?;
@@ -80,25 +103,27 @@ fn daemon_executable_path() -> anyhow::Result<PathBuf> {
     {
         let external = debug_directory.join(&executable);
         if external.is_file() {
-            return Ok(external);
+            return Ok((external, Vec::new()));
         }
     }
 
-    let sibling = current
-        .parent()
-        .map(|directory| directory.join(&executable))
-        .ok_or_else(|| anyhow!("Waku executable has no parent directory"))?;
-    if sibling.is_file() {
-        return Ok(sibling);
+    if let Some(directory) = current.parent() {
+        let sibling = directory.join(&executable);
+        if sibling.is_file() {
+            return Ok((sibling, Vec::new()));
+        }
     }
-    #[cfg(debug_assertions)]
-    bail!(
-        "Waku daemon was not found in Cargo's debug directory or next to the app executable: {}",
-        sibling.display(),
-    );
-    #[cfg(not(debug_assertions))]
-    bail!(
-        "Waku daemon is missing next to the app executable: {}",
-        sibling.display(),
-    )
+    // No separate daemon on disk: spawn this executable in daemon mode.
+    Ok((current, vec!["--daemon"]))
+}
+
+/// Whether `path` names the executable currently running.
+///
+/// Compared by canonical path rather than by name: a daemon binary and the app
+/// binary can share a directory, and only the app needs the mode flag.
+fn same_file(path: &Path) -> anyhow::Result<bool> {
+    let current = std::env::current_exe().context("could not locate the Waku executable")?;
+    let current = std::fs::canonicalize(&current).unwrap_or(current);
+    let other = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    Ok(current == other)
 }
