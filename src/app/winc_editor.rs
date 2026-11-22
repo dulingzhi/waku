@@ -1423,6 +1423,20 @@ impl Render for WincEditor {
         let font_size = self.font_size;
         let row_height = self.row_height;
         let scroll = self.scroll.clone();
+        // The body lives in a scrolling column whose height comes from its
+        // children, so asking to fill the parent resolves against an indefinite
+        // height and collapses to zero — which is what left every file blank
+        // under a gutter that still showed its numbers. It states the height its
+        // rows need instead, the same way the gutter beside it does, and never
+        // shrinks below the viewport so a short file still has somewhere to
+        // click and put the caret.
+        let rows_height = row_height * self.buffer.row_count().max(1) as f32;
+        let viewport_height = self.scroll.bounds().size.height;
+        let content_height = if viewport_height > rows_height {
+            viewport_height
+        } else {
+            rows_height
+        };
 
         let field = canvas(
             |_, _, _| (),
@@ -1432,19 +1446,27 @@ impl Render for WincEditor {
                 let mut caret: Option<Bounds<Pixels>> = None;
 
                 editor.update(cx, |editor, cx| {
+                    // The window the rows are visible through is the scroll
+                    // container's, not the canvas's: the canvas now spans the
+                    // whole document so the column has a definite height to
+                    // size, and the rows outside the viewport are clipped.
+                    let viewport = scroll.bounds();
                     let offset = scroll.offset();
                     let scroll_top = (-offset.y).max(Pixels::ZERO);
                     let painted = visible_lines(
                         &editor.buffer,
                         editor.highlighter.as_mut(),
                         f32::from(scroll_top),
-                        f32::from(bounds.size.height),
+                        f32::from(viewport.size.height),
                         f32::from(row_height),
                         &palette,
                     );
 
-                    let mut y = bounds.top();
                     for row in &painted {
+                        // Content coordinates, not viewport ones: the canvas now
+                        // spans the whole document, so a row sits at its display
+                        // index and scrolling moves the canvas itself.
+                        let y = bounds.top() + row_height * row.row as f32;
                         let text: SharedString = row.text.clone().into();
                         let runs = runs_for(row, text_color);
                         // `force_width` is an advance width, not a minimum: GPUI
@@ -1540,7 +1562,6 @@ impl Render for WincEditor {
                             shaped,
                             top: y,
                         });
-                        y += row_height;
                     }
 
                     editor.rows = rows;
@@ -1638,11 +1659,12 @@ impl Render for WincEditor {
                 window.handle_input(&focus, ElementInputHandler::new(bounds, editor.clone()), cx);
             },
         )
-        .size_full();
+        .w_full()
+        .h(content_height);
 
         div()
             .key_context("WincEditor")
-            .size_full()
+            .w_full()
             .relative()
             .cursor(CursorStyle::IBeam)
             .track_focus(&self.focus_handle)
@@ -2290,6 +2312,72 @@ mod tests {
                 found,
                 vec!["helper".to_owned()],
                 "only the call site is a use: not the definition, not the comment"
+            );
+        });
+    }
+
+    /// The panel scrolls a content row whose height comes from its children, so
+    /// a body that asks for "full height" has no definite parent height to
+    /// resolve against and collapses to zero. `visible_lines` is then handed a
+    /// zero-height viewport and paints no rows at all: a blank body under a
+    /// gutter that still shows its numbers, because the gutter sets its own
+    /// height explicitly.
+    ///
+    /// The harness mirrors the panel's arrangement — a scrolling box, an
+    /// auto-height row aligned to start, and the editor in a growable column —
+    /// because the bug lives in that arrangement, not in the editor's own code.
+    #[gpui::test]
+    fn the_body_is_laid_out_tall_enough_to_paint_its_rows(cx: &mut TestAppContext) {
+        struct Harness {
+            editor: Entity<WincEditor>,
+            scroll: ScrollHandle,
+        }
+
+        impl Render for Harness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    div()
+                        .id("scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_start()
+                                .child(div().flex_1().min_w_0().child(self.editor.clone())),
+                        ),
+                )
+            }
+        }
+
+        let (harness, cx) = cx.add_window_view(|_, cx| {
+            let scroll = ScrollHandle::new();
+            let editor = cx.new(|cx| {
+                let mut editor = WincEditor::new("sample.rs", None, px(13.0), scroll.clone(), cx);
+                editor.set_content("fn main() {\n    let a = 1;\n}\n", cx);
+                editor
+            });
+            Harness { editor, scroll }
+        });
+        let editor = cx.read_entity(&harness, |harness, _| harness.editor.clone());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        cx.read_entity(&editor, |editor, _| {
+            let bounds = editor
+                .text_bounds
+                .expect("the body must reach its paint pass");
+            assert!(
+                bounds.size.height > Pixels::ZERO,
+                "the body was laid out {} tall, so it had no viewport to paint rows into",
+                bounds.size.height
+            );
+            assert!(
+                !editor.rows.is_empty(),
+                "a body with a real height must paint the rows it can see"
             );
         });
     }
