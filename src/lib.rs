@@ -150,6 +150,12 @@ actions!(
         ToggleFindWholeWord,
         ToggleFindRegex,
         ReplaceAllMatches,
+        // Go to symbol in the visible file.
+        ToggleFileSymbols,
+        FileSymbolNext,
+        FileSymbolPrevious,
+        AcceptFileSymbol,
+        CloseFileSymbols,
         BrowserBack,
         BrowserForward,
         BrowserReload,
@@ -348,6 +354,14 @@ pub fn run() {
                 KeyBinding::new("secondary-alt-r", ToggleFindRegex, Some("FileEditorPane")),
                 KeyBinding::new("shift-enter", FindPrevious, Some("FindBar")),
                 KeyBinding::new("secondary-alt-enter", ReplaceAllMatches, Some("FindBar")),
+                // Go to symbol, scoped to the editor pane: the same chord in the
+                // composer means something else. Escape closes the list, which is
+                // why it is bound before the pane's own escape.
+                KeyBinding::new("secondary-alt-o", ToggleFileSymbols, Some("FileEditorPane")),
+                KeyBinding::new("escape", CloseFileSymbols, Some("FileSymbols")),
+                KeyBinding::new("up", FileSymbolPrevious, Some("FileSymbols")),
+                KeyBinding::new("down", FileSymbolNext, Some("FileSymbols")),
+                KeyBinding::new("enter", AcceptFileSymbol, Some("FileSymbols")),
                 // Browser surface. Deeper than "Waku", so while focus is on the
                 // page or its address bar the browser reads the platform's
                 // conventional navigation shortcuts; the same keys elsewhere

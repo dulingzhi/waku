@@ -43,6 +43,7 @@ use super::winc_paint::visible_lines;
 use super::winc_view::{EditorPalette, runs_for};
 use crate::input::InputEvent;
 use crate::theme::Theme;
+use winc_core::transform::Case;
 use winc_editor::Command as WincCommand;
 
 /// Rows past the viewport kept painted, so a fast scroll never shows a blank
@@ -54,6 +55,13 @@ const CURSOR_BLINK_PAUSE: Duration = Duration::from_millis(300);
 
 /// One caret blink half-period.
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How long a formatter may run before Winc kills it.
+///
+/// A formatter is an external process on the user's machine; without a bound, a
+/// tool that waits on stdin or a locked file would hold the job forever and the
+/// editor would look hung.
+const FORMAT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The caret's blink phase.
 ///
@@ -149,6 +157,16 @@ pub struct WincEditor {
     /// The caret offset the viewport has already been scrolled to, so an
     /// unrelated repaint does not fight the user's own scrolling.
     followed: Option<usize>,
+    /// Where the file lives, for the formatter, which runs a tool against a real
+    /// path. `None` until the panel resolves the project root.
+    file_path: Option<std::path::PathBuf>,
+    /// Winc's extra cursors, in bytes, mirrored here so the paint pass can wash
+    /// them. The document owns the real ones; this is a copy taken after each
+    /// command, because painting holds a shared borrow and cannot refresh it.
+    extra_selections: Vec<Range<usize>>,
+    /// A one-line explanation for a command that found nothing, painted under
+    /// the caret and cleared on the next keystroke.
+    hint_text: Option<String>,
 }
 
 /// One painted row, kept for hit testing.
@@ -158,6 +176,10 @@ pub struct WincEditor {
 #[derive(Clone)]
 struct PaintedRow {
     line: usize,
+    /// The display row this line occupies. Several lines share one row while a
+    /// block is collapsed, which is why hit testing keys on the paint order
+    /// rather than on the line number.
+    row: usize,
     /// The row's text, without its newline.
     text: SharedString,
     shaped: ShapedLine,
@@ -166,8 +188,15 @@ struct PaintedRow {
 }
 
 impl WincEditor {
+    /// Build an editor for a file in the panel.
+    ///
+    /// `file_name` is the panel's project-relative path, which is what picks the
+    /// language — Winc resolves it by name. `absolute_path` is where the file
+    /// lives, needed only by the formatter, which runs a tool against a real
+    /// path and must find the project's config beside it.
     pub fn new(
         file_name: &str,
+        absolute_path: Option<std::path::PathBuf>,
         font_size: Pixels,
         scroll: ScrollHandle,
         cx: &mut Context<Self>,
@@ -194,7 +223,19 @@ impl WincEditor {
             page_lines: 30,
             selecting: false,
             followed: None,
+            file_path: absolute_path,
+            extra_selections: Vec::new(),
+            hint_text: None,
         }
+    }
+
+    /// Point the editor at the file's real path, once the panel knows it.
+    ///
+    /// The panel can open a file before it knows which project it belongs to —
+    /// the path is resolved from the selected workspace, which can land a frame
+    /// later — so this is set separately rather than required at construction.
+    pub fn set_file_path(&mut self, path: std::path::PathBuf) {
+        self.file_path = Some(path);
     }
 
     pub fn row_height(&self) -> Pixels {
@@ -290,7 +331,13 @@ impl WincEditor {
     pub fn position_for_offset(&self, offset: usize) -> Option<(Point<Pixels>, Pixels)> {
         let bounds = self.text_bounds?;
         let line = self.buffer.line_of_byte(offset);
-        let row = self.rows.iter().find(|row| row.line == line)?;
+        // Folds mean a line can share a row with the block header above it, so
+        // the painted row carrying it is the one whose display row matches;
+        // searching by line alone would miss a line hidden inside a fold.
+        let row = self.rows.iter().find(|row| row.line == line).or_else(|| {
+            let display = self.buffer.row_of(line);
+            self.rows.iter().find(|row| row.row == display)
+        })?;
         let column = offset.saturating_sub(self.buffer.line_start_byte(line));
         let x = row.shaped.x_for_index(column.min(row.text.len()));
         Some((point(bounds.left() + x, row.top), self.row_height))
@@ -400,7 +447,11 @@ impl WincEditor {
         let after = self.buffer.text();
         self.selection = self.buffer.selected_range();
         self.reversed = self.buffer.selection_reversed();
+        self.extra_selections = self.buffer.extra_selections();
         self.marked = None;
+        // Any command dismisses a hint: it was about the caret's old position,
+        // and leaving it up would describe a name that is no longer there.
+        self.hint_text = None;
 
         if before != after {
             // Both texts are already materialised by the comparison, so finding
@@ -486,6 +537,304 @@ impl WincEditor {
             return;
         }
         self.run(WincCommand::Redo, cx);
+    }
+
+    // ---- Folding ----------------------------------------------------------
+
+    /// Run one of Winc's fold commands at the caret.
+    ///
+    /// Folding changes which lines are painted, not the text, so it must not go
+    /// through [`Self::run`]: that compares texts to decide what to re-lex and
+    /// would find nothing changed. What it does have to do is push the caret
+    /// into the document, because Winc folds the block around the *document's*
+    /// selection.
+    fn fold(&mut self, command: winc_editor::FoldCommand, cx: &mut Context<Self>) {
+        if self.buffer.is_read_only() {
+            return;
+        }
+        self.sync_selection_to_buffer();
+        if !self.buffer.run_fold(command) {
+            return;
+        }
+        // A fold can hide the caret's own line, and Winc moves the selection out
+        // of a collapsed block when that happens.
+        self.selection = self.buffer.selected_range();
+        self.reversed = self.buffer.selection_reversed();
+        self.extra_selections = self.buffer.extra_selections();
+        self.rows.clear();
+        cx.notify();
+    }
+
+    /// Collapse or expand the block whose gutter arrow sits on `line`.
+    ///
+    /// This is what a click on the gutter calls. A click is a hit test on the
+    /// painted rows, so the caller has already resolved the row back to a line.
+    pub fn toggle_fold_at(&mut self, line: usize, cx: &mut Context<Self>) {
+        if self.buffer.is_read_only() {
+            return;
+        }
+        if !self.buffer.toggle_fold_at(line) {
+            return;
+        }
+        // Collapsing the block the caret is in would leave it invisible; Winc
+        // keeps the selection out of folded regions when the fold command runs,
+        // and a gutter click has to do the same by hand.
+        if let Some((first, last)) = self.buffer.collapsed_span(line) {
+            let hidden = self.buffer.line_start_byte(first)
+                ..self.buffer.line_start_byte(last.saturating_add(1));
+            if hidden.contains(&self.selection.end) {
+                let header = self.buffer.line_start_byte(line);
+                self.selection = header..header;
+                self.reversed = false;
+                self.sync_selection_to_buffer();
+            }
+        }
+        self.rows.clear();
+        cx.notify();
+    }
+
+    /// Every line that opens a block, for the gutter to draw an arrow beside.
+    ///
+    /// Resolved from the painted rows rather than the whole file: a Markdown
+    /// fence costs a scan upward, so asking about every line of a long file
+    /// would be the thing that made opening it crawl.
+    pub fn block_starts(&mut self, lines: &[usize]) -> Vec<usize> {
+        let mut starts: Vec<usize> = lines
+            .iter()
+            .copied()
+            .filter(|line| self.buffer.starts_block(*line))
+            .collect();
+        starts.sort_unstable();
+        starts.dedup();
+        starts
+    }
+
+    /// Whether `line` is currently collapsed, so its gutter arrow points closed.
+    pub fn is_line_collapsed(&self, line: usize) -> bool {
+        self.buffer.is_collapsed(line)
+    }
+
+    /// Whether the document has any collapsed block.
+    ///
+    /// Asked by the outline: a file with nothing folded numbers every line, so
+    /// the gutter can take the cheap path and skip the row→line mapping.
+    pub fn has_folds(&self) -> bool {
+        self.buffer.has_folds()
+    }
+
+    // ---- Bookmarks --------------------------------------------------------
+
+    /// Toggle a bookmark on the caret's line, through Winc's own bookmark map.
+    fn toggle_bookmark(&mut self, cx: &mut Context<Self>) {
+        self.sync_selection_to_buffer();
+        if !self.buffer.toggle_bookmark() {
+            return;
+        }
+        cx.notify();
+    }
+
+    /// Move the caret to the next bookmarked line, wrapping at the end.
+    fn next_bookmark(&mut self, cx: &mut Context<Self>) {
+        let Some(line) = self.buffer.next_bookmark_line() else {
+            return;
+        };
+        self.jump_to_line(line, cx);
+    }
+
+    fn previous_bookmark(&mut self, cx: &mut Context<Self>) {
+        let Some(line) = self.buffer.previous_bookmark_line() else {
+            return;
+        };
+        self.jump_to_line(line, cx);
+    }
+
+    fn clear_bookmarks(&mut self, cx: &mut Context<Self>) {
+        self.buffer.clear_bookmarks();
+        cx.notify();
+    }
+
+    /// The bookmarked lines, so the gutter can mark them.
+    pub fn bookmarked_lines(&self) -> Vec<usize> {
+        self.buffer.bookmark_lines()
+    }
+
+    /// Put the caret at the start of `line` and scroll it into view.
+    fn jump_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        let offset = self.buffer.line_start_byte(line);
+        self.selection = offset..offset;
+        self.reversed = false;
+        self.sync_selection_to_buffer();
+        self.blink.pause(cx);
+        // `followed` is what makes the paint pass scroll to the caret; clearing
+        // it here would skip the scroll, so the offset is deliberately left
+        // different from the previous one.
+        cx.notify();
+    }
+
+    // ---- Multi-cursor -----------------------------------------------------
+
+    /// Add a cursor on the line above or below, as Winc's column cursors do.
+    fn add_cursor_vertically(&mut self, down: bool, cx: &mut Context<Self>) {
+        if self.buffer.is_read_only() {
+            return;
+        }
+        self.sync_selection_to_buffer();
+        let tab_width = self.buffer.tab_width();
+        if self.buffer.add_cursor_vertically(down, tab_width) {
+            self.adopt_cursor_set(cx);
+        }
+    }
+
+    /// Select the next occurrence of the current selection, adding a cursor.
+    fn add_next_occurrence(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.is_read_only() {
+            return;
+        }
+        self.sync_selection_to_buffer();
+        if self.buffer.add_next_occurrence().unwrap_or(false) {
+            self.adopt_cursor_set(cx);
+        }
+    }
+
+    /// Put a cursor on every occurrence of the selection.
+    fn select_all_occurrences(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.is_read_only() {
+            return;
+        }
+        self.sync_selection_to_buffer();
+        if self.buffer.select_all_occurrences().unwrap_or(0) > 1 {
+            self.adopt_cursor_set(cx);
+        }
+    }
+
+    /// Take Winc's cursor set back into the view after a cursor command.
+    ///
+    /// Winc keeps the extra selections; this view keeps the primary one. Both
+    /// have to agree or the washes and the next edit disagree about where the
+    /// carets are.
+    fn adopt_cursor_set(&mut self, cx: &mut Context<Self>) {
+        self.selection = self.buffer.selected_range();
+        self.reversed = self.buffer.selection_reversed();
+        self.extra_selections = self.buffer.extra_selections();
+        self.rows.clear();
+        cx.notify();
+    }
+
+    /// Drop every cursor but the primary, as Escape does.
+    fn collapse_cursors(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.collapse_selections() {
+            self.adopt_cursor_set(cx);
+        }
+    }
+
+    // ---- Structural edits the Command enum does not cover directly --------
+
+    /// Open an empty line below the caret and put the caret on it.
+    ///
+    /// Winc has `InsertLinesAbove` as a command but no "below" counterpart: its
+    /// own UI opens a line below by moving to the line's end and inserting a
+    /// newline. That is what this does, so the result goes through the same
+    /// undo entry as an ordinary Enter.
+    fn insert_line_below(&mut self, cx: &mut Context<Self>) {
+        self.run(WincCommand::LineEnd { extend: false }, cx);
+        self.run(WincCommand::Newline, cx);
+    }
+
+    // ---- Formatting, through Winc's tool runner ---------------------------
+
+    /// Which formatter Winc would run for this file, if any.
+    ///
+    /// Asked before the key does anything, so the panel can say "no formatter
+    /// for this language" rather than a chord that silently does nothing.
+    pub fn formatter(&self) -> Option<String> {
+        let path = self.file_path.clone()?;
+        let plan = self.formatter_plan(&path)?;
+        Some(plan.tool().into_owned())
+    }
+
+    /// The format plan for this document, as Winc resolves it.
+    ///
+    /// `Plan` is Winc's own tool selection: the project's configured command,
+    /// else a preset for the language, else a guess. Waku does not keep a
+    /// language→tool table of its own.
+    fn formatter_plan(&self, path: &std::path::Path) -> Option<winc_editor::format::Plan> {
+        let root = path.parent();
+        winc_editor::format::Plan::new(self.buffer.language(), path, root, None).ok()
+    }
+
+    /// Format the whole document with whichever tool Winc picks.
+    ///
+    /// The job runs off the UI thread: a formatter is an external process and
+    /// can take a second on a large file. Winc returns the edits as a list of
+    /// changes rather than a new string, so the document keeps its scroll
+    /// position, its folds and its undo history — and Ctrl+Z undoes the
+    /// formatting as one step instead of replaying thousands of splices.
+    ///
+    /// Every failure says why: no tool for the language, or the tool's own
+    /// error. A format key that silently does nothing is the thing users report
+    /// as broken.
+    fn format_document(&mut self, cx: &mut Context<Self>) {
+        if self.buffer.is_read_only() {
+            return;
+        }
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+        // Asked first so the "no formatter" case can be reported without
+        // spawning anything.
+        if self.formatter().is_none() {
+            self.hint(tr!("files.format_no_tool"), cx);
+            return;
+        }
+        let Some(job) = self.format_job() else {
+            return;
+        };
+        let cancel = winc_editor::format::Cancel::default();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let formatter = winc_editor::format::Formatter::default();
+                    formatter.run(job, &cancel)
+                })
+                .await;
+            let formatted = match result {
+                Ok(formatted) => formatted,
+                Err(error) => {
+                    let message = tr!("files.format_failed", error = error.to_string());
+                    this.update(cx, |this, cx| this.hint(message, cx)).ok();
+                    return;
+                }
+            };
+            if formatted.changes.is_empty() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.buffer.apply_changes(formatted.changes);
+                this.selection = this.buffer.selected_range();
+                this.reversed = this.buffer.selection_reversed();
+                this.invalidate_highlight(0);
+                this.rows.clear();
+                cx.emit(InputEvent::Edited);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        let _ = path;
+    }
+
+    /// The format job for this document's current text, if a tool resolves.
+    fn format_job(&self) -> Option<winc_editor::format::Job> {
+        let path = self.file_path.clone()?;
+        let plan = self.formatter_plan(&path)?;
+        let text = self.buffer.rope()?;
+        Some(winc_editor::format::Job {
+            plan,
+            text,
+            line_ending: self.buffer.line_ending(),
+            timeout: FORMAT_TIMEOUT,
+        })
     }
 
     /// The colours this editor paints with, read from the theme at paint time
@@ -632,9 +981,7 @@ impl WincEditor {
         Some(start - row.start..end - row.start)
     }
 
-    /// Search-match ranges overlapping `row`, in row-relative bytes, with the
-    /// index of each match in `self.search_matches` so the caller can tell the
-    /// current match from its siblings.
+    /// The primary selection's wash on `row`, in row-relative bytes.
     fn search_wash_ranges(&self, row: &Range<usize>) -> Vec<(usize, Range<usize>)> {
         self.search_matches
             .iter()
@@ -648,6 +995,25 @@ impl WincEditor {
                     return None;
                 }
                 Some((index, start - row.start..end - row.start))
+            })
+            .collect()
+    }
+
+    /// Winc's extra cursors' washes on `row`, in row-relative bytes.
+    ///
+    /// Same clipping as [`Self::selection_wash`], applied to each of the extra
+    /// selections so a multi-cursor edit is visible on every row it touches
+    /// rather than only where the primary caret happens to be.
+    fn extra_selection_washes(&self, row: &Range<usize>) -> Vec<Range<usize>> {
+        self.extra_selections
+            .iter()
+            .filter_map(|selection| {
+                let start = selection.start.max(row.start);
+                let end = selection.end.min(row.end);
+                if start >= end {
+                    return None;
+                }
+                Some(start - row.start..end - row.start)
             })
             .collect()
     }
@@ -908,17 +1274,23 @@ impl WincEditor {
     ///
     /// Resolved by Winc's own scanner, then selected so the caret lands on the
     /// name rather than merely on its line.
+    ///
+    /// Every failure says why in a hint. Winc's own UI does the same: a key that
+    /// silently does nothing is indistinguishable from a broken key.
     fn goto_definition(&mut self, cx: &mut Context<Self>) {
         // The caret the user sees lives in this view; the buffer's own cursor is
         // only current after a sync, so reading it first would look up whatever
         // name was under the caret the last time a command ran.
         self.sync_selection_to_buffer();
         let Some((name, _)) = self.buffer.name_under_caret() else {
+            self.hint(tr!("files.no_name_under_caret"), cx);
             return;
         };
         let Some(offset) = self.definition_of(&name) else {
+            self.hint(tr!("files.no_definition"), cx);
             return;
         };
+        self.clear_hint();
         self.select_range(offset..offset + name.len(), cx);
     }
 
@@ -931,27 +1303,50 @@ impl WincEditor {
         // after a sync, and a stale one looks up the wrong name.
         self.sync_selection_to_buffer();
         let Some((name, _)) = self.buffer.name_under_caret() else {
+            self.hint(tr!("files.no_name_under_caret"), cx);
             return;
         };
         let usages = self.usages_of(&name);
         if usages.is_empty() {
             self.set_search_matches(Vec::new(), None, cx);
+            self.hint(tr!("files.no_usages"), cx);
             return;
         }
+        self.clear_hint();
         let first = usages[0].clone();
         self.set_search_matches(usages, Some(0), cx);
         self.select_range(first, cx);
     }
 
+    /// Show a one-line explanation at the caret, cleared on the next keystroke.
+    fn hint(&mut self, text: String, cx: &mut Context<Self>) {
+        self.hint_text = Some(text);
+        cx.notify();
+    }
+
+    fn clear_hint(&mut self) {
+        if self.hint_text.take().is_some() {
+            // The caller repaints; nothing else to do here.
+        }
+    }
+
+    /// The hint to paint under the caret, if one is showing.
+    pub fn hint_text(&self) -> Option<&str> {
+        self.hint_text.as_deref()
+    }
+
     /// Select the `index`th symbol in this file.
     ///
     /// The other half of the symbol palette: it jumps, given a list to jump
-    /// from. Marked with `symbols` because both wait on that palette.
-    #[allow(dead_code, reason = "see `symbols`")]
-    fn goto_symbol(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// from. The panel's picker reads [`Self::symbols`] and calls this with the
+    /// chosen index, so the scan and the jump stay one implementation of what a
+    /// symbol is.
+    pub fn goto_symbol(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(symbol) = self.symbols().into_iter().nth(index) else {
+            self.hint(tr!("files.no_symbols"), cx);
             return;
         };
+        self.clear_hint();
         self.select_range(symbol.offset..symbol.offset + symbol.name.len(), cx);
     }
 }
@@ -1007,6 +1402,8 @@ impl Render for WincEditor {
         // directly: the palette is what decides how an unclassified run looks,
         // and reading it from two places is how they drift apart.
         let text_color = palette.text;
+        let hint_text_color = theme.text;
+        let hint_background = theme.surface;
         let editor = cx.entity();
         let focus = self.focus_handle.clone();
         let font_size = self.font_size;
@@ -1071,6 +1468,20 @@ impl Render for WincEditor {
                                 0.0,
                             ));
                         }
+                        // Winc's extra cursors, washed like the primary one so a
+                        // Ctrl+D is visible as more than a caret that moved.
+                        for range in editor.extra_selection_washes(&row_range) {
+                            let x = shaped.x_for_index(range.start);
+                            let end_x = shaped.x_for_index(range.end);
+                            washes.push((
+                                Bounds::from_corners(
+                                    point(bounds.left() + x, y),
+                                    point(bounds.left() + end_x, y + row_height),
+                                ),
+                                selection_wash,
+                                0.0,
+                            ));
+                        }
                         for (index, range) in editor.search_wash_ranges(&row_range) {
                             // The current match is washed more strongly than its
                             // siblings, which is how the user tells which one
@@ -1104,6 +1515,7 @@ impl Render for WincEditor {
 
                         rows.push(PaintedRow {
                             line: row.line,
+                            row: row.row,
                             text,
                             shaped,
                             top: y,
@@ -1158,6 +1570,50 @@ impl Render for WincEditor {
                     ));
                 }
                 let _ = active_wash;
+
+                // The hint a failed navigation left behind, under the caret's
+                // row. Painted last so it reads over whatever is beneath it.
+                let hint = editor.read(cx).hint_text().map(str::to_owned);
+                if let Some(hint) = hint {
+                    let selection = editor.read(cx).selection.end;
+                    let line = editor.read(cx).buffer.line_of_byte(selection);
+                    let top = editor
+                        .read(cx)
+                        .rows
+                        .iter()
+                        .find(|painted| painted.line == line)
+                        .map(|painted| painted.top)
+                        .unwrap_or(bounds.top());
+                    let text: SharedString = hint.into();
+                    let shaped = window.text_system().shape_line(
+                        text,
+                        font_size,
+                        &[TextRun {
+                            len: 0,
+                            font: gpui::font(crate::md::render::MONO_FAMILY),
+                            color: hint_text_color,
+                            ..Default::default()
+                        }],
+                        None,
+                    );
+                    let padding = px(6.0);
+                    let origin = point(bounds.left() + px(8.0), top + row_height + px(4.0));
+                    window.paint_quad(quad(
+                        Bounds::from_corners(
+                            point(origin.x - padding, origin.y - px(2.0)),
+                            point(
+                                origin.x + shaped.width + padding,
+                                origin.y + row_height + px(2.0),
+                            ),
+                        ),
+                        px(4.0),
+                        hint_background,
+                        px(0.0),
+                        transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                    let _ = shaped.paint(origin, row_height, TextAlign::Left, None, window, cx);
+                }
 
                 window.handle_input(&focus, ElementInputHandler::new(bounds, editor.clone()), cx);
             },
@@ -1329,6 +1785,96 @@ impl Render for WincEditor {
             // Navigation, resolved by Winc's own scanners.
             .on_action(cx.listener(|this, _: &GotoDefinition, _, cx| this.goto_definition(cx)))
             .on_action(cx.listener(|this, _: &FindUsages, _, cx| this.find_usages(cx)))
+            // The structural edits Winc has that the first pass left unbound.
+            .on_action(
+                cx.listener(|this, _: &IndentLines, _, cx| this.run(WincCommand::IndentLines, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &OutdentLines, _, cx| this.run(WincCommand::Outdent, cx)),
+            )
+            .on_action(cx.listener(|this, _: &MoveLinesUp, _, cx| {
+                this.run(WincCommand::MoveLines { down: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MoveLinesDown, _, cx| {
+                this.run(WincCommand::MoveLines { down: true }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyLinesUp, _, cx| {
+                this.run(WincCommand::CopyLines { down: false }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyLinesDown, _, cx| {
+                this.run(WincCommand::CopyLines { down: true }, cx)
+            }))
+            .on_action(cx.listener(|this, _: &InsertLineAbove, _, cx| {
+                this.run(WincCommand::InsertLinesAbove(String::new()), cx)
+            }))
+            .on_action(cx.listener(|this, _: &InsertLineBelow, _, cx| this.insert_line_below(cx)))
+            .on_action(cx.listener(|this, _: &ChangeCaseUpper, _, cx| {
+                this.run(WincCommand::ChangeCase(Case::Upper), cx)
+            }))
+            .on_action(cx.listener(|this, _: &ChangeCaseLower, _, cx| {
+                this.run(WincCommand::ChangeCase(Case::Lower), cx)
+            }))
+            .on_action(cx.listener(|this, _: &ChangeCaseTitle, _, cx| {
+                this.run(WincCommand::ChangeCase(Case::Title), cx)
+            }))
+            // Folding, through Winc's fold commands.
+            .on_action(
+                cx.listener(|this, _: &Fold, _, cx| this.fold(winc_editor::FoldCommand::Fold, cx)),
+            )
+            .on_action(cx.listener(|this, _: &Unfold, _, cx| {
+                this.fold(winc_editor::FoldCommand::Unfold, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleFold, _, cx| {
+                this.fold(winc_editor::FoldCommand::Toggle, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FoldRecursively, _, cx| {
+                this.fold(winc_editor::FoldCommand::FoldRecursively, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UnfoldRecursively, _, cx| {
+                this.fold(winc_editor::FoldCommand::UnfoldRecursively, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FoldAll, _, cx| {
+                this.fold(winc_editor::FoldCommand::FoldAll, cx)
+            }))
+            .on_action(cx.listener(|this, _: &UnfoldAll, _, cx| {
+                this.fold(winc_editor::FoldCommand::UnfoldAll, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FoldLevel1, _, cx| {
+                this.fold(winc_editor::FoldCommand::FoldLevel(1), cx)
+            }))
+            .on_action(cx.listener(|this, _: &FoldLevel2, _, cx| {
+                this.fold(winc_editor::FoldCommand::FoldLevel(2), cx)
+            }))
+            .on_action(cx.listener(|this, _: &FoldLevel3, _, cx| {
+                this.fold(winc_editor::FoldCommand::FoldLevel(3), cx)
+            }))
+            // Bookmarks.
+            .on_action(cx.listener(|this, _: &ToggleBookmark, _, cx| this.toggle_bookmark(cx)))
+            .on_action(cx.listener(|this, _: &NextBookmark, _, cx| this.next_bookmark(cx)))
+            .on_action(cx.listener(|this, _: &PreviousBookmark, _, cx| this.previous_bookmark(cx)))
+            .on_action(cx.listener(|this, _: &ClearBookmarks, _, cx| this.clear_bookmarks(cx)))
+            // Multi-cursor, driven by Winc's cursor set.
+            .on_action(
+                cx.listener(|this, _: &AddCursorAbove, _, cx| {
+                    this.add_cursor_vertically(false, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &AddCursorBelow, _, cx| this.add_cursor_vertically(true, cx)),
+            )
+            .on_action(cx.listener(|this, _: &AddCursorToNextOccurrence, _, cx| {
+                this.add_next_occurrence(cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &SelectAllOccurrences, _, cx| {
+                    this.select_all_occurrences(cx)
+                }),
+            )
+            // Escape collapses extra cursors before anything else sees it, which
+            // is what a user reaching for Escape after a stray Ctrl+D expects.
+            .on_action(cx.listener(|this, _: &CollapseCursors, _, cx| this.collapse_cursors(cx)))
+            // Formatting through whichever tool Winc resolves for the language.
+            .on_action(cx.listener(|this, _: &FormatDocument, _, cx| this.format_document(cx)))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1388,6 +1934,45 @@ actions!(
         Newline,
         GotoDefinition,
         FindUsages,
+        // The rest of Winc's structural edits, which the first pass left out.
+        IndentLines,
+        OutdentLines,
+        MoveLinesUp,
+        MoveLinesDown,
+        CopyLinesUp,
+        CopyLinesDown,
+        InsertLineAbove,
+        InsertLineBelow,
+        ChangeCaseUpper,
+        ChangeCaseLower,
+        ChangeCaseTitle,
+        // Folding: Winc's own command family, one action each because GPUI
+        // dispatches on the action's type and a payload would need serde.
+        Fold,
+        Unfold,
+        ToggleFold,
+        FoldRecursively,
+        UnfoldRecursively,
+        FoldAll,
+        UnfoldAll,
+        FoldLevel1,
+        FoldLevel2,
+        FoldLevel3,
+        // Bookmarks.
+        ToggleBookmark,
+        NextBookmark,
+        PreviousBookmark,
+        ClearBookmarks,
+        // Navigation with feedback, and the symbol jump.
+        GoToSymbol,
+        // Multi-cursor: Winc's own cursor commands.
+        AddCursorAbove,
+        AddCursorBelow,
+        AddCursorToNextOccurrence,
+        SelectAllOccurrences,
+        CollapseCursors,
+        // Formatting through Winc's tool runner.
+        FormatDocument,
     ]
 );
 
@@ -1443,6 +2028,52 @@ pub fn init(cx: &mut App) {
         // shift-F12 for references.
         KeyBinding::new("f12", GotoDefinition, Some("WincEditor")),
         KeyBinding::new("shift-f12", FindUsages, Some("WincEditor")),
+        // The rest of Winc's structural edits. Ctrl+Enter is what its own UI
+        // uses for "open a line below"; the move/copy chord is VS Code's, which
+        // is what a user of this panel will already have in their fingers.
+        KeyBinding::new("ctrl-]", IndentLines, Some("WincEditor")),
+        KeyBinding::new("ctrl-[", OutdentLines, Some("WincEditor")),
+        KeyBinding::new("alt-up", MoveLinesUp, Some("WincEditor")),
+        KeyBinding::new("alt-down", MoveLinesDown, Some("WincEditor")),
+        KeyBinding::new("alt-shift-up", CopyLinesUp, Some("WincEditor")),
+        KeyBinding::new("alt-shift-down", CopyLinesDown, Some("WincEditor")),
+        KeyBinding::new("ctrl-enter", InsertLineBelow, Some("WincEditor")),
+        KeyBinding::new("ctrl-shift-enter", InsertLineAbove, Some("WincEditor")),
+        // Case changes, on the chord VS Code uses. Lower-case gets Ctrl+U
+        // because `ctrl-shift-l` is Winc's select-all-occurrences below.
+        KeyBinding::new("ctrl-shift-u", ChangeCaseUpper, Some("WincEditor")),
+        KeyBinding::new("ctrl-u", ChangeCaseLower, Some("WincEditor")),
+        // Folding. Ctrl+Shift+[ / ] is the fold/unfold pair everywhere; the
+        // recursive and whole-file variants take the modifier the editors that
+        // have them use.
+        KeyBinding::new("ctrl-shift-[", Fold, Some("WincEditor")),
+        KeyBinding::new("ctrl-shift-]", Unfold, Some("WincEditor")),
+        KeyBinding::new("ctrl-k", ToggleFold, Some("WincEditor")),
+        KeyBinding::new("ctrl-shift-alt-[", FoldRecursively, Some("WincEditor")),
+        KeyBinding::new("ctrl-shift-alt-]", UnfoldRecursively, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-0", FoldAll, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-j", UnfoldAll, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-1", FoldLevel1, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-2", FoldLevel2, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-3", FoldLevel3, Some("WincEditor")),
+        // Bookmarks, on the chord VS Code uses.
+        KeyBinding::new("ctrl-alt-k", ToggleBookmark, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-b", NextBookmark, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-shift-b", PreviousBookmark, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-shift-k", ClearBookmarks, Some("WincEditor")),
+        // Go to symbol, which opens the palette's symbol list.
+        KeyBinding::new("ctrl-shift-o", GoToSymbol, Some("WincEditor")),
+        // Multi-cursor. Ctrl+D adds the next occurrence and is the chord that
+        // makes it discoverable. The column-cursor pair takes Ctrl+Alt+arrows,
+        // which VS Code uses too and which does not collide with line-move
+        // (`alt-up`/`alt-down`) above.
+        KeyBinding::new("ctrl-alt-up", AddCursorAbove, Some("WincEditor")),
+        KeyBinding::new("ctrl-alt-down", AddCursorBelow, Some("WincEditor")),
+        KeyBinding::new("ctrl-d", AddCursorToNextOccurrence, Some("WincEditor")),
+        KeyBinding::new("ctrl-shift-l", SelectAllOccurrences, Some("WincEditor")),
+        KeyBinding::new("escape", CollapseCursors, Some("WincEditor")),
+        // Formatting through whichever tool Winc finds for the language.
+        KeyBinding::new("shift-alt-f", FormatDocument, Some("WincEditor")),
     ]);
 }
 
@@ -1461,7 +2092,7 @@ mod tests {
         selection: Range<usize>,
     ) -> Entity<WincEditor> {
         cx.new(|cx| {
-            let mut editor = WincEditor::new("sample.rs", px(12.0), ScrollHandle::new(), cx);
+            let mut editor = WincEditor::new("sample.rs", None, px(12.0), ScrollHandle::new(), cx);
             editor.set_content(text, cx);
             editor.selection = selection;
             editor
