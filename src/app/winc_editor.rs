@@ -187,6 +187,20 @@ struct PaintedRow {
     top: Pixels,
 }
 
+/// The advance a painted row hands to `shape_line`.
+///
+/// `force_width` is not a minimum width: GPUI positions glyph *n* at
+/// `n * force_width`, so any value here overrides the font's own advances. The
+/// row height belongs nowhere near it — it is vertical, and using it spaced
+/// every character 1.5em apart, which pushed code past the viewport and left
+/// the body blank while the gutter kept drawing numbers.
+///
+/// A named `None` keeps that decision visible at the call site and lets a test
+/// assert it without a window or a loaded font.
+fn row_force_width() -> Option<Pixels> {
+    None
+}
+
 impl WincEditor {
     /// Build an editor for a file in the panel.
     ///
@@ -1433,6 +1447,12 @@ impl Render for WincEditor {
                     for row in &painted {
                         let text: SharedString = row.text.clone().into();
                         let runs = runs_for(row, text_color);
+                        // `force_width` is an advance width, not a minimum: GPUI
+                        // places glyph *n* at `n * force_width`. Passing the row
+                        // height here spaced every character 1.5em apart, more
+                        // than twice a monospace advance, which pushed ordinary
+                        // code far past the viewport and left the body looking
+                        // blank while the gutter still drew its numbers.
                         let shaped = if runs.is_empty() {
                             window.text_system().shape_line(
                                 text.clone(),
@@ -1450,7 +1470,7 @@ impl Render for WincEditor {
                                 text.clone(),
                                 font_size,
                                 &runs,
-                                Some(row_height),
+                                row_force_width(),
                             )
                         };
 
@@ -2081,6 +2101,26 @@ pub fn init(cx: &mut App) {
 mod tests {
     use super::*;
     use gpui::{Entity, TestAppContext};
+
+    /// Rows must advance by their own glyphs, never by a forced step.
+    ///
+    /// `shape_line`'s last argument is `force_width`, and GPUI reads it as the
+    /// per-character advance: glyph *n* lands at `n * force_width`. Passing the
+    /// row height there spaced every character 1.5em apart — over twice a
+    /// monospace advance — so ordinary code ran far past the viewport while the
+    /// gutter still painted its numbers. The body looked like a blank file.
+    ///
+    /// The value is asserted directly rather than measured from a shaped line:
+    /// a test run has no font loaded, so only the argument itself is meaningful.
+    #[test]
+    fn painted_rows_never_force_a_glyph_advance() {
+        assert_eq!(
+            row_force_width(),
+            None,
+            "a forced advance spaces characters apart by that width, \
+             which is how the editor body went blank"
+        );
+    }
 
     /// Build an editor over `text` with the caret at `selection`.
     ///
