@@ -666,7 +666,13 @@ impl From<anyhow::Error> for RpcError {
     }
 }
 
-mod base64_bytes {
+/// Carry a byte field as a base64 JSON string.
+///
+/// A `Vec<u8>` would otherwise serialise as an array of numbers — several times
+/// the size, and unreadable in a log. Public because more than one message
+/// module carries bytes; the encoding has to be the same in all of them or a
+/// reader would decode one and not the other.
+pub mod base64_bytes {
     use base64::Engine as _;
     use serde::{Deserialize as _, Deserializer, Serializer};
 

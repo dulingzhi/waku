@@ -63,6 +63,19 @@ pub enum WorkspaceOperation {
         #[ts(type = "string")]
         relative_path: PathBuf,
     },
+    /// Read a file as bytes, for a preview rather than for an editor.
+    ///
+    /// An image, a workbook or a compiled document is not text, so the text
+    /// reader above cannot serve it. Kept separate from `ReadTextFile` rather
+    /// than adding a mode to it: a caller that wants bytes should not be able to
+    /// receive a lossily decoded string, and the daemon should not have to guess
+    /// which one was meant.
+    ReadBinaryFile {
+        #[ts(type = "string")]
+        root: PathBuf,
+        #[ts(type = "string")]
+        relative_path: PathBuf,
+    },
     WriteTextFile {
         #[ts(type = "string")]
         root: PathBuf,
@@ -211,6 +224,13 @@ pub enum WorkspaceResult {
     },
     TextFile {
         content: String,
+    },
+    /// A file read for a preview. Carried as bytes because the formats that use
+    /// it — images, archives, binary office documents — have no text form.
+    BinaryFile {
+        #[serde(with = "crate::protocol::base64_bytes")]
+        #[ts(type = "string")]
+        bytes: Vec<u8>,
     },
     ProjectFiles {
         entries: Vec<FileEntry>,

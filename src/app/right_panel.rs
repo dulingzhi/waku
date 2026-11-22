@@ -3008,6 +3008,23 @@ impl Waku {
     ) -> Div {
         let theme = Theme::current(cx);
         let file_tree_width = fitted_file_tree_width(panel_width, self.right_panel_file_tree_width);
+
+        // A file that is not source is decoded and drawn instead of opened for
+        // editing: a PNG in a text editor is a screenful of mojibake, and a
+        // workbook one is a zip. The path decides, before anything is read, so
+        // an unsupported file never costs a transfer.
+        if let Some(kind) = file_preview::kind_of(&relative_path) {
+            let body = self.render_file_preview(&relative_path, kind, cx);
+            return div()
+                .key_context("FileEditorPane")
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .bg(theme.surface)
+                .child(body);
+        }
+
         let (editor_state, writable, _) =
             self.ensure_right_panel_file_editor(&relative_path, window, cx);
         let surface = self
@@ -3575,6 +3592,184 @@ impl Waku {
         self.state.markdown_preview = !self.state.markdown_preview;
         self.save();
         cx.notify();
+    }
+
+    /// Decode a file for preview, once, off the UI thread.
+    ///
+    /// Rendering may not read the filesystem or decode a photograph, so the
+    /// first frame after a preview opens shows "loading" and starts a background
+    /// task. The result is cached by path: a scroll or a caret blink re-renders
+    /// the panel, and paying a decode for each one would make the pane crawl.
+    fn ensure_file_preview(
+        &mut self,
+        relative_path: &str,
+        kind: file_preview::PreviewKind,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_previews.borrow().contains_key(relative_path) {
+            return;
+        }
+        let Some(project_path) = self
+            .selected_workspace_path()
+            .map(std::path::Path::to_path_buf)
+        else {
+            self.file_previews.borrow_mut().insert(
+                relative_path.to_owned(),
+                PreviewState::Failed(tr!("files.no_project_is_open")),
+            );
+            return;
+        };
+        self.file_previews
+            .borrow_mut()
+            .insert(relative_path.to_owned(), PreviewState::Loading);
+
+        let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
+        let relative = relative_path.to_owned();
+        cx.spawn(async move |waku, cx| {
+            let read = cx
+                .background_executor()
+                .spawn({
+                    let project_path = project_path.clone();
+                    let relative = relative.clone();
+                    async move {
+                        let bytes = match workspace.request(
+                            waku_client::WorkspaceOperation::ReadBinaryFile {
+                                root: project_path,
+                                relative_path: PathBuf::from(&relative),
+                            },
+                        ) {
+                            Ok(waku_client::WorkspaceResult::BinaryFile { bytes }) => bytes,
+                            Ok(_) => return Err(format!("{relative}: unreadable response")),
+                            Err(error) => return Err(format!("{relative}: {error}")),
+                        };
+                        // Decoding is the expensive half; it belongs here rather
+                        // than in the update below, which runs on the UI thread.
+                        file_preview::decode(kind, &relative, &bytes)
+                    }
+                })
+                .await;
+            let _ = waku.update(cx, |waku, cx| {
+                let state = match read {
+                    Ok(decoded) => PreviewState::Ready(decoded),
+                    Err(error) => PreviewState::Failed(error),
+                };
+                waku.file_previews
+                    .borrow_mut()
+                    .insert(relative.clone(), state);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Draw whichever view a decoded preview calls for.
+    fn render_file_preview(
+        &mut self,
+        relative_path: &str,
+        kind: file_preview::PreviewKind,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.ensure_file_preview(relative_path, kind, cx);
+        let theme = Theme::current(cx);
+        // A path with no entry at all is the frame before `ensure_file_preview`
+        // inserts one — a preview opened and drawn in the same frame. Reading it
+        // as loading keeps that frame honest instead of showing a failure.
+        let state = self
+            .file_previews
+            .borrow()
+            .get(relative_path)
+            .cloned()
+            .unwrap_or(PreviewState::Loading);
+        match state {
+            PreviewState::Loading => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.text_tertiary)
+                .child(tr!("files.loading_preview"))
+                .into_any_element(),
+            PreviewState::Failed(error) => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(24.0))
+                .text_color(theme.text_secondary)
+                .child(error)
+                .into_any_element(),
+            PreviewState::Ready(file_preview::Decoded::Picture { format, bytes }) => {
+                let image = Arc::new(gpui::Image::from_bytes(format, bytes));
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p(px(16.0))
+                    .child(
+                        gpui::img(image)
+                            .max_w_full()
+                            .max_h_full()
+                            .object_fit(gpui::ObjectFit::ScaleDown),
+                    )
+                    .into_any_element()
+            }
+            PreviewState::Ready(file_preview::Decoded::Grid { rows, truncated }) => {
+                let mut grid = div()
+                    .id("file-preview-grid")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(12.0));
+                for row in rows {
+                    let mut line = div().flex().gap(px(16.0));
+                    for cell in row {
+                        line = line.child(div().min_w(px(80.0)).text_color(theme.text).child(cell));
+                    }
+                    grid = grid.child(line);
+                }
+                if truncated {
+                    grid = grid.child(
+                        div()
+                            .pt(px(8.0))
+                            .text_color(theme.text_tertiary)
+                            .child(tr!("files.preview_truncated")),
+                    );
+                }
+                grid.into_any_element()
+            }
+            PreviewState::Ready(file_preview::Decoded::Markdown { markdown }) => {
+                let palette = MarkdownPalette::from_theme(&theme);
+                let mut cache = self.file_preview_markdown.borrow_mut();
+                let key = format!("preview:{relative_path}");
+                if !matches!(cache.as_ref(), Some((cached, _)) if *cached == key) {
+                    *cache = Some((key.clone(), MarkdownView::new()));
+                }
+                let (_, view) = cache.as_mut().expect("entry ensured above");
+                view.set_text(&markdown, false);
+                let ctx = MarkdownCtx::new(
+                    format!("file-preview-{relative_path}"),
+                    &palette,
+                    MarkdownMetrics::document(self.state.ui_font_size, self.state.code_font_size),
+                    self.file_preview_selection.clone(),
+                )
+                .with_math_enabled(self.state.render_math)
+                .with_math_context_menu(self.menu_handle("file-preview-math", cx))
+                .with_link_handler(self.markdown_link_handler.clone());
+                let document = md::render::markdown(view, &ctx);
+                div()
+                    .id("file-preview-document")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(16.0))
+                    .children(document)
+                    .into_any_element()
+            }
+        }
     }
 
     /// The rendered-markdown alternative to the editor body, shown while the

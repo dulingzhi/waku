@@ -72,6 +72,7 @@ language.system: 跟随系统
 language.description: 选择 Waku 的界面语言
 settings.general: 通用
 settings.appearance: 外观
+settings.palette_fixed_appearance: 固定外观
 settings.providers: 服务商
 settings.usage: 用量
 settings.daemon: 守护进程
@@ -819,6 +820,8 @@ files.could_not_save_read_only: "无法保存 %{path}：文件不可编辑"
 files.could_not_save: "无法保存 %{path}：%{error}"
 files.preview_markdown: 预览 Markdown
 files.edit_markdown_source: 编辑源码
+files.loading_preview: 正在加载预览…
+files.preview_truncated: 文件超出预览读取的范围，其余内容未显示。
 files.resize_tree: 调整文件树宽度
 files.refresh: 刷新文件
 files.loading: 正在加载文件…

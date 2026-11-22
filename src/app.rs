@@ -337,6 +337,18 @@ enum RemoteImageState {
     Unavailable,
 }
 
+/// One non-source file being previewed.
+///
+/// The `Failed` arm keeps the message rather than dropping the entry: a second
+/// read would fail the same way, and an empty pane with no explanation is how a
+/// user concludes the program is broken.
+#[derive(Clone)]
+enum PreviewState {
+    Loading,
+    Ready(file_preview::Decoded),
+    Failed(String),
+}
+
 /// One accepted composer submission. `prompt` preserves the composer and
 /// transcript syntax; provider-specific command syntax resolves only at the
 /// transport boundary. Presentation metadata keeps appended attachment
@@ -1506,6 +1518,13 @@ pub struct Waku {
     /// Rendered-markdown preview of the visible file editor, cached per path
     /// the way `skills_detail_markdown` caches the skill document.
     file_preview_markdown: RefCell<Option<(String, MarkdownView)>>,
+    /// Decoded previews of files that are not source, keyed by the path they
+    /// were decoded from.
+    ///
+    /// Kept because decoding a workbook or a photograph costs hundreds of
+    /// milliseconds, and a repaint must not pay it again: a scroll, a caret
+    /// blink or a theme change all re-render the panel.
+    file_previews: RefCell<HashMap<String, PreviewState>>,
     file_preview_selection: TranscriptSelection,
     file_preview_scroll_handle: ScrollHandle,
     file_preview_scrollbar: Rc<ScrollbarState>,
@@ -1829,6 +1848,7 @@ mod composer;
 mod daemon_directory_picker;
 mod drafts;
 mod file_editor;
+mod file_preview;
 mod file_search;
 mod file_symbols;
 mod goal_dialog;
@@ -3194,6 +3214,7 @@ impl Waku {
                 right_panel_editor_scroll_handle: ScrollHandle::new(),
                 right_panel_editor_scrollbar: ScrollbarState::new(),
                 file_preview_markdown: RefCell::new(None),
+                file_previews: RefCell::new(HashMap::new()),
                 file_preview_selection: TranscriptSelection::default(),
                 file_preview_scroll_handle: ScrollHandle::new(),
                 file_preview_scrollbar: ScrollbarState::new(),

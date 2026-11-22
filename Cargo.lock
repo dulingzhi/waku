@@ -8885,6 +8885,7 @@ dependencies = [
  "webview2-com",
  "winc-core",
  "winc-editor",
+ "winc-preview",
  "winc-syntax",
  "windows 0.61.3",
  "windows-core 0.61.2",

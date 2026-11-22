@@ -148,6 +148,8 @@ settings.general:
   en: General
 settings.appearance:
   en: Appearance
+settings.palette_fixed_appearance:
+  en: fixed appearance
 settings.providers:
   en: Providers
 settings.usage:
@@ -1678,6 +1680,10 @@ files.preview_markdown:
   en: Preview markdown
 files.edit_markdown_source:
   en: Edit source
+files.loading_preview:
+  en: Loading preview…
+files.preview_truncated:
+  en: This file is larger than the preview reads; the rest is not shown.
 files.resize_tree:
   en: Resize file tree
 files.refresh:

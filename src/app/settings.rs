@@ -1461,7 +1461,20 @@ impl Waku {
                         let weak = weak.clone();
                         let palette = PaletteId::new(id);
                         let selected = palette == selected_palette;
-                        MenuItem::new(crate::theme::palette::label(id), move |window, cx| {
+                        // A single-appearance palette does not follow the
+                        // appearance setting, so its name says which appearance
+                        // it is: without that, switching to light and seeing no
+                        // change reads as a bug.
+                        let label = if crate::theme::palette::follows_appearance(id) {
+                            crate::theme::palette::label(id)
+                        } else {
+                            format!(
+                                "{} · {}",
+                                crate::theme::palette::label(id),
+                                tr!("settings.palette_fixed_appearance")
+                            )
+                        };
+                        MenuItem::new(label, move |window, cx| {
                             let palette = palette.clone();
                             let _ = weak.update(cx, |this, cx| {
                                 this.set_palette(palette, window, cx);

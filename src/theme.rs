@@ -103,21 +103,44 @@ pub mod palette {
     #[derive(Clone, Copy)]
     pub struct ActiveWakuTheme(pub Theme);
 
-    /// Build a palette for `dark`, or the default when the id is unknown.
+    /// Build a palette for `mode`, or the default when the id is unknown.
+    ///
+    /// Waku's own palettes come in a dark and a light form and follow the
+    /// appearance setting. The Winc palettes do not: `winc-night` is a dark
+    /// palette and `winc-day` a light one, each on its own terms, which is how
+    /// Winc ships them. Inverting one to satisfy "two forms" would invent a
+    /// palette nobody designed, so a single-form palette answers with itself in
+    /// both modes and `Theme::is_dark` reports what it actually is. The
+    /// appearance setting still chooses between *palettes*; it just cannot
+    /// repaint one of these into the other.
     pub fn resolve(id: &PaletteId, dark: bool) -> Theme {
         match (id.as_str(), dark) {
             ("graphite", dark) => graphite(dark),
             ("one", true) => one_dark(),
             ("one", false) => one_light(),
+            ("winc-night", _) => winc_night(),
+            ("winc-slate", _) => winc_slate(),
+            ("winc-day", _) => winc_day(),
+            ("winc-paper", _) => winc_paper(),
             // An id from a newer build, or one that was removed: the default
             // palette, never a failure to start.
             _ => graphite(dark),
         }
     }
 
+    /// Whether `id` has a form for each appearance, so the settings page can say
+    /// so instead of offering a choice that does nothing.
+    pub fn follows_appearance(id: &str) -> bool {
+        !matches!(id, "winc-night" | "winc-slate" | "winc-day" | "winc-paper")
+    }
+
     pub fn label(id: &str) -> String {
         match id {
             "one" => "One".to_owned(),
+            "winc-night" => "Winc 夜航".to_owned(),
+            "winc-slate" => "Winc 远山".to_owned(),
+            "winc-day" => "Winc 晴昼".to_owned(),
+            "winc-paper" => "Winc 宣纸".to_owned(),
             _ => "Graphite".to_owned(),
         }
     }
@@ -324,6 +347,216 @@ pub mod palette {
             danger_soft: hsla(6.0 / 360.0, 0.60, 0.50, 0.10),
         }
     }
+
+    /// The Winc palettes, ported from its own theme module.
+    ///
+    /// Winc's `Palette` is wider than Waku's `Theme` — it carries per-token
+    /// syntax colours and a 16-colour ANSI ramp, which belong to an editor and a
+    /// terminal that this program draws differently. Only the colours both
+    /// programs have a use for are carried across, mapped by meaning rather than
+    /// by position: `frame` is the space around the cards (canvas), `card` is
+    /// what those cards are painted in (surface), and `popup` is the raised
+    /// layer above them. Copying the literals wholesale would need every field
+    /// renamed at each of the ~1274 call sites that read them.
+    ///
+    /// Contrast is Winc's, measured against its own background and not
+    /// re-derived here: it holds body text to 7:1 and accents to 4.5:1, which is
+    /// stricter than the palettes above, so these are not adjusted.
+    ///
+    /// Winc's default dark palette: a blue-grey charcoal, not pure black.
+    fn winc_night() -> Theme {
+        Theme {
+            is_dark: true,
+            canvas: rgb(0x15171C).into(),
+            sidebar: if cfg!(target_os = "macos") {
+                transparent_black()
+            } else {
+                rgb(0x1B1E24).into()
+            },
+            sidebar_drag_background: rgb(0x1B1E24).into(),
+            sidebar_item_background: hsla(218.0 / 360.0, 0.16, 0.80, 0.06),
+            surface: rgb(0x1B1E24).into(),
+            raised: rgb(0x23272E).into(),
+            composer: rgb(0x23272E).into(),
+            inset: rgb(0x121419).into(),
+            terminal: rgb(0x15171C).into(),
+            overlay: hsla(218.0 / 360.0, 0.16, 0.80, 0.05),
+            overlay_strong: hsla(218.0 / 360.0, 0.16, 0.80, 0.09),
+
+            border: hsla(218.0 / 360.0, 0.16, 0.80, 0.08),
+            border_strong: hsla(218.0 / 360.0, 0.16, 0.80, 0.15),
+            sidebar_border: hsla(218.0 / 360.0, 0.16, 0.80, 0.10),
+
+            text: rgb(0xD4D8DF).into(),
+            text_secondary: rgb(0x959CA8).into(),
+            text_tertiary: rgb(0x7A8290).into(),
+            text_ghost: rgb(0x656C78).into(),
+
+            accent: rgb(0x78AEF2).into(),
+            resize_handle: rgb(0x78AEF2).into(),
+            gauge: rgb(0x78AEF2).into(),
+
+            selection: rgb(0x2C4468).into(),
+            code_text: rgb(0xD7915C).into(),
+            code_wash: hsla(218.0 / 360.0, 0.16, 0.80, 0.08),
+
+            inverse: rgb(0xD4D8DF).into(),
+            on_inverse: rgb(0x15171C).into(),
+
+            warning: rgb(0xE2BA6A).into(),
+            success: rgb(0x5FBFA0).into(),
+            favorite: rgb(0xE4CF7A).into(),
+            danger: rgb(0xF07F7F).into(),
+            danger_soft: hsla(0.0, 0.60, 0.72, 0.12),
+        }
+    }
+
+    /// Winc's softer dark palette: the same hues one step lighter, for a room
+    /// with the lights on.
+    fn winc_slate() -> Theme {
+        Theme {
+            is_dark: true,
+            canvas: rgb(0x1E2127).into(),
+            sidebar: if cfg!(target_os = "macos") {
+                transparent_black()
+            } else {
+                rgb(0x252930).into()
+            },
+            sidebar_drag_background: rgb(0x252930).into(),
+            sidebar_item_background: hsla(218.0 / 360.0, 0.16, 0.80, 0.06),
+            surface: rgb(0x252930).into(),
+            raised: rgb(0x2C3038).into(),
+            composer: rgb(0x2C3038).into(),
+            inset: rgb(0x1A1D22).into(),
+            terminal: rgb(0x1E2127).into(),
+            overlay: hsla(218.0 / 360.0, 0.16, 0.80, 0.05),
+            overlay_strong: hsla(218.0 / 360.0, 0.16, 0.80, 0.09),
+
+            border: hsla(218.0 / 360.0, 0.16, 0.80, 0.08),
+            border_strong: hsla(218.0 / 360.0, 0.16, 0.80, 0.15),
+            sidebar_border: hsla(218.0 / 360.0, 0.16, 0.80, 0.10),
+
+            text: rgb(0xCED3DB).into(),
+            text_secondary: rgb(0x99A0AC).into(),
+            text_tertiary: rgb(0x808896).into(),
+            text_ghost: rgb(0x6C7380).into(),
+
+            accent: rgb(0x7DB2F2).into(),
+            resize_handle: rgb(0x7DB2F2).into(),
+            gauge: rgb(0x7DB2F2).into(),
+
+            selection: rgb(0x35496B).into(),
+            code_text: rgb(0xDB9763).into(),
+            code_wash: hsla(218.0 / 360.0, 0.16, 0.80, 0.08),
+
+            inverse: rgb(0xCED3DB).into(),
+            on_inverse: rgb(0x1E2127).into(),
+
+            warning: rgb(0xE2BD70).into(),
+            success: rgb(0x66C2A5).into(),
+            favorite: rgb(0xE6D282).into(),
+            danger: rgb(0xF08585).into(),
+            danger_soft: hsla(0.0, 0.60, 0.73, 0.12),
+        }
+    }
+
+    /// Winc's default light palette: near-white with a hint of grey, so a bright
+    /// screen does not glare.
+    fn winc_day() -> Theme {
+        Theme {
+            is_dark: false,
+            canvas: rgb(0xE9EBEF).into(),
+            sidebar: if cfg!(target_os = "macos") {
+                transparent_black()
+            } else {
+                rgb(0xFBFBFC).into()
+            },
+            sidebar_drag_background: rgb(0xFBFBFC).into(),
+            sidebar_item_background: hsla(220.0 / 360.0, 0.13, 0.35, 0.07),
+            surface: rgb(0xFBFBFC).into(),
+            raised: rgb(0xFFFFFF).into(),
+            composer: rgb(0xFFFFFF).into(),
+            inset: rgb(0xE2E5EA).into(),
+            terminal: rgb(0xFFFFFF).into(),
+            overlay: hsla(220.0 / 360.0, 0.13, 0.30, 0.05),
+            overlay_strong: hsla(220.0 / 360.0, 0.13, 0.30, 0.10),
+
+            border: hsla(220.0 / 360.0, 0.13, 0.30, 0.10),
+            border_strong: hsla(220.0 / 360.0, 0.13, 0.30, 0.18),
+            sidebar_border: hsla(220.0 / 360.0, 0.13, 0.30, 0.16),
+
+            text: rgb(0x24272E).into(),
+            text_secondary: rgb(0x5C6370).into(),
+            text_tertiary: rgb(0x7A8290).into(),
+            text_ghost: rgb(0x9AA0AB).into(),
+
+            accent: rgb(0x2B66D2).into(),
+            resize_handle: rgb(0x2B66D2).into(),
+            gauge: rgb(0x2B66D2).into(),
+
+            selection: rgb(0xC9DCFA).into(),
+            code_text: rgb(0xA43E3A).into(),
+            code_wash: hsla(220.0 / 360.0, 0.13, 0.30, 0.07),
+
+            inverse: rgb(0x24272E).into(),
+            on_inverse: rgb(0xFBFBFC).into(),
+
+            warning: rgb(0x9A6200).into(),
+            success: rgb(0x16805F).into(),
+            favorite: rgb(0x574504).into(),
+            danger: rgb(0xC2373A).into(),
+            danger_soft: hsla(359.0 / 360.0, 0.60, 0.50, 0.10),
+        }
+    }
+
+    /// Winc's warm light palette: paper and warm grey, the day palette with its
+    /// hues held and its luminance brought down to match on a warm ground.
+    fn winc_paper() -> Theme {
+        Theme {
+            is_dark: false,
+            canvas: rgb(0xEAE6DE).into(),
+            sidebar: if cfg!(target_os = "macos") {
+                transparent_black()
+            } else {
+                rgb(0xF7F4EE).into()
+            },
+            sidebar_drag_background: rgb(0xF7F4EE).into(),
+            sidebar_item_background: hsla(38.0 / 360.0, 0.18, 0.35, 0.07),
+            surface: rgb(0xF7F4EE).into(),
+            raised: rgb(0xFCFAF6).into(),
+            composer: rgb(0xFCFAF6).into(),
+            inset: rgb(0xE3DED4).into(),
+            terminal: rgb(0xFCFAF6).into(),
+            overlay: hsla(38.0 / 360.0, 0.18, 0.30, 0.05),
+            overlay_strong: hsla(38.0 / 360.0, 0.18, 0.30, 0.10),
+
+            border: hsla(38.0 / 360.0, 0.18, 0.30, 0.10),
+            border_strong: hsla(38.0 / 360.0, 0.18, 0.30, 0.18),
+            sidebar_border: hsla(38.0 / 360.0, 0.18, 0.30, 0.16),
+
+            text: rgb(0x2A2824).into(),
+            text_secondary: rgb(0x5F5A52).into(),
+            text_tertiary: rgb(0x7D786F).into(),
+            text_ghost: rgb(0x9C968C).into(),
+
+            accent: rgb(0x2A62C8).into(),
+            resize_handle: rgb(0x2A62C8).into(),
+            gauge: rgb(0x2A62C8).into(),
+
+            selection: rgb(0xD6E0EE).into(),
+            code_text: rgb(0x9C3934).into(),
+            code_wash: hsla(38.0 / 360.0, 0.18, 0.30, 0.07),
+
+            inverse: rgb(0x2A2824).into(),
+            on_inverse: rgb(0xF7F4EE).into(),
+
+            warning: rgb(0x935C00).into(),
+            success: rgb(0x157A5A).into(),
+            favorite: rgb(0x524000).into(),
+            danger: rgb(0xBB3434).into(),
+            danger_soft: hsla(0.0, 0.60, 0.47, 0.10),
+        }
+    }
 }
 
 impl Global for ActiveWakuTheme {}
@@ -439,12 +672,19 @@ mod tests {
         }
     }
 
-    /// A palette's dark and light forms must actually differ. Copying one into
-    /// the other compiles, ships, and looks correct on exactly one of the two
-    /// appearances.
+    /// A palette that comes in two forms must actually differ between them.
+    /// Copying one into the other compiles, ships, and looks correct on exactly
+    /// one of the two appearances.
+    ///
+    /// The Winc palettes are exempt by name, not by accident: each is one
+    /// designed appearance rather than a pair, and [`every_winc_palette_is_
+    /// readable_in_the_appearance_it_was_designed_for`] covers them instead.
     #[test]
     fn every_palette_has_two_distinct_forms() {
         for id in KNOWN_PALETTES {
+            if !palette::follows_appearance(id) {
+                continue;
+            }
             let dark = palette::resolve(&PaletteId::new(id), true);
             let light = palette::resolve(&PaletteId::new(id), false);
             assert!(dark.is_dark, "{id}'s dark form reports itself light");
@@ -453,6 +693,35 @@ mod tests {
                 relative_luminance(dark.canvas) < relative_luminance(light.canvas),
                 "{id}'s dark canvas is not darker than its light one"
             );
+        }
+    }
+
+    /// A single-appearance palette must report the appearance it was drawn for,
+    /// and stay readable on it.
+    ///
+    /// This is what stops a `winc-night` from being handed to a light-mode user
+    /// and vice versa: the pairing is a fact about the palette, not about
+    /// whichever mode happens to be selected.
+    #[test]
+    fn every_winc_palette_is_readable_in_the_appearance_it_was_designed_for() {
+        for (id, expected_dark) in [
+            ("winc-night", true),
+            ("winc-slate", true),
+            ("winc-day", false),
+            ("winc-paper", false),
+        ] {
+            for mode in [true, false] {
+                let theme = palette::resolve(&PaletteId::new(id), mode);
+                assert_eq!(
+                    theme.is_dark, expected_dark,
+                    "{id} reports the wrong appearance for mode {mode}"
+                );
+                let ratio = contrast(theme.text, theme.surface);
+                assert!(
+                    ratio >= 4.5,
+                    "{id}: body text is {ratio:.2}:1 on its own surface"
+                );
+            }
         }
     }
 

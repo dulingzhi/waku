@@ -108,4 +108,11 @@ impl Default for PaletteId {
 /// validate an id read from disk, and it must not depend on the UI crate to do
 /// it. A new palette adds its id here and its `Theme` literal in the desktop
 /// `theme` module; nothing else changes.
-pub const KNOWN_PALETTES: [&str; 2] = ["graphite", "one"];
+pub const KNOWN_PALETTES: [&str; 6] = [
+    "graphite",
+    "one",
+    "winc-night",
+    "winc-slate",
+    "winc-day",
+    "winc-paper",
+];

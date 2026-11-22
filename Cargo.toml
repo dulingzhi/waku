@@ -84,6 +84,12 @@ winc-syntax = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
 # GUI of its own, so it links here; the trade is that it brings Winc's preview
 # crate along, which is where its image and table types live.
 winc-editor = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
+# Winc's preview parsers, named directly because Waku now uses them itself
+# rather than only through `winc-editor`: image decoding, SVG rasterising, and
+# the Markdown/table/docx/epub converters. Already in the tree via
+# `winc-editor`, so this adds no compile work — only an explicit edge, so that
+# dropping the editor crate later cannot silently remove the preview.
+winc-preview = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
 
 # `test-support` has to stay test-only. It compiles a loop into gpui's
 # `flush_effects` that draws every dirty window right there, so with the

@@ -55,6 +55,12 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
         } => WorkspaceResult::TextFile {
             content: fs::read_to_string(resolve_workspace_path(&root, &relative_path)?)?,
         },
+        WorkspaceOperation::ReadBinaryFile {
+            root,
+            relative_path,
+        } => WorkspaceResult::BinaryFile {
+            bytes: fs::read(resolve_workspace_path(&root, &relative_path)?)?,
+        },
         WorkspaceOperation::WriteTextFile {
             root,
             relative_path,
