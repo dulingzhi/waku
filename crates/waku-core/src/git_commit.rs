@@ -179,35 +179,47 @@ pub fn generate_message(
 pub fn commit(cwd: &Path, message: &str, include_unstaged: bool) -> anyhow::Result<()> {
     ensure_repository(cwd)?;
     let message = normalize_message(message).ok_or_else(|| anyhow!("enter a commit message"))?;
-    if include_unstaged {
-        git_success(cwd, &["add", "-A", "--", "."])?;
-    }
-    let staged = git_capture(cwd, &["diff", "--cached", "--quiet", "--"])?;
-    match staged.status.code() {
-        Some(1) => {}
-        Some(0) => bail!("there are no staged changes to commit"),
-        _ => bail!(
-            "could not inspect staged changes: {}",
-            command_error(&staged)
-        ),
-    }
-    git_success(cwd, &["commit", "-m", &message])?;
-    Ok(())
+    // Winc's commit stages with `git add --all` itself when asked, then commits,
+    // so the two steps cannot disagree about what was staged. It also refuses a
+    // repository whose config would run commands (hooks, clean/smudge filters)
+    // until the user has confirmed them — Waku used to run those silently.
+    let git = winc_git()?;
+    git.commit(cwd, &message, include_unstaged, false)
+        .map(|_| ())
+        .map_err(|error| anyhow!("{error}"))
 }
 
 pub fn push(cwd: &Path) -> anyhow::Result<()> {
     ensure_repository(cwd)?;
-    if upstream(cwd)?.is_some() {
-        git_success(cwd, &["push"])?;
-        return Ok(());
-    }
-    let branch = git_optional_stdout(cwd, &["branch", "--show-current"])?
-        .filter(|branch| !branch.is_empty())
-        .ok_or_else(|| anyhow!("cannot push a detached HEAD"))?;
-    let remote = remote_for_branch(cwd, &branch)?
-        .ok_or_else(|| anyhow!("no Git remote is configured for this branch"))?;
-    git_success(cwd, &["push", "--set-upstream", &remote, &branch])?;
-    Ok(())
+    let git = winc_git()?;
+    // `has_upstream` decides between `git push` and publishing the branch to a
+    // remote as its upstream, which is the rule Waku had to write itself.
+    let has_upstream = upstream(cwd)?.is_some();
+    git.push(cwd, has_upstream)
+        .map(|_| ())
+        .map_err(|error| anyhow!("{error}"))
+}
+
+/// Winc's git handle for this host.
+///
+/// Cached for the life of the process. That is not an optimisation: a
+/// `Git` carries the table of repositories the user has trusted, so a fresh
+/// handle per call would forget every confirmation the moment it returned and
+/// refuse the very commit the user just approved. Winc's own UI holds one
+/// handle for the same reason.
+///
+/// The cache is keyed on nothing: `git`'s location does not change under a
+/// running daemon, and a host without `git` gets an error naming that, which is
+/// the actionable answer either way.
+fn winc_git() -> anyhow::Result<winc_editor::git::Git> {
+    static GIT: std::sync::OnceLock<Result<winc_editor::git::Git, String>> =
+        std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        winc_editor::git::Git::find(&Default::default())
+            .map_err(|unavailable| unavailable.to_string())
+    })
+    .clone()
+    .map_err(|error| anyhow!("{error}"))
 }
 
 fn commit_prompt(cwd: &Path, include_unstaged: bool) -> anyhow::Result<String> {
@@ -777,6 +789,69 @@ mod tests {
             snapshot.branch,
             head.trim(),
             "a detached HEAD is its commit"
+        );
+    }
+
+    /// Committing with nothing staged must fail, not silently succeed.
+    ///
+    /// The message is Winc's, and it is weaker than the one Waku used to
+    /// produce: `git commit` with an empty index prints "On branch main /
+    /// nothing to commit" without an `error:` or `fatal:` prefix, and Winc's
+    /// `failure()` only promotes a prefixed line — otherwise it reports the
+    /// first non-empty one. So the user sees the branch name and not the
+    /// reason. This test records that, rather than asserting a message the code
+    /// does not produce.
+    #[test]
+    fn committing_nothing_staged_fails_and_reports_gits_first_line() {
+        let root = repository();
+        let error = commit(&root, "Nothing", false).unwrap_err().to_string();
+        assert!(
+            !error.trim().is_empty(),
+            "a failed commit still has to say something"
+        );
+        assert!(
+            error.contains("main") || error.to_lowercase().contains("nothing to commit"),
+            "the message is git's own, starting from its first line: {error}"
+        );
+        // And it really did not commit: the log is still the initial one.
+        assert_eq!(
+            git_stdout(&root, &["rev-list", "--count", "HEAD"])
+                .unwrap()
+                .trim(),
+            "1"
+        );
+    }
+
+    /// A repository whose config would run commands is refused until trusted.
+    ///
+    /// Waku used to run those hooks without asking. Winc gates them, and this
+    /// pins that the gate is reached — a user who only ever commits in ordinary
+    /// repositories never sees it, which is why it needs its own test.
+    #[test]
+    fn a_repository_that_runs_commands_needs_trust_first() {
+        let root = repository();
+        // A `clean` filter runs an external command when the file is staged.
+        run_git(&root, &["config", "filter.danger.clean", "cat"]);
+        fs::write(root.join("filtered.txt"), "x\n").unwrap();
+        fs::write(root.join(".gitattributes"), "filtered.txt filter=danger\n").unwrap();
+        run_git(&root, &["add", ".gitattributes"]);
+
+        let error = commit(&root, "Filtered", true).unwrap_err().to_string();
+        // Winc's message is localised, so match the part that cannot change with
+        // the locale: it names the setting that would run a command.
+        assert!(
+            error.contains("filter.danger.clean"),
+            "the refusal names the setting that would run a command, got: {error}"
+        );
+
+        // Trusting the repository's current fingerprint lets the commit through.
+        let git = winc_git().unwrap();
+        let risks = git.inspect(&root).expect("the risks are readable");
+        git.trust(&root, risks.fingerprint);
+        commit(&root, "Filtered", true).unwrap();
+        assert_eq!(
+            git_stdout(&root, &["log", "-1", "--pretty=%s"]).unwrap(),
+            "Filtered"
         );
     }
 
