@@ -5,6 +5,24 @@ import { Type } from "typebox";
 
 type JsonObject = Record<string, unknown>;
 
+/// The mode arguments that travel with a helper program.
+///
+/// A packaged Waku ships one binary, so `WAKU_JS_REPL_SERVER` names the program
+/// and this variable carries the word that selects the REPL inside it. An older
+/// Waku that ships a dedicated `waku_js_repl` sets nothing here, so a missing or
+/// malformed value means "run the program as-is".
+function parseArguments(encoded: string | undefined): string[] {
+  if (!encoded) return [];
+  try {
+    const parsed: unknown = JSON.parse(encoded);
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 const jsToolDescription =
   "Run JavaScript in Waku's persistent QuickJS kernel for Computer Use. Initialize `cua` with `await setupComputerUseRuntime({ globals: globalThis })`, then call native tools directly, such as `cua.list_apps()` and `cua.click(arguments)`. The bundled Computer Use skill documents the method signatures; call the methods directly. Calls time out after 30000 ms (30 seconds) unless `timeout_ms` is provided. Use `jsRepl.write(...)` for text and `await jsRepl.emitImage(...)` for images. Bindings and scheduled timers persist until the JavaScript kernel is reset.";
 
@@ -33,7 +51,10 @@ class WakuMcpClient {
     if (!executable) {
       throw new Error("WAKU_JS_REPL_SERVER is not configured");
     }
-    const child = spawn(executable, [], {
+    // A packaged Waku ships one binary, so the mode word that selects the REPL
+    // arrives beside the program instead of being part of the path.
+    const arguments_ = parseArguments(process.env.WAKU_JS_REPL_SERVER_ARGUMENTS);
+    const child = spawn(executable, arguments_, {
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });

@@ -16,7 +16,6 @@ import { extractReleaseNotes } from "./changelog";
 
 const appName = "Waku";
 const executableName = "Waku";
-const jsReplExecutableName = "waku_js_repl";
 const daemonExecutableName = "waku-daemon";
 const computerUseHelperName = "Waku Computer Use";
 const packageName = "waku";
@@ -46,8 +45,7 @@ Options:
                                 default derives a monotonic number from the
                                 Cargo version)
   --volume-name <name>          Mounted DMG name (default: Waku)
-  --skip-build                  Reuse target/release/waku, waku_js_repl, and
-                                waku-daemon
+  --skip-build                  Reuse target/release/waku and waku-daemon
   --skip-notarize               Unnotarized signed DMG (implies --local)
   --adhoc                       Ad-hoc sign, no notarization (implies --local)
   --help                        Show this help
@@ -270,18 +268,12 @@ const releaseDirectory = resolve(
   "release",
 );
 const releaseExecutable = join(releaseDirectory, packageName);
-const releaseJsReplExecutable = join(
-  releaseDirectory,
-  jsReplExecutableName,
-);
 const releaseDaemonExecutable = join(releaseDirectory, daemonExecutableName);
 const appBundle = join(releaseDirectory, `${appName}.app`);
 const contentsDirectory = join(appBundle, "Contents");
-const bundledJsReplExecutable = join(
-  contentsDirectory,
-  "Resources",
-  jsReplExecutableName,
-);
+// The JavaScript REPL and the Cua Driver host are modes of the app executable,
+// so `Contents/MacOS/Waku` is the program that runs them.
+const bundledJsReplExecutable = join(contentsDirectory, "MacOS", executableName);
 const bundledDaemonExecutable = join(
   contentsDirectory,
   "MacOS",
@@ -312,7 +304,9 @@ const bundledSparkleFramework = join(
 );
 
 async function verifyJavaScriptRepl(executable: string): Promise<void> {
-  const child = Bun.spawn([executable], {
+  // The REPL is a mode of the app executable, so the release check drives the
+  // same file the agents will launch instead of a separate helper binary.
+  const child = Bun.spawn([executable, "--js-repl"], {
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
@@ -390,11 +384,7 @@ const identity = adhoc ? "-" : configuredSigningIdentity!;
 
 try {
   if (values["skip-build"]) {
-    for (const executable of [
-      releaseExecutable,
-      releaseJsReplExecutable,
-      releaseDaemonExecutable,
-    ]) {
+    for (const executable of [releaseExecutable, releaseDaemonExecutable]) {
       try {
         await access(executable);
       } catch {
@@ -415,7 +405,6 @@ try {
   for (const artifact of [
     join(contentsDirectory, "MacOS", executableName),
     bundledDaemonExecutable,
-    bundledJsReplExecutable,
     bundledComputerUseSkill,
     bundledPiComputerUseExtension,
     bundledComputerUseHelper,
@@ -427,7 +416,8 @@ try {
   await $`plutil -replace CFBundleVersion -string ${buildNumber} ${join(contentsDirectory, "Info.plist")}`;
   await $`xattr -cr ${appBundle}`;
 
-  await $`codesign --verify --strict --verbose=2 ${bundledJsReplExecutable}`;
+  // The daemon is its own executable inside the bundle; the REPL and the Cua
+  // Driver host are modes of the app binary, verified by running it.
   await $`codesign --verify --strict --verbose=2 ${bundledDaemonExecutable}`;
   await $`codesign --verify --deep --strict --verbose=2 ${bundledComputerUseHelper}`;
   await verifyJavaScriptRepl(bundledJsReplExecutable);
@@ -474,11 +464,9 @@ try {
   mountedDmg = true;
   const mountedApp = join(mountDirectory, `${appName}.app`);
   const mountedContents = join(mountedApp, "Contents");
-  const mountedJsRepl = join(
-    mountedContents,
-    "Resources",
-    jsReplExecutableName,
-  );
+  // The REPL and the Cua Driver host live inside the app executable, so the
+  // same file serves both checks.
+  const mountedJsRepl = join(mountedContents, "MacOS", executableName);
   const mountedDaemon = join(
     mountedContents,
     "MacOS",

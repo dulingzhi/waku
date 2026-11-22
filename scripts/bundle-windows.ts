@@ -127,12 +127,13 @@ const installer = join(
   `Waku-${version}-${architecture}-Setup.exe`,
 );
 
-await $`cargo build --locked --release --package waku --bin waku --bin waku_js_repl --package waku-daemon --bin waku-daemon --package waku-computer-use --bin waku_computer_use`;
+await $`cargo build --locked --release --package waku --bin waku --package waku-daemon --bin waku-daemon`;
 
 const staging = await mkdtemp(join(tmpdir(), "waku-bundle-"));
 try {
-  // Both executables stay side by side: the app resolves the daemon next to
-  // itself, so the layout is what makes an extracted zip runnable in place.
+  // One executable holds every job: the GUI, the daemon, the JavaScript REPL
+  // and the Cua Driver host. The app resolves each mode from its own path, so
+  // nothing else has to sit next to it.
   const packageDirectory = join(staging, packageDirectoryName);
   await mkdir(packageDirectory, { recursive: true });
   await bundleComputerUse(
@@ -140,12 +141,16 @@ try {
     join(packageDirectory, "resources"),
     "release",
   );
-  for (const file of ["waku.exe", "waku-daemon.exe"]) {
-    await copyFile(join(releaseDirectory, file), join(packageDirectory, file));
-  }
+  await copyFile(join(releaseDirectory, "waku.exe"), join(packageDirectory, "waku.exe"));
   await copyFile(
     join(projectRoot, "LICENSE"),
     join(packageDirectory, "LICENSE"),
+  );
+  // The skill catalog comes from the packaged executable itself, which is the
+  // same binary the agent drivers will run.
+  await writePackagedCuaSkill(
+    join(packageDirectory, "waku.exe"),
+    join(packageDirectory, "resources", "skills/waku-computer-use/SKILL.md"),
   );
 
   // Authenticode has to be applied before anything is packaged, so the
@@ -161,9 +166,6 @@ try {
     signtool = findSigntool();
     await sign(signtool, certificate, certificatePassword, [
       join(packageDirectory, "waku.exe"),
-      join(packageDirectory, "waku-daemon.exe"),
-      join(packageDirectory, "waku_js_repl.exe"),
-      join(packageDirectory, "waku_computer_use.exe"),
       join(packageDirectory, "cua_driver_sdk.dll"),
       join(packageDirectory, "cua-driver-uia.exe"),
     ]);

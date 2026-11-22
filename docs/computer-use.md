@@ -22,10 +22,18 @@ identity and Waku's Screen Recording/Accessibility onboarding. The bundled
 library is signed with the same identity as the helper. Permission requests
 remain host-owned: direct SDK permission checks do not open macOS prompts.
 
-On Windows and Linux, `waku_computer_use` loads the packaged SDK library into
+On Windows and Linux, `waku --computer-use` loads the packaged SDK library into
 its own process. It communicates with the REPL over inherited stdin/stdout.
 Windows also packages Cua's UIA support executable. No Cua daemon, installation,
 Python runtime, Node runtime, or separately running service is required.
+
+A package ships one `waku` executable. It is the GUI, the daemon
+(`--daemon`), the JavaScript REPL (`--js-repl`) and this host
+(`--computer-use <mcp|list-tools>`), so no helper binary sits next to it. The
+SDK library is still loaded from the executable's own directory, which is where
+both the zip and the installer put `cua_driver_sdk.dll`. A development tree may
+keep standalone `waku_computer_use` and `waku_js_repl` builds; the app prefers
+one when it exists, because the dev watcher rebuilds them on their own.
 
 Each helper connection owns one SDK runtime. Native tool refusals preserve the
 connection and the full result, including error codes, snapshot tokens, capture
@@ -108,13 +116,15 @@ configuration reads, a request missing required arguments, a synthetic image,
 and REPL reset/reconnect:
 
 ```sh
-cargo build -p waku --bin waku_js_repl -p waku-computer-use --bin waku_computer_use
+cargo build -p waku --bin waku
 bun scripts/cua-driver.ts bundle target/debug target/debug/resources debug
 bun scripts/test-computer-use.ts
 ```
 
-To test the signed macOS host, pass its packaged REPL and helper executable
-paths to `scripts/test-computer-use.ts`. Add `--expect-cursor` to check native
+The script drives `target/debug/waku --computer-use` and `--js-repl`, so it
+exercises the same single file a package ships. Pass another program to test a
+standalone helper, and pass the signed macOS host's executable to test that
+instead. Add `--expect-cursor` to check native
 cursor availability in a graphical session without moving or clicking anything.
 The CI matrix runs the portable SDK
 smoke test on all three operating systems. UI automation tests are separate

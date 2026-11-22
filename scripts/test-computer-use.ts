@@ -1,21 +1,29 @@
 // Protocol/SDK smoke test. No app discovery, screenshots, input, or TCC prompts.
-// Usage: bun scripts/test-computer-use.ts <waku_js_repl> <computer-use-helper>
+// Usage: bun scripts/test-computer-use.ts [<waku>]
+//
+// The package ships one `waku` executable that holds the REPL and the Cua
+// Driver host behind `--js-repl` and `--computer-use`, so the test drives that
+// same binary both ways. Passing a different program still works: a dedicated
+// helper is detected and run without a mode word.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve, join } from "node:path";
+import { basename, resolve, join } from "node:path";
 import { createInterface } from "node:readline";
 
 const suffix = process.platform === "win32" ? ".exe" : "";
 const expectCursor = process.argv.includes("--expect-cursor");
-const [
-  repl = `target/debug/waku_js_repl${suffix}`,
-  helper = `target/debug/waku_computer_use${suffix}`,
-] = process.argv.slice(2).filter((argument) => argument !== "--expect-cursor");
-assert(repl && helper, "Pass the REPL executable and native helper executable");
+const [program = `target/debug/waku${suffix}`] = process.argv
+  .slice(2)
+  .filter((argument) => argument !== "--expect-cursor");
+assert(program, "Pass the Waku executable");
+const executable = resolve(program);
+// A merged build needs the mode word; a dedicated helper takes none.
+const merged = basename(executable).startsWith("waku.");
+const helperArguments = merged ? ["--computer-use", "list-tools"] : ["list-tools"];
 const nativeTools: string[] = JSON.parse(
-  execFileSync(resolve(helper), ["list-tools"], {
+  execFileSync(executable, helperArguments, {
     encoding: "utf8",
     windowsHide: true,
     maxBuffer: 8 * 1024 * 1024,
@@ -24,10 +32,13 @@ const nativeTools: string[] = JSON.parse(
   .tools.map((tool: { name: string }) => tool.name)
   .filter((name: string) => name !== "bring_to_front");
 const directory = await mkdtemp(join(tmpdir(), "waku-cua-test-"));
-const child = spawn(resolve(repl), [], {
+const child = spawn(executable, merged ? ["--js-repl"] : [], {
   env: {
     ...process.env,
-    WAKU_COMPUTER_USE_SERVER: resolve(helper),
+    WAKU_COMPUTER_USE_SERVER: executable,
+    WAKU_COMPUTER_USE_SERVER_ARGUMENTS: JSON.stringify(
+      merged ? ["--computer-use"] : [],
+    ),
     WAKU_COMPUTER_USE_PROCESS_DIRECTORY: directory,
   },
   stdio: ["pipe", "pipe", "pipe"],

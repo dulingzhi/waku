@@ -3,9 +3,9 @@
 import { $ } from "bun";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { writeCuaSkill } from "./cua-api";
+import { renderCuaSkill, type CuaCatalog } from "./cua-api";
 import { prepareCuaHost } from "./cua-host";
 
 export const cuaVersion = "0.28.0";
@@ -93,24 +93,13 @@ export async function prepareCuaSdk(platform = cuaPlatform()): Promise<string> {
 export async function bundleComputerUse(
   binDirectory: string,
   resourcesDirectory: string,
-  profile: "debug" | "release",
+  _profile: "debug" | "release",
 ): Promise<void> {
   const platform = cuaPlatform();
   const sdk = await prepareCuaSdk(platform);
   const hostSdk = await prepareCuaHost();
-  const target = resolve(
-    root,
-    process.env.CARGO_TARGET_DIR || "target",
-    profile,
-  );
-  const suffix = process.platform === "win32" ? ".exe" : "";
   await mkdir(binDirectory, { recursive: true });
   await mkdir(resourcesDirectory, { recursive: true });
-  for (const file of [`waku_js_repl${suffix}`, `waku_computer_use${suffix}`]) {
-    const destination = join(binDirectory, file);
-    if (resolve(target, file) !== resolve(destination))
-      await cp(join(target, file), destination);
-  }
   await cp(
     join(hostSdk, artifacts[platform][1]),
     join(binDirectory, artifacts[platform][1]),
@@ -135,10 +124,27 @@ export async function bundleComputerUse(
     await mkdir(dirname(destination), { recursive: true });
     await cp(join(root, source!), destination);
   }
-  await writeCuaSkill(
-    join(binDirectory, `waku_computer_use${suffix}`),
-    join(resourcesDirectory, "skills/waku-computer-use/SKILL.md"),
+}
+
+/// Write the Computer Use skill from the driver's own tool catalog.
+///
+/// A package ships one `waku` executable, so the catalog comes from
+/// `waku --computer-use list-tools` rather than from a dedicated helper binary.
+/// `host` is that program, and the SDK library has to sit next to it the way it
+/// does at run time.
+export async function writePackagedCuaSkill(
+  host: string,
+  destination: string,
+): Promise<void> {
+  const catalog = JSON.parse(
+    await $`${host} --computer-use list-tools`.quiet().text(),
+  ) as CuaCatalog;
+  const source = await readFile(
+    new URL("../resources/computer-use/SKILL.md", import.meta.url),
+    "utf8",
   );
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(destination, renderCuaSkill(source, catalog));
 }
 
 if (import.meta.main) {

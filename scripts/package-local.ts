@@ -46,11 +46,10 @@ const archive = join(projectRoot, "dist", `${directoryName}.zip`);
 await rm(join(projectRoot, "dist", "staging"), { recursive: true, force: true });
 await mkdir(staging, { recursive: true });
 
-// `waku.exe` is both the GUI and the daemon: the desktop spawns itself with
-// `--daemon`, so no `waku-daemon.exe` ships any more. The other two are genuine
-// helper processes — the JS REPL host and the CUA driver host — launched as
-// their own binaries by design.
-const binaries = ["waku.exe", "waku_js_repl.exe", "waku_computer_use.exe"];
+// `waku.exe` is the GUI, the daemon, the JavaScript REPL and the Cua Driver
+// host: the desktop spawns itself with `--daemon`, and the drivers reach the
+// other two through `--js-repl` / `--computer-use`. One file, four jobs.
+const binaries = ["waku.exe"];
 for (const binary of binaries) {
   await copyFile(join(release, binary), join(staging, binary));
 }
