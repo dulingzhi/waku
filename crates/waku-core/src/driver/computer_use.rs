@@ -23,8 +23,8 @@ use std::os::unix::ffi::OsStringExt as _;
 
 #[derive(Clone)]
 pub(super) struct ComputerUseConfig {
-    pub(super) server_path: PathBuf,
-    pub(super) repl_path: PathBuf,
+    pub(super) server: computer_use::HelperCommand,
+    pub(super) repl: computer_use::HelperCommand,
     pub(super) skill_path: PathBuf,
     pub(super) process_directory: PathBuf,
 }
@@ -36,8 +36,8 @@ pub(super) struct ComputerUseRuntime {
 
 impl ComputerUseRuntime {
     pub(super) fn start(events: DriverEventSender) -> anyhow::Result<Self> {
-        let server_path = computer_use::mcp_server_command()?;
-        let repl_path = computer_use::js_repl_server_path()?;
+        let server = computer_use::mcp_server_command()?;
+        let repl = computer_use::js_repl_server_path()?;
         let skill_path = computer_use::skill_root_path()?
             .join("waku-computer-use")
             .join("SKILL.md");
@@ -52,8 +52,8 @@ impl ComputerUseRuntime {
             };
         Ok(Self {
             config: ComputerUseConfig {
-                server_path,
-                repl_path,
+                server,
+                repl,
                 skill_path,
                 process_directory,
             },
@@ -62,7 +62,7 @@ impl ComputerUseRuntime {
     }
 
     pub(super) fn stop(&self) {
-        stop_registered_processes(&self.config.process_directory, &self.config.server_path);
+        stop_registered_processes(&self.config.process_directory, &self.config.server.program);
     }
 }
 

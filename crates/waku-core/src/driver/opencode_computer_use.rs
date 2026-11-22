@@ -62,7 +62,7 @@ impl McpBridge {
             server: format!("waku_js_repl_{}", Uuid::new_v4().simple()),
             config: json!({
                 "type": "local",
-                "command": [config.repl_path],
+                "command": config.repl.argv(),
                 "cwd": directory,
                 // This is already a JavaScript tool. Keep OpenCode's extra
                 // execute/codemode wrapper out of the agent-facing API.
@@ -162,7 +162,8 @@ impl OpenCodeComputerUse {
         fs::write(
             &temporary,
             serde_json::to_vec(&json!({
-                "server_path": this.runtime.config.server_path,
+                "server_path": this.runtime.config.server.program,
+                "server_arguments": this.runtime.config.server.args,
                 "process_directory": this.runtime.config.process_directory,
                 "cwd": directory,
             }))?,

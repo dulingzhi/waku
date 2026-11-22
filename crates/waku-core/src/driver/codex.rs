@@ -143,7 +143,9 @@ pub struct CodexDriver {
 struct CodexComputerUseConfig {
     server_path: PathBuf,
     server: String,
+    server_arguments: String,
     repl: String,
+    repl_arguments: String,
     skill_root: PathBuf,
     process_directory: PathBuf,
     process_directory_config: String,
@@ -151,17 +153,25 @@ struct CodexComputerUseConfig {
 
 impl CodexComputerUseConfig {
     fn load() -> anyhow::Result<Self> {
-        let server_path = computer_use::mcp_server_command()?;
-        let server = toml_string(&server_path.display().to_string());
-        let repl_path = computer_use::js_repl_server_path()?;
-        let repl = toml_string(&repl_path.display().to_string());
+        let server = computer_use::mcp_server_command()?;
+        let server_path = server.program.clone();
+        let server_arguments = toml_string(&server.args_json());
+        let repl_command = computer_use::js_repl_server_path()?;
+        // Codex takes the command and its arguments as separate keys, so a
+        // merged `waku --js-repl` has to pass its mode word here rather than
+        // inside the program path. The value is JSON: Codex parses `-c`
+        // overrides as JSON, and TOML cannot encode a bare array at the root.
+        let repl = toml_string(&repl_command.program.display().to_string());
+        let repl_arguments = repl_command.args_json();
         let skill_root = computer_use::skill_root_path()?;
         let process_directory = computer_use_runtime::create_process_directory()?;
         let process_directory_config = toml_string(&process_directory.display().to_string());
         Ok(Self {
+            server: toml_string(&server_path.display().to_string()),
             server_path,
-            server,
+            server_arguments,
             repl,
+            repl_arguments,
             skill_root,
             process_directory,
             process_directory_config,
@@ -195,11 +205,19 @@ fn configure_computer_use_command(command: &mut Command, config: Option<&CodexCo
             .arg("-c")
             .arg(format!("mcp_servers.waku_js_repl.command={}", config.repl))
             .arg("-c")
-            .arg("mcp_servers.waku_js_repl.args=[]")
+            .arg(format!(
+                "mcp_servers.waku_js_repl.args={}",
+                config.repl_arguments
+            ))
             .arg("-c")
             .arg(format!(
                 "mcp_servers.waku_js_repl.env.WAKU_COMPUTER_USE_SERVER={}",
                 config.server
+            ))
+            .arg("-c")
+            .arg(format!(
+                "mcp_servers.waku_js_repl.env.WAKU_COMPUTER_USE_SERVER_ARGUMENTS={}",
+                config.server_arguments
             ))
             .arg("-c")
             .arg(format!(
@@ -3032,7 +3050,9 @@ mod tests {
         let config = CodexComputerUseConfig {
             server_path: PathBuf::from("/tmp/waku-computer-use-server"),
             server: toml_string("/tmp/waku-computer-use-server"),
+            server_arguments: r#"[]"#.into(),
             repl: toml_string("/tmp/waku"),
+            repl_arguments: r#"["--js-repl"]"#.into(),
             skill_root: PathBuf::from("/tmp/waku-computer-use-skill"),
             process_directory: PathBuf::from("/tmp/waku-computer-use-processes"),
             process_directory_config: toml_string("/tmp/waku-computer-use-processes"),
@@ -3055,10 +3075,13 @@ mod tests {
                 .iter()
                 .any(|argument| argument.contains("mcp_servers.waku_js_repl.command"))
         );
+        // A merged `waku` needs its mode word in the argument list, since Codex
+        // keeps the command and the arguments in separate keys. Hard-coding
+        // `args=[]` here would launch the GUI instead of the REPL.
         assert!(
             enabled_arguments
                 .iter()
-                .any(|argument| { argument == "mcp_servers.waku_js_repl.args=[]" })
+                .any(|argument| { argument == r#"mcp_servers.waku_js_repl.args=["--js-repl"]"# })
         );
         assert!(
             enabled_arguments

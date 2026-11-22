@@ -185,13 +185,21 @@ fn configure_pi_computer_use_command(
     config: Option<(&computer_use_runtime::ComputerUseConfig, &Path)>,
 ) {
     if let Some((config, extension)) = config {
+        // The extension and the REPL both live behind one string-valued
+        // variable, so a merged `waku` needs its mode words passed alongside
+        // the program rather than folded into the path.
         command
             .arg("--extension")
             .arg(extension)
             .arg("--skill")
             .arg(&config.skill_path)
-            .env("WAKU_JS_REPL_SERVER", &config.repl_path)
-            .env("WAKU_COMPUTER_USE_SERVER", &config.server_path)
+            .env("WAKU_JS_REPL_SERVER", &config.repl.program)
+            .env("WAKU_JS_REPL_SERVER_ARGUMENTS", config.repl.args_json())
+            .env("WAKU_COMPUTER_USE_SERVER", &config.server.program)
+            .env(
+                "WAKU_COMPUTER_USE_SERVER_ARGUMENTS",
+                config.server.args_json(),
+            )
             .env(
                 "WAKU_COMPUTER_USE_PROCESS_DIRECTORY",
                 &config.process_directory,
@@ -1837,8 +1845,14 @@ mod tests {
     #[test]
     fn pi_computer_use_uses_only_session_scoped_extension_and_skill_arguments() {
         let config = computer_use_runtime::ComputerUseConfig {
-            server_path: PathBuf::from("/tmp/Waku Computer Use"),
-            repl_path: PathBuf::from("/Applications/Waku.app/Resources/waku_js_repl"),
+            server: crate::computer_use::HelperCommand {
+                program: PathBuf::from("/tmp/Waku Computer Use"),
+                args: Vec::new(),
+            },
+            repl: crate::computer_use::HelperCommand {
+                program: PathBuf::from("/Applications/Waku.app/Resources/waku_js_repl"),
+                args: Vec::new(),
+            },
             skill_path: PathBuf::from("/Applications/Waku.app/Resources/skills/SKILL.md"),
             process_directory: PathBuf::from("/tmp/waku-computer-use/session"),
         };

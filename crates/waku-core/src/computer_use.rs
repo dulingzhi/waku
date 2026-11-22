@@ -236,19 +236,81 @@ pub fn helper_display_name() -> String {
         .unwrap_or_else(|| "Waku Computer Use".into())
 }
 
-pub fn mcp_server_command() -> anyhow::Result<PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return packaged_file(
-            &host_executable_path()?.with_file_name(helper_executable_name()),
-            "Cua Driver helper",
-        );
+/// A child process Waku launches: the program, plus the arguments that select a
+/// mode inside it.
+///
+/// Packaged builds ship one `waku` executable and reach the JavaScript REPL and
+/// the Cua Driver host through `--js-repl` / `--computer-use`, so a consumer can
+/// no longer be handed a bare path. Both halves travel together because they are
+/// only correct as a pair: `waku.exe --computer-use mcp` is the helper, while
+/// `waku.exe` alone is the GUI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HelperCommand {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+}
+
+impl HelperCommand {
+    /// The command a consumer writes into a spawn call.
+    pub fn command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.program);
+        command.args(&self.args);
+        command
     }
+
+    /// The command as the `[program, args…]` list a JSON MCP config wants.
+    pub fn argv(&self) -> Vec<String> {
+        let mut argv = vec![self.program.display().to_string()];
+        argv.extend(self.args.iter().cloned());
+        argv
+    }
+
+    /// The mode arguments as a JSON array, for consumers that carry a helper
+    /// through one string-valued environment variable.
+    ///
+    /// `WAKU_COMPUTER_USE_SERVER` is the program and this is what to pass it, so
+    /// a merged `waku` reaches the same mode a standalone helper would.
+    pub fn args_json(&self) -> String {
+        serde_json::to_string(&self.args).unwrap_or_else(|_| "[]".into())
+    }
+}
+
+/// Resolve one helper to a running command.
+///
+/// A dedicated helper binary next to `waku` still wins when it exists: the dev
+/// watcher rebuilds `waku_js_repl` and `waku_computer_use` on their own, and a
+/// standalone helper needs no mode word. A package ships only `waku`, so it
+/// resolves to the merged program plus the flag that selects the same mode.
+fn helper_command(standalone: Option<PathBuf>, mode: &str) -> anyhow::Result<HelperCommand> {
+    if let Some(program) = standalone.filter(|path| path.is_file()) {
+        return Ok(HelperCommand {
+            program,
+            args: Vec::new(),
+        });
+    }
+    Ok(HelperCommand {
+        program: host_executable_path()?,
+        args: vec![format!("--{mode}")],
+    })
+}
+
+pub fn mcp_server_command() -> anyhow::Result<HelperCommand> {
+    if !cfg!(target_os = "macos") {
+        let standalone = host_executable_path()?.with_file_name(helper_executable_name());
+        return helper_command(Some(standalone), "computer-use");
+    }
+    // macOS installs a signed Launch Services helper, which is a different
+    // program with its own TCC identity rather than a mode of `waku`.
     let bundled_helper = helper_app_path()?;
     let helper = install_helper_app(&bundled_helper)?;
     let executable = helper
         .file_stem()
         .ok_or_else(|| anyhow!("Computer Use helper name is invalid"))?;
-    Ok(helper.join("Contents").join("MacOS").join(executable))
+    let program = helper.join("Contents").join("MacOS").join(executable);
+    Ok(HelperCommand {
+        program,
+        args: Vec::new(),
+    })
 }
 
 fn helper_executable_name() -> &'static str {
@@ -283,9 +345,14 @@ fn packaged_file(path: &Path, name: &str) -> anyhow::Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
+pub fn js_repl_server_path() -> anyhow::Result<HelperCommand> {
+    // macOS keeps code in `Contents/MacOS` and resources in `Contents/Resources`.
+    // A packaged build has one executable, so the REPL is a mode of it rather
+    // than a second program under `Resources`; a development bundle that still
+    // has the old standalone copy keeps using it, which is why this prefers a
+    // file that exists over a mode.
     let executable = host_executable_path()?;
-    let path = if cfg!(target_os = "macos") {
+    let standalone = if cfg!(target_os = "macos") {
         resources_directory(&executable, "macos")?.join("waku_js_repl")
     } else {
         executable.with_file_name(if cfg!(windows) {
@@ -294,7 +361,7 @@ pub fn js_repl_server_path() -> anyhow::Result<PathBuf> {
             "waku_js_repl"
         })
     };
-    packaged_file(&path, "Waku JavaScript REPL")
+    helper_command(Some(standalone), "js-repl")
 }
 
 pub fn pi_extension_path() -> anyhow::Result<PathBuf> {
@@ -402,6 +469,31 @@ fn host_executable_path() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every helper mode is selected by an argument, because a package ships one
+    /// executable. Dropping the flag would silently start the GUI instead, which
+    /// is why it is pinned here rather than only in a driver's own test.
+    #[test]
+    fn a_merged_helper_is_reached_through_its_mode_word() {
+        // A dedicated helper that exists wins and needs no mode word.
+        let directory = std::env::temp_dir().join(format!("waku-helper-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let standalone = directory.join("waku_computer_use");
+        fs::write(&standalone, b"").unwrap();
+        let dedicated = helper_command(Some(standalone.clone()), "computer-use").unwrap();
+        assert_eq!(dedicated.program, standalone);
+        assert!(dedicated.args.is_empty());
+
+        // Without one, the same request becomes this executable plus the mode.
+        let merged = helper_command(Some(directory.join("absent")), "computer-use").unwrap();
+        assert_eq!(merged.program, host_executable_path().unwrap());
+        assert_eq!(merged.args, ["--computer-use"]);
+
+        // The JSON form is what string-only consumers pass along.
+        assert_eq!(merged.args_json(), r#"["--computer-use"]"#);
+        assert_eq!(dedicated.args_json(), "[]");
+        let _ = fs::remove_dir_all(&directory);
+    }
 
     #[test]
     fn packaged_resources_follow_each_platform_layout() {

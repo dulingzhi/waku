@@ -167,7 +167,11 @@ fn build_grok_computer_use_toml(
     let mut environment = toml::Table::new();
     environment.insert(
         "WAKU_COMPUTER_USE_SERVER".into(),
-        toml::Value::String(base.server_path.display().to_string()),
+        toml::Value::String(base.server.program.display().to_string()),
+    );
+    environment.insert(
+        "WAKU_COMPUTER_USE_SERVER_ARGUMENTS".into(),
+        toml::Value::String(base.server.args_json()),
     );
     environment.insert(
         "WAKU_COMPUTER_USE_PROCESS_DIRECTORY".into(),
@@ -176,9 +180,18 @@ fn build_grok_computer_use_toml(
     let mut server = toml::Table::new();
     server.insert(
         "command".into(),
-        toml::Value::String(base.repl_path.display().to_string()),
+        toml::Value::String(base.repl.program.display().to_string()),
     );
-    server.insert("args".into(), toml::Value::Array(Vec::new()));
+    server.insert(
+        "args".into(),
+        toml::Value::Array(
+            base.repl
+                .args
+                .iter()
+                .map(|argument| toml::Value::String(argument.clone()))
+                .collect(),
+        ),
+    );
     server.insert("env".into(), toml::Value::Table(environment));
     server.insert("enabled".into(), toml::Value::Boolean(true));
     mcp_servers.insert("waku_js_repl".into(), toml::Value::Table(server));
@@ -206,7 +219,11 @@ pub(super) fn grok_computer_use_launch_configuration(
             ("GROK_HOME".to_owned(), grok_home.display().to_string()),
             (
                 "WAKU_COMPUTER_USE_SERVER".to_owned(),
-                base.server_path.display().to_string(),
+                base.server.program.display().to_string(),
+            ),
+            (
+                "WAKU_COMPUTER_USE_SERVER_ARGUMENTS".to_owned(),
+                base.server.args_json(),
             ),
             (
                 "WAKU_COMPUTER_USE_PROCESS_DIRECTORY".to_owned(),
@@ -402,8 +419,14 @@ mod tests {
 
     fn computer_use_config() -> computer_use_runtime::ComputerUseConfig {
         computer_use_runtime::ComputerUseConfig {
-            server_path: PathBuf::from("/tmp/Waku Computer Use"),
-            repl_path: PathBuf::from("/Applications/Waku.app/Contents/Resources/waku_js_repl"),
+            server: crate::computer_use::HelperCommand {
+                program: PathBuf::from("/tmp/Waku Computer Use"),
+                args: Vec::new(),
+            },
+            repl: crate::computer_use::HelperCommand {
+                program: PathBuf::from("/Applications/Waku.app/Contents/Resources/waku_js_repl"),
+                args: Vec::new(),
+            },
             skill_path: PathBuf::from(
                 "/Applications/Waku.app/Contents/Resources/skills/waku-computer-use/SKILL.md",
             ),
