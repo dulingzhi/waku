@@ -681,6 +681,39 @@ impl Waku {
         }
     }
 
+    /// Restore one panel edge to its default width.
+    ///
+    /// A drag has no numeric affordance — there is no field to clear — so the
+    /// way back to a known-good layout has to be a gesture on the divider
+    /// itself. Double-click is the one every split view offers.
+    pub(super) fn reset_panel_width(
+        &mut self,
+        target: PanelResizeTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A reset while a drag is live would be fought by the next mouse-move,
+        // which still measures from the width the drag started at.
+        self.panel_resize_drag = None;
+        let width = default_panel_width(target);
+        match target {
+            PanelResizeTarget::Sidebar => {
+                self.sidebar_width = width;
+                crate::platform::set_sidebar_material_width(window, width);
+            }
+            PanelResizeTarget::RightPanel => self.right_panel_width = width,
+            PanelResizeTarget::FileTree => {
+                self.right_panel_file_tree_width = width;
+                // The tree's width is not persisted, so there is nothing to
+                // save; it still has to be laid out again.
+                cx.notify();
+                return;
+            }
+        }
+        self.persist_panel_layout();
+        cx.notify();
+    }
+
     pub(super) fn navigate_back_action(
         &mut self,
         _: &NavigateBack,

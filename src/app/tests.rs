@@ -5,15 +5,19 @@ use super::composer::{
 use super::runtime::{merge_remote_session_catalog, session_has_active_provider_turn};
 use super::settings::visible_settings_pages;
 use super::{
-    ACTIVITY_PAYLOAD_PREVIEW_LINES, ESCAPE_STOP_CONFIRMATION_TIMEOUT, EscapeStopConfirmation,
-    EscapeStopPress, EscapeStopTarget, NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT,
-    PendingUserInput, SessionNavigation, StreamDeltaKind,
+    ACTIVITY_PAYLOAD_PREVIEW_LINES, CONTENT_MAX_WIDTH, DEFAULT_FILE_TREE_WIDTH,
+    DEFAULT_RIGHT_PANEL_WIDTH, DEFAULT_SIDEBAR_WIDTH, ESCAPE_STOP_CONFIRMATION_TIMEOUT,
+    EscapeStopConfirmation, EscapeStopPress, EscapeStopTarget, FILE_TREE_MAX_WIDTH,
+    FILE_TREE_MIN_WIDTH, NAVIGATION_RAIL_CONTENT_GAP, NAVIGATION_RAIL_LEFT,
+    NAVIGATION_RAIL_TICK_HEIGHT, NAVIGATION_RAIL_TURN_HEIGHT, NAVIGATION_RAIL_WIDTH,
+    PanelResizeTarget, PendingUserInput, RIGHT_PANEL_MAX_WIDTH, RIGHT_PANEL_MIN_WIDTH,
+    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SessionNavigation, StreamDeltaKind,
     TranscriptRowKind::*,
     active_navigation_turn_index, activity_payload_preview, append_text_delta_to_session,
     assistant_response_footer, assistant_response_footer_index, assistant_response_footer_time,
-    compact_driver_error, disclosure_leading_space, fenced_code, fitted_file_tree_width,
-    fitted_panel_widths, folded_transcript_row_kinds, format_worked_duration,
-    format_working_elapsed, maintain_transcript_anchor, message_opens_turn,
+    compact_driver_error, default_panel_width, disclosure_leading_space, fenced_code,
+    fitted_file_tree_width, fitted_panel_widths, folded_transcript_row_kinds,
+    format_worked_duration, format_working_elapsed, maintain_transcript_anchor, message_opens_turn,
     message_starts_followup_turn, navigation_preview_snippet, navigation_rail_fade_visibility,
     navigation_rail_height, navigation_rail_scale, paused_toast_duration, pop_stream_batch,
     push_transcript_activity, response_footer_message_index, response_row_turn_id,
@@ -395,10 +399,17 @@ fn task_notification_tags_route_to_the_corresponding_task() {
 
 #[test]
 fn conversation_navigation_rail_visibility_uses_all_three_gates() {
-    assert!(should_show_navigation_rail(true, 2, 872.0));
-    assert!(!should_show_navigation_rail(false, 2, 872.0));
-    assert!(!should_show_navigation_rail(true, 1, 872.0));
-    assert!(!should_show_navigation_rail(true, 2, 871.0));
+    // The rail needs room beside the content column, so the viewport that fits
+    // it depends on how wide that column may grow. Deriving it here keeps this
+    // test about the three gates rather than about one content width: raising
+    // `CONTENT_MAX_WIDTH` moves the threshold and must not fail the gate check.
+    let rail_right = NAVIGATION_RAIL_LEFT + NAVIGATION_RAIL_WIDTH;
+    let margin_needed = rail_right + NAVIGATION_RAIL_CONTENT_GAP;
+    let fits = CONTENT_MAX_WIDTH + margin_needed * 2.0;
+    assert!(should_show_navigation_rail(true, 2, fits));
+    assert!(!should_show_navigation_rail(false, 2, fits));
+    assert!(!should_show_navigation_rail(true, 1, fits));
+    assert!(!should_show_navigation_rail(true, 2, fits - 1.0));
 }
 
 #[test]
@@ -525,6 +536,59 @@ fn hidden_panels_do_not_consume_layout_width() {
 
     assert_eq!(sidebar, 0.0);
     assert_eq!(right_panel, 620.0);
+}
+
+/// A double-click on a divider has to land somewhere usable: every default is
+/// inside the range its own drag clamps to, so resetting can never produce a
+/// width the next drag would refuse to start from.
+#[test]
+fn every_panel_default_is_a_width_its_own_drag_would_allow() {
+    for (target, min, max) in [
+        (
+            PanelResizeTarget::Sidebar,
+            SIDEBAR_MIN_WIDTH,
+            SIDEBAR_MAX_WIDTH,
+        ),
+        (
+            PanelResizeTarget::RightPanel,
+            RIGHT_PANEL_MIN_WIDTH,
+            RIGHT_PANEL_MAX_WIDTH,
+        ),
+        (
+            PanelResizeTarget::FileTree,
+            FILE_TREE_MIN_WIDTH,
+            FILE_TREE_MAX_WIDTH,
+        ),
+    ] {
+        let width = default_panel_width(target);
+        assert!(
+            (min..=max).contains(&width),
+            "{target:?}'s default {width} must sit within {min}..={max}"
+        );
+    }
+}
+
+/// Resetting the panel and resetting its tree are separate gestures on separate
+/// dividers, so they must not answer with the same value: the tree's default is
+/// a fraction of the panel's.
+#[test]
+fn the_tree_resets_to_its_own_default_not_the_panels() {
+    assert_ne!(
+        default_panel_width(PanelResizeTarget::FileTree),
+        default_panel_width(PanelResizeTarget::RightPanel)
+    );
+    assert_eq!(
+        default_panel_width(PanelResizeTarget::RightPanel),
+        DEFAULT_RIGHT_PANEL_WIDTH
+    );
+    assert_eq!(
+        default_panel_width(PanelResizeTarget::FileTree),
+        DEFAULT_FILE_TREE_WIDTH
+    );
+    assert_eq!(
+        default_panel_width(PanelResizeTarget::Sidebar),
+        DEFAULT_SIDEBAR_WIDTH
+    );
 }
 
 #[test]

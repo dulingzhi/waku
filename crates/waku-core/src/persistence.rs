@@ -1912,6 +1912,47 @@ mod tests {
         assert!(!restored.right_panel_visible);
     }
 
+    /// A width the user dragged has to outlive the process, or the drag was
+    /// pointless. This is the round trip the whole feature rests on.
+    #[test]
+    fn a_dragged_panel_width_survives_a_restart() {
+        let directory = temporary_directory();
+        fs::create_dir_all(&directory).unwrap();
+
+        let dragged = 733.0;
+        {
+            let store = store_in(&directory);
+            let mut state = PersistedState::empty();
+            state.right_panel_width = dragged;
+            state.right_panel_visible = true;
+            store.save(&mut state).unwrap();
+        }
+
+        let store = store_in(&directory);
+        let restored = store.load().unwrap();
+        assert_eq!(
+            restored.right_panel_width, dragged,
+            "a width the user chose must come back exactly"
+        );
+        assert!(restored.right_panel_visible);
+
+        fs::remove_dir_all(directory).ok();
+    }
+
+    /// An older state file predating the field must not read as zero, which
+    /// would leave the panel at its minimum on first launch after an upgrade.
+    #[test]
+    fn a_state_without_a_panel_width_falls_back_to_the_default() {
+        let mut app_state = serde_json::to_value(PersistedState::empty().app_state()).unwrap();
+        app_state
+            .as_object_mut()
+            .unwrap()
+            .remove("right_panel_width");
+        let restored: AppState = serde_json::from_value(app_state).unwrap();
+
+        assert_eq!(restored.right_panel_width, DEFAULT_RIGHT_PANEL_WIDTH);
+    }
+
     #[test]
     fn analytics_preference_and_identity_use_their_respective_files() {
         let mut state = PersistedState::empty();

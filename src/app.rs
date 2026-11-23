@@ -90,7 +90,7 @@ use waku_client::claude::{
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 86.0;
 #[cfg(not(target_os = "macos"))]
 const TRAFFIC_LIGHT_CLEARANCE: f32 = 8.0;
-const CONTENT_MAX_WIDTH: f32 = 720.0;
+const CONTENT_MAX_WIDTH: f32 = 1140.0;
 /// Menu-registry id of the composer's model picker, shared by its render site
 /// and the primary-modifier `/` toggle action.
 const MODEL_PICKER_MENU_ID: &str = "provider-model-picker";
@@ -275,6 +275,19 @@ enum PanelResizeTarget {
     Sidebar,
     RightPanel,
     FileTree,
+}
+
+/// The width one divider returns to when it is reset.
+///
+/// The tree has its own default because it shares the right panel with the
+/// editor: restoring the panel's width says nothing about how that width is
+/// split between the two.
+fn default_panel_width(target: PanelResizeTarget) -> f32 {
+    match target {
+        PanelResizeTarget::Sidebar => DEFAULT_SIDEBAR_WIDTH,
+        PanelResizeTarget::RightPanel => DEFAULT_RIGHT_PANEL_WIDTH,
+        PanelResizeTarget::FileTree => DEFAULT_FILE_TREE_WIDTH,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

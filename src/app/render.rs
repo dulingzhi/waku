@@ -68,6 +68,16 @@ impl Waku {
                     this.begin_panel_resize(target, event, window, cx);
                 }),
             )
+            // A double-click puts the edge back to its default. The gesture is
+            // on the divider because a width has nowhere else to be reset from,
+            // and it is the one every split view uses.
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    if event.click_count() == 2 {
+                        this.reset_panel_width(target, window, cx);
+                    }
+                }),
+            )
     }
 }
 
