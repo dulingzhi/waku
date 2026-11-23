@@ -150,6 +150,17 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
     relative(&workspace, &target)
 }
 
+/// Whether a path outside the workspace should open as a preview rather than in
+/// the file manager.
+///
+/// Only a format the panel can actually draw qualifies. Sending a text file on
+/// another drive here would open it in an editor built for in-workspace files —
+/// worse than the editor the user already has — so it keeps going to the file
+/// manager.
+fn outcome_is_preview(path: &Path) -> bool {
+    file_preview::kind_of(&path.to_string_lossy()).is_some()
+}
+
 fn transcript_link_route(target: &str, workspace: Option<&Path>) -> TranscriptLinkRoute {
     let Some(path) = markdown_file_link_path(target) else {
         return TranscriptLinkRoute::External;
@@ -1250,6 +1261,35 @@ mod tests {
         );
     }
 
+    /// A picture outside the workspace is the case a transcript read produces
+    /// constantly: a tool reads a texture in a game install, and the row offers
+    /// it. The panel can draw it, so it must open as a preview rather than
+    /// throwing the user into the file manager.
+    #[test]
+    fn a_picture_outside_the_workspace_opens_as_a_preview() {
+        for name in ["shot.png", "icon.ico", "sheet.xlsx", "paper.docx"] {
+            let path = Path::new("/elsewhere/deep").join(name);
+            assert!(
+                outcome_is_preview(&path),
+                "{name} outside the workspace must preview"
+            );
+        }
+    }
+
+    /// Everything the panel cannot draw keeps going to the file manager: a
+    /// source file on another drive would otherwise open in an editor built for
+    /// in-workspace files, which is worse than the one the user already has.
+    #[test]
+    fn a_non_previewable_path_outside_the_workspace_still_uses_the_finder() {
+        for name in ["app.rs", "notes.md", "Cargo.toml", "run.sh"] {
+            let path = Path::new("/elsewhere/deep").join(name);
+            assert!(
+                !outcome_is_preview(&path),
+                "{name} cannot be drawn, so it must not take the preview route"
+            );
+        }
+    }
+
     /// Selection resolves rows by key, so a repeated key makes a drag jump
     /// between the duplicates. Numbered rows keep their number-derived keys
     /// (stable across Review's gap expansion); rows a provider never
@@ -1898,7 +1938,14 @@ impl Waku {
                 self.open_right_panel_file(relative_path, cx);
             }
             TranscriptLinkRoute::Finder(path) => {
-                if self.daemon.is_remote() {
+                // A picture is something to look at, and the panel can show it
+                // even when it lives outside the workspace. Anything else goes to
+                // the file manager: a text file on another drive has no reader
+                // here that would not be a worse editor than the user's own.
+                if outcome_is_preview(&path) {
+                    let target = path.to_string_lossy().into_owned();
+                    self.open_right_panel_surface(RightPanelSurface::File(target), cx);
+                } else if self.daemon.is_remote() {
                     self.show_toast(tr!("errors.remote_host_path"));
                     cx.notify();
                 } else {
@@ -3625,22 +3672,45 @@ impl Waku {
 
         let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         let relative = relative_path.to_owned();
+        // A preview opened from the file tree names a path inside the workspace
+        // and goes through the confined reader. One opened from the transcript
+        // may name anything the model read, including a file on another drive,
+        // and only the absolute-path reader can reach it. The path decides,
+        // before any read: a file that is not under the root would be rejected
+        // there anyway, so asking that reader first would turn a working preview
+        // into an error for the very case this exists for.
+        let inside_workspace = Path::new(&relative)
+            .is_absolute()
+            .then(|| workspace_relative_file_path(&project_path, Path::new(&relative)))
+            .flatten();
         cx.spawn(async move |waku, cx| {
             let read = cx
                 .background_executor()
                 .spawn({
                     let project_path = project_path.clone();
                     let relative = relative.clone();
+                    let inside_workspace = inside_workspace.clone();
                     async move {
-                        let bytes = match workspace.request(
-                            waku_client::WorkspaceOperation::ReadBinaryFile {
-                                root: project_path,
-                                relative_path: PathBuf::from(&relative),
+                        let bytes = match inside_workspace {
+                            Some(relative_path) => match workspace.request(
+                                waku_client::WorkspaceOperation::ReadBinaryFile {
+                                    root: project_path,
+                                    relative_path: PathBuf::from(&relative_path),
+                                },
+                            ) {
+                                Ok(waku_client::WorkspaceResult::BinaryFile { bytes }) => bytes,
+                                Ok(_) => return Err(format!("{relative}: unreadable response")),
+                                Err(error) => return Err(format!("{relative}: {error}")),
                             },
-                        ) {
-                            Ok(waku_client::WorkspaceResult::BinaryFile { bytes }) => bytes,
-                            Ok(_) => return Err(format!("{relative}: unreadable response")),
-                            Err(error) => return Err(format!("{relative}: {error}")),
+                            None => match workspace.request(
+                                waku_client::WorkspaceOperation::ReadPreviewFile {
+                                    path: PathBuf::from(&relative),
+                                },
+                            ) {
+                                Ok(waku_client::WorkspaceResult::BinaryFile { bytes }) => bytes,
+                                Ok(_) => return Err(format!("{relative}: unreadable response")),
+                                Err(error) => return Err(format!("{relative}: {error}")),
+                            },
                         };
                         // Decoding is the expensive half; it belongs here rather
                         // than in the update below, which runs on the UI thread.

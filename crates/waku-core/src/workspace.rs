@@ -61,6 +61,19 @@ pub fn execute(operation: WorkspaceOperation) -> anyhow::Result<WorkspaceResult>
         } => WorkspaceResult::BinaryFile {
             bytes: fs::read(resolve_workspace_path(&root, &relative_path)?)?,
         },
+        // Deliberately no `resolve_workspace_path`: that helper exists to keep
+        // the file tree inside its root, and this operation's whole purpose is a
+        // path outside one. It still requires an absolute path, so it cannot be
+        // interpreted relative to whatever directory the daemon happens to be
+        // in, and it opens exactly one file rather than listing anything.
+        WorkspaceOperation::ReadPreviewFile { path } => {
+            if !path.is_absolute() {
+                bail!("a preview path must be absolute");
+            }
+            WorkspaceResult::BinaryFile {
+                bytes: fs::read(&path)?,
+            }
+        }
         WorkspaceOperation::WriteTextFile {
             root,
             relative_path,
@@ -518,6 +531,62 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", command_error(&output));
+    }
+
+    /// A preview may name a file anywhere the user could open, which is what
+    /// makes it useful for a tool that read a texture outside the project.
+    #[test]
+    fn a_preview_reads_a_file_outside_any_workspace() {
+        let root = std::env::temp_dir().join(format!("waku-preview-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("shot.png");
+        fs::write(&path, b"\x89PNG\r\n\x1a\npayload").unwrap();
+
+        let result = execute(WorkspaceOperation::ReadPreviewFile { path: path.clone() }).unwrap();
+        let WorkspaceResult::BinaryFile { bytes } = result else {
+            panic!("a preview must come back as bytes");
+        };
+        assert_eq!(bytes, b"\x89PNG\r\n\x1a\npayload");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// It resolves nothing, so a relative path cannot be interpreted against
+    /// whatever directory the daemon happens to run in.
+    #[test]
+    fn a_preview_refuses_a_relative_path() {
+        let error = execute(WorkspaceOperation::ReadPreviewFile {
+            path: PathBuf::from("shot.png"),
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("must be absolute"),
+            "a relative preview path is rejected: {error}"
+        );
+    }
+
+    /// The confined reader keeps its confinement: this change added a second
+    /// operation rather than widening the one the file tree uses.
+    #[test]
+    fn the_workspace_reader_still_refuses_to_escape_its_root() {
+        let root = std::env::temp_dir().join(format!("waku-confine-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+
+        for escape in ["../outside.png", "/etc/passwd"] {
+            let error = execute(WorkspaceOperation::ReadBinaryFile {
+                root: root.clone(),
+                relative_path: PathBuf::from(escape),
+            })
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be a non-empty relative path"),
+                "{escape} must stay refused: {error}"
+            );
+        }
+
+        fs::remove_dir_all(root).ok();
     }
 
     /// The tree comes from Winc's directory reader, which orders names

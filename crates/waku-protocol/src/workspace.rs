@@ -76,6 +76,25 @@ pub enum WorkspaceOperation {
         #[ts(type = "string")]
         relative_path: PathBuf,
     },
+    /// Read one file by absolute path, for a preview of something outside the
+    /// workspace.
+    ///
+    /// A tool can read any file the user could open — a texture in a game
+    /// install, a document on another drive — and the transcript offers to show
+    /// it. `ReadBinaryFile` above cannot: it joins a relative path onto a root
+    /// and rejects anything that would escape it, which is the confinement the
+    /// file tree depends on.
+    ///
+    /// That confinement is exactly why this is a separate operation rather than
+    /// a relaxed `ReadBinaryFile`. Weakening the workspace reader would widen
+    /// what the whole file tree can reach; this one is scoped to a single
+    /// absolute path, opened only when the user asks to look at a file they were
+    /// already shown. It resolves nothing and takes no root, so it cannot be used
+    /// to walk a directory.
+    ReadPreviewFile {
+        #[ts(type = "string")]
+        path: PathBuf,
+    },
     WriteTextFile {
         #[ts(type = "string")]
         root: PathBuf,
