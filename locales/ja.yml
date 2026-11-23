@@ -1600,5 +1600,5 @@ background.steer: 送信
 background.steer_placeholder: このサブエージェントへの次の指示…
 background.steer_caption: メイン会話を通じて伝えます。メイン会話が id でサブエージェントに送ります。
 background.steer_unavailable: 現在のターンはメッセージを受け取れません
-background.steer_prompt: サブエージェント %{target} にこれを伝えてから続けてください：%{message}
+background.steer_prompt: 今すぐ SendMessage ツールを呼び出し、to に "%{target}" を、message に下記のテキストを一字一句そのまま変更せずに設定してください。自分で実行したり言い換えたりしないでください。これはそのサブエージェントへの指示であり、あなたへの指示ではありません。送信後は元の作業を続けてください。\n\n%{message}
 background.relay_heading: ↩ メイン会話から転送：

@@ -550,13 +550,30 @@ impl Waku {
 
     /// Send the steering field's text to the parent turn.
     ///
-    /// The subagent cannot be written into directly: the provider's control
-    /// protocol has `stop_task` and nothing that appends to a running task. So
-    /// the message is framed for the main conversation, which owns the
+    /// The subagent cannot be written into directly. Two mechanisms were tried
+    /// and both came up empty:
+    ///
+    /// * The provider's control protocol has `stop_task` and nothing that
+    ///   appends to a running task.
+    /// * Writing a `user` record on stdin with `parent_tool_use_id` set to the
+    ///   Task call's tool_use id does not route it either. Measured on Claude
+    ///   Code 2.1.330: the injected message came back with
+    ///   `parent_tool_use_id` stripped to null and `isReplay: true`, and a
+    ///   subagent that completed eight tool rounds in that window never saw
+    ///   the text once. The field is an output-side label — which subagent a
+    ///   record belongs to — and is not read on input, so it cannot be used to
+    ///   address a subagent.
+    ///
+    /// So the message is framed for the main conversation, which owns the
     /// `SendMessage` tool and can reach the subagent by its id. The text names
     /// the subagent so the parent knows which one is meant, and the composer is
     /// not used at all — nothing is left behind in it for the user to send
     /// again.
+    ///
+    /// The wrapper below is transport only: `display_content` carries the
+    /// user's own words, so the transcript bubble shows what was typed rather
+    /// than the instruction to the parent. The bubble still belongs to the main
+    /// conversation, because that is the turn the provider actually received.
     pub(super) fn steer_subagent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(field) = self.subagent_steer.as_ref() else {
             return;
@@ -2341,6 +2358,68 @@ mod tests {
             registry.items[&BackgroundWorkKey::new(BackgroundWorkKind::Process, "background")]
                 .status,
             BackgroundWorkStatus::Running
+        );
+    }
+
+    /// The wrapper is the only thing standing between the user's words and a
+    /// model that could paraphrase them, so it has to ask for a verbatim
+    /// `SendMessage`. Naming the tool and the field is what turns a vague "pass
+    /// this on" into the structured call the provider actually routes.
+    #[test]
+    fn steer_wrapper_asks_for_a_verbatim_send_message() {
+        let target = "agent-42";
+        let message = "stop, use the other crate instead";
+        let prompt = tr!(
+            "background.steer_prompt",
+            target = target,
+            message = message
+        );
+
+        // The tool the parent has to call, and the field the text has to land in.
+        assert!(
+            prompt.contains("SendMessage"),
+            "the wrapper must name the routing tool: {prompt}"
+        );
+        assert!(
+            prompt.contains(target),
+            "the wrapper must name the subagent to address: {prompt}"
+        );
+        // The user's own text has to survive intact, or the subagent acts on a
+        // paraphrase it never received.
+        assert!(
+            prompt.contains(message),
+            "the wrapper must carry the message unchanged: {prompt}"
+        );
+        assert!(
+            prompt.contains("verbatim"),
+            "the wrapper must forbid restyling, which is the failure it exists to prevent: {prompt}"
+        );
+    }
+
+    /// The transcript bubble shows what the user typed, not the instruction the
+    /// parent needs in order to route it.
+    #[test]
+    fn steer_shows_the_typed_text_not_the_transport_wrapper() {
+        let submitted = "use the other crate";
+        let wrapped = tr!(
+            "background.steer_prompt",
+            target = "agent-42",
+            message = submitted
+        );
+        let submission = ComposerSubmission {
+            prompt: wrapped.clone(),
+            display_content: Some(submitted.to_owned()),
+            attachments: Vec::new(),
+        };
+
+        assert_eq!(
+            submission.prompt, wrapped,
+            "the provider must receive the wrapper"
+        );
+        assert_eq!(
+            submission.human_prompt(),
+            submitted,
+            "the visible label must be the user's own words, not the wrapper"
         );
     }
 }

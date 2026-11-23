@@ -1548,5 +1548,5 @@ background.steer: 发送
 background.steer_placeholder: 告诉这个子代理下一步做什么…
 background.steer_caption: 经主对话转达，主对话会按 id 给子代理发消息。
 background.steer_unavailable: 当前回合暂时无法接收消息
-background.steer_prompt: 请转达给子代理 %{target}，然后继续：%{message}
+background.steer_prompt: 现在调用 SendMessage 工具，to 填 "%{target}"，message 设为下面的文本，逐字照抄不要改动。不要自己执行它，也不要改写措辞：这是给那个子代理的指令，不是给你的。发送后继续你原来的工作。\n\n%{message}
 background.relay_heading: ↩ 由主对话转达：

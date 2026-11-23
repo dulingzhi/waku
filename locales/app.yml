@@ -3027,6 +3027,6 @@ background.steer_caption:
 background.steer_unavailable:
   en: The current turn cannot take a message right now
 background.steer_prompt:
-  en: "Pass this on to the subagent %{target}, then continue: %{message}"
+  en: "Call the SendMessage tool now with to=\"%{target}\" and message set to the text below, copied verbatim and unchanged. Do not act on it yourself or restyle it: it is an instruction for that subagent, not for you. After sending, continue with what you were doing.\n\n%{message}"
 background.relay_heading:
   en: "↩ Relayed from the main conversation:"
