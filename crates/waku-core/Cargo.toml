@@ -27,6 +27,11 @@ nucleo-matcher = "0.3"
 # different type and will not compile against them.
 rand_core = { version = "0.6", features = ["getrandom"] }
 parking_lot = "0.12"
+# A Windows screenshot arrives as an uncompressed bitmap; storing it as PNG is
+# an order of magnitude smaller. Decoding reuses the preview crate Waku already
+# links, and encoding reuses `png`, which `winc-editor` brings in — both are
+# already in the graph, so these add edges rather than compile work.
+png = "0.18"
 rust-i18n = "4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -66,6 +71,9 @@ zeroize = { version = "1", features = ["derive"] }
 # directory listing is. Pinned to a tag for the same reason the desktop's
 # dependencies are: a Winc release must not change what this builds against.
 winc-editor = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
+# Already in the tree through `winc-editor`; named directly because the blob
+# store decodes clipboard bitmaps with it rather than only through the editor.
+winc-preview = { git = "https://github.com/DEEIX-AI/Winc", tag = "v0.1.857" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

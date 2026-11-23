@@ -947,6 +947,57 @@ impl Waku {
             .into_any_element()
     }
 
+    /// The file name on a read row, as a link that opens the file.
+    ///
+    /// A read of an image is the case this exists for: the row can only name the
+    /// file, and reading `shot.png` tells the reader nothing about what is in
+    /// it. Clicking opens the same preview the files panel shows, so the
+    /// picture the model was given is one press away.
+    ///
+    /// Only images get this. A text read already shows its summary and expands
+    /// to its content, so a second way to open the same file would be noise.
+    ///
+    /// Like the open-file button, this sits inside a row that toggles on click,
+    /// so it stops the press from reaching that toggle.
+    fn render_activity_read_link(
+        &self,
+        id: String,
+        path: String,
+        label: String,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let focus = self.transcript_control_focus(id.clone(), cx);
+        let key_path = path.clone();
+        div()
+            .id(SharedString::from(id))
+            .track_focus(&focus)
+            .tab_index(0)
+            .role(Role::Link)
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_color(theme.text_secondary)
+            .underline()
+            .cursor_pointer()
+            .focus_visible(|link| link.text_color(theme.accent))
+            .hover(|link| link.text_color(theme.accent))
+            .tooltip(Tooltip::text(path.clone()))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.open_activity_file(&path, cx);
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.open_activity_file(&key_path, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(SharedString::from(label))
+            .into_any_element()
+    }
+
     /// Diff rows for an expanded file-change activity, built on first sight and
     /// held until the activity collapses or its changes are replaced.
     ///
@@ -2306,14 +2357,27 @@ impl Waku {
                                 .child(SharedString::from(action_label)),
                         )
                         .when(!row_detail.is_empty(), |element| {
-                            element.child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme.text_secondary)
-                                    .child(SharedString::from(row_detail)),
-                            )
+                            // A read of an image names the file only, which says
+                            // nothing about the picture itself; that name is a
+                            // link to the preview instead of plain text. Every
+                            // other row keeps the plain label.
+                            match activity_read_image_path(activity) {
+                                Some(path) => element.child(self.render_activity_read_link(
+                                    format!("activity-read-{id}"),
+                                    path,
+                                    row_detail.clone(),
+                                    theme,
+                                    cx,
+                                )),
+                                None => element.child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(theme.text_secondary)
+                                        .child(SharedString::from(row_detail)),
+                                ),
+                            }
                         })
                         .when_some(file_change_stats, |row, (additions, deletions)| {
                             row.child(
@@ -3077,6 +3141,26 @@ fn activity_diff_break_row(label: Option<String>, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// The file a read row should turn into a link, if it is an image.
+///
+/// Only a read that named an actual image gets a link. The row can show only
+/// the file name, and for a picture that name tells the reader nothing, so the
+/// name becomes the way to look at it. A text read already shows its summary
+/// and expands to its content; a link there would be a second way to open the
+/// same thing.
+fn activity_read_image_path(activity: &ActivityItem) -> Option<String> {
+    if activity.kind != ActivityKind::FileRead {
+        return None;
+    }
+    activity
+        .display_target
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter(|path| crate::app::image_preview::image_format_for_name(path).is_some())
+        .map(str::to_owned)
+}
+
 fn activity_scroll_at_bottom(scroll: &ScrollHandle) -> bool {
     let scrolled = -scroll.offset().y;
     scroll.max_offset().y - scrolled <= px(0.5)
@@ -3456,5 +3540,71 @@ mod live_reasoning_window_tests {
     fn window_below_the_threshold_keeps_the_cached_start() {
         let content = "a".repeat(LIVE_REASONING_WINDOW_MAX);
         assert_eq!(live_reasoning_window_anchor(7, &content), 7);
+    }
+
+    fn read_activity(kind: ActivityKind, target: Option<&str>) -> ActivityItem {
+        let mut activity = ActivityItem::new(None, kind, "Read", None, true);
+        activity.display_target = target.map(str::to_owned);
+        activity
+    }
+
+    /// The point of the link: a read row can only name an image, so the name is
+    /// the way to see the picture.
+    #[test]
+    fn a_read_of_an_image_becomes_a_link() {
+        for name in ["shot.png", "photo.JPG", "anim.gif", "diagram.webp"] {
+            let activity = read_activity(ActivityKind::FileRead, Some(&format!("/repo/{name}")));
+            assert_eq!(
+                activity_read_image_path(&activity).as_deref(),
+                Some(format!("/repo/{name}").as_str()),
+                "{name} should be linkable"
+            );
+        }
+    }
+
+    /// A text read already shows its summary and expands to its content, so it
+    /// must stay plain text.
+    #[test]
+    fn a_read_of_a_text_file_stays_plain() {
+        for name in ["app.rs", "notes.md", "data.json", "Cargo.toml"] {
+            let activity = read_activity(ActivityKind::FileRead, Some(&format!("/repo/{name}")));
+            assert_eq!(
+                activity_read_image_path(&activity),
+                None,
+                "{name} must not become a link"
+            );
+        }
+    }
+
+    /// Only reads get the link; a change or a listing has its own affordance.
+    #[test]
+    fn only_reads_get_the_image_link() {
+        for kind in [
+            ActivityKind::FileChange,
+            ActivityKind::FileList,
+            ActivityKind::FileSearch,
+            ActivityKind::Command,
+        ] {
+            let activity = read_activity(kind, Some("/repo/shot.png"));
+            assert_eq!(
+                activity_read_image_path(&activity),
+                None,
+                "{kind:?} must not get the read link"
+            );
+        }
+    }
+
+    /// A read with no target, or one that is only whitespace, has nothing to
+    /// open and must not produce a link to nowhere.
+    #[test]
+    fn a_read_without_a_target_gets_no_link() {
+        assert_eq!(
+            activity_read_image_path(&read_activity(ActivityKind::FileRead, None)),
+            None
+        );
+        assert_eq!(
+            activity_read_image_path(&read_activity(ActivityKind::FileRead, Some("   "))),
+            None
+        );
     }
 }
