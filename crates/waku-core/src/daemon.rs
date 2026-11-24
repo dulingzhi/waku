@@ -46,8 +46,20 @@ fn trim_resident_transcripts(state: &mut PersistedState, pinned: &HashSet<Uuid>)
 /// captured twice at once.
 type CheckpointCaptureLocks = Mutex<HashMap<(PathBuf, Uuid, usize), Arc<Mutex<()>>>>;
 
+/// Mints the scoped capability a delegating provider is launched with.
+///
+/// The token table belongs to the daemon server, so the backend takes a
+/// callback rather than owning the table: one place mints and validates, and a
+/// backend constructed without a callback simply never delegates.
+pub type AgentBridgeMinter =
+    Arc<dyn Fn(Uuid, Uuid) -> String + Send + Sync>;
+
 pub struct WakuBackend {
     sessions: Mutex<HashMap<Uuid, (Uuid, DriverHandle)>>,
+    /// Mints the scoped capability a delegate-driving provider is launched
+    /// with. Installed by the daemon once its server exists, because the token
+    /// table lives there; a backend without one simply never delegates.
+    agent_bridge_minter: Mutex<Option<AgentBridgeMinter>>,
     terminals: Mutex<HashMap<Uuid, (Uuid, crate::terminal::DaemonTerminal)>>,
     #[cfg(all(test, unix))]
     terminal_shell: Option<alacritty_terminal::tty::Shell>,
@@ -95,6 +107,7 @@ impl WakuBackend {
             attachments,
             usage_scan_cache: Mutex::new(HashMap::new()),
             checkpoint_capture_locks: Mutex::new(HashMap::new()),
+            agent_bridge_minter: Mutex::new(None),
             usage_rates_dir,
             default_cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         })
@@ -104,6 +117,34 @@ impl WakuBackend {
     pub(crate) fn with_terminal_shell(mut self, shell: alacritty_terminal::tty::Shell) -> Self {
         self.terminal_shell = Some(shell);
         self
+    }
+
+    /// Installs the minter the daemon server provides.
+    ///
+    /// Done after construction because the token table lives on the server,
+    /// which needs the backend first. Until this runs nothing delegates, which
+    /// is the safe default: a backend built in a test has no daemon to reach.
+    pub fn install_agent_bridge_minter(&self, minter: AgentBridgeMinter) {
+        *self.agent_bridge_minter.lock() = Some(minter);
+    }
+
+    /// The capability to launch a delegating provider with, or `None` when this
+    /// backend has no daemon to mint one.
+    ///
+    /// The runtime id is the one this `Start` request carries, because that is
+    /// what the daemon registers the session under and what a scoped token is
+    /// checked against. Minting with anything else would hand out a capability
+    /// that its own session then refuses.
+    fn agent_bridge_access(
+        &self,
+        session_id: Uuid,
+        runtime_id: Uuid,
+    ) -> Option<crate::driver::AgentBridgeAccess> {
+        let minter = self.agent_bridge_minter.lock().clone()?;
+        Some(crate::driver::AgentBridgeAccess {
+            address: crate::server::daemon_address()?,
+            token: minter(session_id, runtime_id),
+        })
     }
 
     fn open_terminal(
@@ -961,6 +1002,7 @@ impl Backend for WakuBackend {
                         .map(serde_json::from_value)
                         .transpose()
                         .context("daemon received an invalid provider cursor")?,
+                    agent_bridge: self.agent_bridge_access(session_id, runtime_id),
                 };
                 let (wake, _wake_events) = smol::channel::bounded(1);
                 let (event_sender, event_receiver) = driver::event_channel(wake);
@@ -1529,6 +1571,7 @@ impl WakuBackend {
                 agent_preset: source.agent_preset.clone(),
                 computer_use_enabled: false,
                 provider_cursor: source.provider_cursor.clone(),
+                agent_bridge: None,
             },
             event_sender,
         )?;
@@ -1689,6 +1732,7 @@ impl WakuBackend {
                 agent_preset: source.agent_preset.clone(),
                 computer_use_enabled: false,
                 provider_cursor: source.provider_cursor.clone(),
+                agent_bridge: None,
             },
             event_sender,
         )?;

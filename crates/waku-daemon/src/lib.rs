@@ -32,6 +32,9 @@ pub fn run() -> anyhow::Result<()> {
         .with_context(|| format!("could not bind Waku daemon to {}", arguments.bind))?;
     let address = listener.local_addr()?;
     ensure_bind_allowed(address, arguments.allow_non_loopback)?;
+    // Published before anything can ask: a provider launched from here has to
+    // be able to dial back, and that is the only thing this address is for.
+    waku_core::server::publish_daemon_address(&address.to_string());
 
     // The identity is loaded before readiness is announced, and a failure here
     // aborts startup. A daemon that ran on a broken identity would accept
@@ -152,20 +155,35 @@ pub fn run() -> anyhow::Result<()> {
     // One `DaemonServer` serves both modes, so a client that reaches the daemon
     // through the relay sees the same sessions, subscriptions and replay cursors
     // as one that connects directly. Two servers would mean two hubs.
+    let backend = Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?);
     let server = Arc::new(waku_core::DaemonServer::new(
         token.clone(),
         identity.clone(),
-        Arc::new(waku_core::daemon::WakuBackend::new(settings, task_store)?),
+        backend.clone(),
         waku_core::ServerOptions {
             allowed_origins: arguments.allowed_origins.into_iter().collect(),
             allow_shutdown: arguments.parent_pid.is_some(),
         },
     ));
-
+    // The backend launches providers, so it needs the ability to mint the
+    // scoped capability a delegating provider is started with. The table lives
+    // on the server, which needed the backend first; installing it here is what
+    // closes that loop.
+    {
+        let minting_server = server.clone();
+        backend.install_agent_bridge_minter(Arc::new(move |session, runtime| {
+            minting_server.mint_agent_token(session, runtime)
+        }));
+    }
     let Some(relay_address) = relay_address else {
         // No relay configured: listen and nothing else, which is the default
         // and the mode the desktop app expects.
-        return server.serve(listener, shutdown);
+        let served = server.serve(listener, shutdown);
+        // Nothing is left to delegate once the last connection can no longer
+        // arrive, so the capabilities minted for bridges die with the server
+        // rather than outliving it in a map nobody reads.
+        server.revoke_agent_tokens();
+        return served;
     };
     let session_id = session_id.expect("generated whenever a relay is configured");
 

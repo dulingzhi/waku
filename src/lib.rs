@@ -90,6 +90,7 @@ mod computer_use;
 pub mod daemon;
 mod driver;
 mod edit_history;
+pub mod agent_bridge;
 mod input;
 pub mod js_repl;
 mod md;

@@ -565,6 +565,13 @@ impl RequestDispatcher {
 /// per direction would mean a relay client silently received no session events.
 pub struct DaemonServer {
     token: String,
+    /// Tokens minted for agent bridges, keyed by the token value itself.
+    ///
+    /// The desktop's own token stays in `token`: it is the user, and it is
+    /// checked first so its cost never changes. These are additive — a daemon
+    /// with no lead conversations running has an empty map and behaves exactly
+    /// as it did before the bridge existed.
+    agent_tokens: Arc<Mutex<HashMap<String, ScopedToken>>>,
     identity: Arc<DaemonIdentity>,
     backend: Arc<dyn Backend>,
     dispatcher: Arc<RequestDispatcher>,
@@ -584,6 +591,7 @@ impl DaemonServer {
         let dispatcher = Arc::new(RequestDispatcher::new(backend.clone(), hub.clone()));
         Self {
             token,
+            agent_tokens: Arc::new(Mutex::new(HashMap::new())),
             identity,
             backend,
             dispatcher,
@@ -644,6 +652,7 @@ impl DaemonServer {
     fn clone_for_connection(&self) -> DaemonConnection {
         DaemonConnection {
             token: self.token.clone(),
+            agent_tokens: self.agent_tokens.clone(),
             identity: self.identity.clone(),
             dispatcher: self.dispatcher.clone(),
             hub: self.hub.clone(),
@@ -655,11 +664,42 @@ impl DaemonServer {
     pub(crate) fn claim_dialed_connection(&self) -> Option<ConnectionPermit> {
         self.try_claim_connection()
     }
+
+    /// Mints a token that lets one agent bridge drive one lead conversation.
+    ///
+    /// Called by whoever launches the provider: the token travels to the
+    /// provider's MCP server configuration, so the bridge holds only a
+    /// capability for its own session. It is deliberately not the daemon token.
+    ///
+    /// The value is 32 random bytes in hex. It is a bearer capability with a
+    /// narrow scope rather than a session cookie, so it is never compared for
+    /// equality outside `token_matches`, and it is revoked when the lead's
+    /// runtime ends.
+    pub fn mint_agent_token(&self, parent_session: Uuid, runtime_id: Uuid) -> String {
+        let token = minted_token_value();
+        self.agent_tokens.lock().insert(
+            token.clone(),
+            ScopedToken {
+                scope: AgentScope::Delegate {
+                    parent_session,
+                    runtime_id,
+                },
+            },
+        );
+        token
+    }
+
+    /// Drops every minted token, which closes the door on any bridge still
+    /// holding one. Called when the daemon shuts down.
+    pub fn revoke_agent_tokens(&self) {
+        self.agent_tokens.lock().clear();
+    }
 }
 
 /// The subset of [`DaemonServer`] a single connection thread owns.
 struct DaemonConnection {
     token: String,
+    agent_tokens: Arc<Mutex<HashMap<String, ScopedToken>>>,
     identity: Arc<DaemonIdentity>,
     dispatcher: Arc<RequestDispatcher>,
     hub: Arc<Hub>,
@@ -677,7 +717,10 @@ impl DaemonConnection {
     {
         serve_sealed_connection(
             socket,
-            &self.token,
+            &ConnectionTokens {
+                desktop: self.token.clone(),
+                agents: self.agent_tokens.clone(),
+            },
             &self.identity,
             self.dispatcher.clone(),
             self.hub.clone(),
@@ -714,7 +757,10 @@ fn serve_listener(
                 let Some(connection_permit) = server.try_claim_connection() else {
                     continue;
                 };
-                let token = server.token.clone();
+                let tokens = ConnectionTokens {
+                    desktop: server.token.clone(),
+                    agents: server.agent_tokens.clone(),
+                };
                 let identity = server.identity.clone();
                 let dispatcher = server.dispatcher.clone();
                 let hub = server.hub.clone();
@@ -725,7 +771,13 @@ fn serve_listener(
                     .spawn(move || {
                         let _connection_permit = connection_permit;
                         if let Err(error) = handle_connection(
-                            stream, &token, &identity, dispatcher, hub, shutdown, &options,
+                            stream,
+                            &tokens,
+                            &identity,
+                            dispatcher,
+                            hub,
+                            shutdown,
+                            &options,
                         ) {
                             eprintln!("waku-daemon connection ended: {error:#}");
                         }
@@ -748,7 +800,7 @@ fn serve_listener(
 #[allow(clippy::result_large_err)]
 fn handle_connection(
     stream: TcpStream,
-    expected_token: &str,
+    tokens: &ConnectionTokens,
     identity: &DaemonIdentity,
     dispatcher: Arc<RequestDispatcher>,
     hub: Arc<Hub>,
@@ -774,7 +826,7 @@ fn handle_connection(
     .context("WebSocket handshake failed")?;
     serve_sealed_connection(
         socket,
-        expected_token,
+        tokens,
         identity,
         dispatcher,
         hub,
@@ -793,7 +845,7 @@ fn handle_connection(
 /// [`crate::relay::dial`].
 fn serve_sealed_connection<S>(
     socket: tungstenite::WebSocket<S>,
-    expected_token: &str,
+    tokens: &ConnectionTokens,
     identity: &DaemonIdentity,
     dispatcher: Arc<RequestDispatcher>,
     hub: Arc<Hub>,
@@ -851,14 +903,37 @@ where
         Some(hello) => hello,
         None => return Ok(()),
     };
-    let resume_from = match hello {
+    // The desktop's own token is checked first and yields no scope: it is the
+    // user, and narrowing it would change what every existing client may do.
+    // A minted agent token is checked second and carries a scope, which is what
+    // keeps a provider-launched bridge from being a second full client.
+    let (resume_from, scope) = match hello {
         ClientMessage::Hello {
             protocol_version,
             token,
             resume_from,
             ..
-        } if protocol_version == PROTOCOL_VERSION && token_matches(expected_token, &token) => {
-            resume_from
+        } if protocol_version == PROTOCOL_VERSION && token_matches(&tokens.desktop, &token) => {
+            (resume_from, None)
+        }
+        ClientMessage::Hello {
+            protocol_version,
+            ref token,
+            ref resume_from,
+            ..
+        } if protocol_version == PROTOCOL_VERSION => {
+            let minted = tokens.agents.lock().get(token.as_str()).copied();
+            let Some(minted) = minted else {
+                write_sealed(
+                    &mut sealed,
+                    &ServerMessage::Rejected {
+                        message: "authentication failed".into(),
+                    },
+                )?;
+                return Ok(());
+            };
+            waku_protocol::diagnostics::log("waku-daemon accepted a scoped agent token");
+            (resume_from.clone(), Some(minted.scope))
         }
         ClientMessage::Hello {
             protocol_version, ..
@@ -934,6 +1009,35 @@ where
             }
             Ok(Some(plaintext)) => match serde_json::from_slice(&plaintext) {
                 Ok(ClientMessage::Request(request)) => {
+                    // A scoped token reaches only what its scope names. The
+                    // refusal is per request and uses the ordinary error path,
+                    // so a delegate that asks for something it may not do gets
+                    // an answer instead of a dropped connection.
+                    if let Some(scope) = scope
+                        && !scope.permits(
+                            &request.command,
+                            request.session_id,
+                            request.runtime_id,
+                        )
+                    {
+                        waku_protocol::diagnostics::log(format!(
+                            "waku-daemon refused a scoped agent request for session {}",
+                            request.session_id
+                        ));
+                        write_sealed(
+                            &mut sealed,
+                            &ServerMessage::Response {
+                                request_id: request.request_id,
+                                outcome: ResponseOutcome::Error {
+                                    error: RpcError {
+                                        message: "this agent token may not perform that request"
+                                            .into(),
+                                    },
+                                },
+                            },
+                        )?;
+                        continue;
+                    }
                     dispatcher.dispatch(request, outgoing.clone(), subscriber_id);
                 }
                 Ok(ClientMessage::Shutdown) => {
@@ -1065,8 +1169,106 @@ fn handshake_error(status: StatusCode, message: &str) -> ErrorResponse {
         .expect("static WebSocket rejection is valid")
 }
 
+/// The address this daemon is listening on, published for the agent bridge.
+///
+/// A process fact rather than per-server state: a bridge launched by a provider
+/// is a different process that only knows what its environment says, and the
+/// daemon that launched it is the one it must dial. Set once at startup.
+static DAEMON_ADDRESS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Records the address the daemon bound, so a delegating provider can reach it.
+pub fn publish_daemon_address(address: &str) {
+    let _ = DAEMON_ADDRESS.set(address.to_owned());
+}
+
+/// The published daemon address, or `None` before the daemon has bound.
+pub fn daemon_address() -> Option<String> {
+    DAEMON_ADDRESS.get().cloned()
+}
+
 fn token_matches(expected: &str, candidate: &str) -> bool {
     expected.as_bytes().ct_eq(candidate.as_bytes()).into()
+}
+
+/// A fresh agent token: 32 random bytes as lowercase hex.
+///
+/// Random rather than derived from the session id, because it is a bearer
+/// capability: anything guessable from an id the provider can already read
+/// would not be a capability at all.
+fn minted_token_value() -> String {
+    use rand_core::RngCore as _;
+    let mut bytes = [0u8; 32];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// What a delegated agent token is allowed to do.
+///
+/// The desktop's own token is unrestricted: it is the user. A token minted for
+/// an agent bridge is not — it exists so a provider process can start and steer
+/// the delegates of one lead conversation, and nothing else. The difference is
+/// what keeps the bridge from being a second full client: it cannot read the
+/// workspace, reach another conversation, or touch projects and settings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentScope {
+    /// Start, prompt, steer, cancel, and stop background work in a session.
+    Delegate {
+        parent_session: Uuid,
+        runtime_id: Uuid,
+    },
+}
+
+/// One minted agent token and the scope it carries.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScopedToken {
+    pub scope: AgentScope,
+}
+
+/// The credentials a connection is checked against.
+///
+/// Bundled rather than passed as two arguments because they always travel
+/// together and always mean the same thing: `desktop` is the user's own token,
+/// `agents` are the narrower capabilities minted for bridges.
+#[derive(Clone)]
+struct ConnectionTokens {
+    desktop: String,
+    agents: Arc<Mutex<HashMap<String, ScopedToken>>>,
+}
+
+impl AgentScope {
+    /// Whether this scope may dispatch `command` against the session a request
+    /// names.
+    ///
+    /// A delegate reaches only the session it was given. `AttachSession` is
+    /// allowed so it can observe what it drives; everything that would let it
+    /// act as a full client — project mutation, settings, shutdown, workspace
+    /// files — is not on the list at all, which is why this is an allow list
+    /// rather than a set of denials.
+    fn permits(self, command: &Command, request_session: Uuid, request_runtime: Uuid) -> bool {
+        match self {
+            Self::Delegate {
+                parent_session,
+                runtime_id,
+            } => {
+                request_session == parent_session
+                    && request_runtime == runtime_id
+                    && matches!(
+                        command,
+                        Command::AttachSession
+                            | Command::Start { .. }
+                            | Command::Prompt { .. }
+                            | Command::Steer { .. }
+                            | Command::Cancel
+                            | Command::CancelComputerUse
+                            | Command::RefreshBackgroundWork
+                            | Command::StopBackgroundWork { .. }
+                            | Command::Respond { .. }
+                            | Command::RespondUserInput { .. }
+                            | Command::ApplyOptions { .. }
+                    )
+            }
+        }
+    }
 }
 
 fn command_targets_runtime(command: &Command) -> bool {
@@ -1417,6 +1619,93 @@ mod tests {
     #[derive(Default)]
     struct TestBackend {
         runtimes: Mutex<HashMap<Uuid, Uuid>>,
+    }
+
+    /// An agent token is a capability for one session, not a second client.
+    /// Everything a full client can do that a delegate has no business doing is
+    /// refused, and the refusals are the point: the desktop token keeps working
+    /// unchanged, so only the narrower one is constrained.
+    #[test]
+    fn a_delegated_token_reaches_only_its_own_session() {
+        let parent = Uuid::new_v4();
+        let runtime = Uuid::new_v4();
+        let scope = AgentScope::Delegate {
+            parent_session: parent,
+            runtime_id: runtime,
+        };
+
+        // The ordinary work of driving a delegate.
+        for command in [
+            Command::AttachSession,
+            Command::Prompt {
+                prompt: "go".into(),
+                turn_id: None,
+                message_id: None,
+            },
+            Command::Steer {
+                prompt: "instead".into(),
+            },
+            Command::Cancel,
+            Command::RefreshBackgroundWork,
+        ] {
+            assert!(
+                scope.permits(&command, parent, runtime),
+                "{command:?} must be available to a delegate"
+            );
+        }
+
+        // A different conversation is out of reach even for an allowed command.
+        assert!(
+            !scope.permits(
+                &Command::Prompt {
+                    prompt: "go".into(),
+                    turn_id: None,
+                    message_id: None,
+                },
+                Uuid::new_v4(),
+                runtime
+            ),
+            "a delegate must not reach another conversation"
+        );
+
+        // The same session under a different runtime is out of reach too: the
+        // runtime id is what ties the capability to one live provider process.
+        assert!(
+            !scope.permits(&Command::Cancel, parent, Uuid::new_v4()),
+            "a delegate must not reach a replaced runtime"
+        );
+
+        // Anything that would make it a full client. Shutdown is its own
+        // client message rather than a command, so it is refused even earlier —
+        // the scope never sees it.
+        for command in [
+            Command::Rollback { turns: 1 },
+            Command::Fork { turns_to_remove: 1 },
+        ] {
+            assert!(
+                !scope.permits(&command, parent, runtime),
+                "{command:?} must not be reachable from a delegate token"
+            );
+        }
+    }
+
+    /// The desktop token stays unrestricted. If minting a scoped token had
+    /// narrowed it, every existing client would break.
+    #[test]
+    fn the_desktop_token_is_unchanged_by_agent_scoping() {
+        assert!(token_matches("desktop-token", "desktop-token"));
+        assert!(!token_matches("desktop-token", "someone-else"));
+    }
+
+    /// Two mints must never collide, and neither may be derivable from the
+    /// session it belongs to.
+    #[test]
+    fn minted_tokens_are_random_hex_and_distinct() {
+        let first = minted_token_value();
+        let second = minted_token_value();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 64, "32 bytes render as 64 hex characters");
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     impl Backend for TestBackend {

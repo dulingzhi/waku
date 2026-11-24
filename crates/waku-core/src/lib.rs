@@ -64,7 +64,7 @@ pub mod worktree;
 
 mod fs_ext;
 mod protocol;
-mod server;
+pub mod server;
 
 pub use protocol::{
     APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, DaemonReady,

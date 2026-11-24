@@ -222,6 +222,7 @@ impl PiDriver {
             service_tier: _,
             context_window: _,
             agent_preset: _,
+            agent_bridge: _,
             computer_use_enabled,
             provider_cursor,
         } = options;
@@ -1769,6 +1770,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                agent_bridge: None,
             },
             events,
         )
@@ -2022,6 +2024,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                agent_bridge: None,
             },
             events,
         )

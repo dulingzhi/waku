@@ -197,6 +197,24 @@ pub struct DriverStartOptions {
     pub agent_preset: Option<String>,
     pub computer_use_enabled: bool,
     pub provider_cursor: Option<ProviderResumeCursor>,
+    /// The scoped capability an agent bridge may use to drive this session's
+    /// delegates, and the daemon address it dials.
+    ///
+    /// `None` for every ordinary start. The daemon sets it when it launches a
+    /// provider that should be able to delegate, which is what keeps a provider
+    /// from holding anything it was not given.
+    pub agent_bridge: Option<AgentBridgeAccess>,
+}
+
+/// What a provider needs to launch the agent-bridge MCP server.
+///
+/// The token is scoped to this session by the daemon (see
+/// `waku_core::server::AgentScope`), so it cannot reach another conversation,
+/// the workspace, or the user's settings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentBridgeAccess {
+    pub address: String,
+    pub token: String,
 }
 
 /// The subset of `DriverStartOptions` a user can change without starting a new

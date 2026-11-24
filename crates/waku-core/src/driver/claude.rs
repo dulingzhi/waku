@@ -184,6 +184,7 @@ impl ClaudeDriver {
             service_tier: _,
             context_window,
             agent_preset: _,
+            agent_bridge: _,
             computer_use_enabled: _,
             provider_cursor,
         } = options;
@@ -2066,6 +2067,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                agent_bridge: None,
             },
             events,
         )
@@ -2134,6 +2136,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                agent_bridge: None,
             },
             events,
         )

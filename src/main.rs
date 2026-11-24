@@ -18,6 +18,7 @@ fn main() {
     match Mode::parse(&arguments) {
         Mode::Daemon => run_daemon(),
         Mode::JsRepl => run_js_repl(),
+        Mode::AgentBridge => run_agent_bridge(),
         // The word after `--computer-use` is the helper's own mode.
         Mode::ComputerUse(mode) => run_computer_use(mode),
         Mode::Gui => waku::run(),
@@ -34,6 +35,7 @@ enum Mode<'a> {
     Gui,
     Daemon,
     JsRepl,
+    AgentBridge,
     ComputerUse(Option<&'a str>),
 }
 
@@ -42,6 +44,7 @@ impl<'a> Mode<'a> {
         match arguments.first().map(String::as_str) {
             Some("--daemon") => Self::Daemon,
             Some("--js-repl") => Self::JsRepl,
+            Some("--agent-bridge") => Self::AgentBridge,
             Some("--computer-use") => Self::ComputerUse(arguments.get(1).map(String::as_str)),
             _ => Self::Gui,
         }
@@ -77,6 +80,18 @@ fn run_computer_use(mode: Option<&str>) {
 fn run_js_repl() {
     if let Err(error) = waku::js_repl::serve_stdio() {
         eprintln!("Waku JavaScript REPL: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+/// Run the agent bridge MCP server on stdin/stdout.
+///
+/// A provider launches this itself, so the only thing that says which daemon to
+/// drive is the environment the daemon handed down. Running it by hand outside a
+/// Waku session therefore fails loudly instead of driving the wrong daemon.
+fn run_agent_bridge() {
+    if let Err(error) = waku::agent_bridge::serve_stdio() {
+        eprintln!("Waku agent bridge: {error:#}");
         std::process::exit(1);
     }
 }
