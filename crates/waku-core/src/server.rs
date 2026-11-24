@@ -689,6 +689,18 @@ impl DaemonServer {
         }
     }
 
+    /// A sink bound to an arbitrary session, for consumers outside this module.
+    ///
+    /// The daemon mints one per request internally; a probe that drives a
+    /// backend directly needs the same thing without a live connection.
+    pub fn event_sink_for(&self, session_id: Uuid, runtime_id: Uuid) -> EventSink {
+        EventSink {
+            session_id,
+            runtime_id,
+            hub: self.hub.clone(),
+        }
+    }
+
     /// Claims a connection slot for a dialed relay peer.
     pub(crate) fn claim_dialed_connection(&self) -> Option<ConnectionPermit> {
         self.try_claim_connection()

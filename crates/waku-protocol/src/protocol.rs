@@ -41,6 +41,12 @@ pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
 /// alongside keeps the bridge from guessing: a wrong id is refused by the
 /// daemon's own scope check rather than being silently accepted.
 pub const DAEMON_SESSION_ENV: &str = "WAKU_DAEMON_SESSION";
+/// The runtime a delegating provider was launched for.
+///
+/// A scoped token is checked against both halves of its scope, so a bridge that
+/// guessed the runtime would be refused by the daemon's own check — as it should
+/// be. The pair travels together for exactly that reason.
+pub const DAEMON_RUNTIME_ENV: &str = "WAKU_DAEMON_RUNTIME";
 pub const APP_EXECUTABLE_ENV: &str = "WAKU_APP_EXECUTABLE";
 
 /// The single line the daemon prints on stdout once it is accepting

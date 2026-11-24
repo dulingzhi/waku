@@ -93,6 +93,20 @@ impl DriverHandle {
         self.inner.prompt(prompt);
     }
 
+    /// Prompts with ids the caller already gave the turn and its user message.
+    ///
+    /// The daemon uses this when it opened the turn itself — a delegate's first
+    /// prompt — so the transcript and the provider describe one turn instead of
+    /// the provider minting a second set of ids for the same submission.
+    pub fn prompt_with_ids(
+        &self,
+        prompt: String,
+        turn_id: Option<uuid::Uuid>,
+        message_id: Option<uuid::Uuid>,
+    ) {
+        self.inner.prompt_with_ids(prompt, turn_id, message_id);
+    }
+
     /// Whether this transport can inject a user message into the currently
     /// running turn (steering) instead of starting a new one.
     pub fn supports_steer(&self) -> bool {
@@ -156,6 +170,16 @@ impl DriverHandle {
 
 pub trait DriverControl: Send + Sync {
     fn prompt(&self, prompt: String);
+    /// Prompt with caller-chosen ids. Transports that carry them ignore the
+    /// defaults; the rest start a turn their own way.
+    fn prompt_with_ids(
+        &self,
+        prompt: String,
+        _turn_id: Option<uuid::Uuid>,
+        _message_id: Option<uuid::Uuid>,
+    ) {
+        self.prompt(prompt);
+    }
     fn supports_steer(&self) -> bool {
         false
     }
@@ -208,13 +232,20 @@ pub struct DriverStartOptions {
 
 /// What a provider needs to launch the agent-bridge MCP server.
 ///
-/// The token is scoped to this session by the daemon (see
+/// The token is scoped to one session and one runtime by the daemon (see
 /// `waku_core::server::AgentScope`), so it cannot reach another conversation,
 /// the workspace, or the user's settings.
+///
+/// The session and runtime ids ride along because the bridge has to name both on
+/// every request and cannot read a token's scope. They are not a second
+/// credential: the daemon checks them against the token's own scope, so a wrong
+/// pair is refused rather than trusted.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentBridgeAccess {
     pub address: String,
     pub token: String,
+    pub session_id: uuid::Uuid,
+    pub runtime_id: uuid::Uuid,
 }
 
 /// The subset of `DriverStartOptions` a user can change without starting a new

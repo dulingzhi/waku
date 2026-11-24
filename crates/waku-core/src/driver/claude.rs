@@ -156,8 +156,7 @@ fn configure_agent_bridge(
     command: &mut Command,
     session_id: &str,
     bridge: &crate::driver::AgentBridgeAccess,
-) {
-    // `waku --agent-bridge` rather than a standalone helper: a package ships one
+) {    // `waku --agent-bridge` rather than a standalone helper: a package ships one
     // executable, which is the same rule the Computer Use helpers follow.
     let Ok(executable) = std::env::current_exe() else {
         // Without a path to this executable there is nothing to point Claude at.
@@ -177,9 +176,13 @@ fn configure_agent_bridge(
         .args(["--mcp-config", &config.to_string()])
         .env(waku_protocol::DAEMON_ADDRESS_ENV, &bridge.address)
         .env(waku_protocol::DAEMON_TOKEN_ENV, &bridge.token)
-        // The bridge has to name a session on every request and cannot read the
-        // token's scope, so the id travels with the credential.
-        .env(waku_protocol::DAEMON_SESSION_ENV, session_id);
+        // The bridge has to name a session and a runtime on every request and
+        // cannot read the token's scope, so both travel with the credential.
+        .env(waku_protocol::DAEMON_SESSION_ENV, session_id)
+        .env(
+            waku_protocol::DAEMON_RUNTIME_ENV,
+            bridge.runtime_id.to_string(),
+        );
 }
 
 fn configure_stream_command(command: &mut Command, mode: RuntimeMode) {
@@ -2013,6 +2016,8 @@ mod tests {
             &crate::driver::AgentBridgeAccess {
                 address: "127.0.0.1:4312".into(),
                 token: "scoped-token".into(),
+                session_id: uuid::Uuid::nil(),
+                runtime_id: uuid::Uuid::nil(),
             },
         );
 
@@ -2044,12 +2049,15 @@ mod tests {
     #[test]
     fn the_bridge_credential_travels_in_the_environment_not_the_command_line() {
         let mut command = Command::new("/usr/bin/true");
+        let runtime_id = uuid::Uuid::new_v4();
         configure_agent_bridge(
             &mut command,
             "lead-session",
             &crate::driver::AgentBridgeAccess {
                 address: "127.0.0.1:4312".into(),
                 token: "scoped-token".into(),
+                session_id: uuid::Uuid::nil(),
+                runtime_id,
             },
         );
 
@@ -2095,6 +2103,16 @@ mod tests {
                 .flatten()
                 .as_deref(),
             Some("lead-session")
+        );
+        // The runtime is half of the scope the daemon checks, so a bridge that
+        // did not receive it would be refused on every call it made.
+        assert_eq!(
+            environment
+                .get(waku_protocol::DAEMON_RUNTIME_ENV)
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some(runtime_id.to_string().as_str())
         );
     }
 

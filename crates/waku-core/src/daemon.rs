@@ -144,6 +144,8 @@ impl WakuBackend {
         Some(crate::driver::AgentBridgeAccess {
             address: crate::server::daemon_address()?,
             token: minter(session_id, runtime_id),
+            session_id,
+            runtime_id,
         })
     }
 
@@ -198,7 +200,7 @@ impl WakuBackend {
                 )
             })?;
 
-        let delegate = delegated_session(&lead, title);
+        let mut delegate = delegated_session(&lead, title);
         let session_id = delegate.id;
         let runtime_id = Uuid::new_v4();
 
@@ -238,7 +240,20 @@ impl WakuBackend {
             })
             .context("could not start delegate event forwarding thread")?;
 
-        self.sessions.lock().insert(session_id, (runtime_id, handle.clone()));
+        // A task is only stored once it owns a transcript step, so the turn the
+        // lead asked for is opened here rather than left for the provider to
+        // open later. Without this the delegate would exist only in this
+        // process's memory: the user would never see the task the lead started,
+        // and a daemon restart would lose it.
+        let turn_id = delegate.begin_turn(task.clone());
+        let message_id = delegate
+            .messages
+            .last()
+            .map(|message| message.id)
+            .unwrap_or_else(Uuid::new_v4);
+        self.sessions
+            .lock()
+            .insert(session_id, (runtime_id, handle.clone()));
         {
             let mut state = self.task_state.lock();
             state.push_session(delegate);
@@ -249,7 +264,9 @@ impl WakuBackend {
                 return Err(error).context("could not save the delegated task");
             }
         }
-        handle.prompt(task);
+        // The ids are the ones the transcript already carries, so the lead's
+        // prompt and the provider's own report describe the same turn.
+        handle.prompt_with_ids(task, Some(turn_id), Some(message_id));
         Ok(ResponsePayload::DelegateSpawned {
             session_id,
             runtime_id,
