@@ -155,8 +155,15 @@ const AGENT_BRIDGE_SERVER_NAME: &str = "waku_agents";
 fn configure_agent_bridge(command: &mut Command, bridge: &crate::driver::AgentBridgeAccess) {
     // `waku --agent-bridge` rather than a standalone helper: a package ships one
     // executable, which is the same rule the Computer Use helpers follow.
-    let Ok(executable) = std::env::current_exe() else {
-        // Without a path to this executable there is nothing to point Claude at.
+    //
+    // Resolved through the Computer Use helper path rather than `current_exe`,
+    // because this runs inside the daemon: a packaged build launches the daemon
+    // as `waku --daemon`, but a development build runs a separate `waku-daemon`
+    // binary whose own path has no `--agent-bridge` mode at all. The daemon
+    // passes `APP_EXECUTABLE_ENV` for exactly this reason, and it is the only
+    // thing that points at the program that can serve the bridge.
+    let Ok(executable) = crate::computer_use::host_executable_path() else {
+        // Without a path to that executable there is nothing to point Claude at.
         // Failing the whole launch would strand a session over an optional tool,
         // so the bridge is simply absent.
         return;
@@ -2328,12 +2335,168 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// The real `waku` program beside this test binary.
+    ///
+    /// `cargo test` puts test binaries in `target/<profile>/deps` and the program
+    /// one directory up, so this is the same artifact the driver would ship with.
+    fn test_waku_executable() -> std::path::PathBuf {
+        let mut path = std::env::current_exe().expect("the test binary has a path");
+        path.pop();
+        if path.file_name().is_some_and(|name| name == "deps") {
+            path.pop();
+        }
+        let executable = path.join(if cfg!(windows) { "waku.exe" } else { "waku" });
+        assert!(
+            executable.is_file(),
+            "the waku program must be built for this probe: {}",
+            executable.display()
+        );
+        executable
+    }
+
+    /// The whole delegation path against the real CLI.
+    ///
+    /// This is the only test that can prove what a user actually does: a real
+    /// Claude process, launched by the real driver, calling `spawn_agent` through
+    /// the MCP server the driver registered for it, and the daemon turning that
+    /// into a second task. Every cheaper test stops short of one of those links —
+    /// the env-only test cannot see the model, and the bridge-only test cannot see
+    /// the driver — which is exactly how a wrong session id survived two rounds.
+    ///
+    /// Ignored by default: needs the CLI installed, credentials, and the network.
+    #[test]
+    #[ignore = "requires an installed, authenticated claude"]
+    fn a_real_claude_session_starts_a_delegate_through_the_real_daemon() {
+        use crate::persistence::StateStore;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let binary =
+            crate::command_env::find_executable("claude").expect("claude is not installed");
+        // The driver resolves the bridge program from `APP_EXECUTABLE_ENV` first,
+        // which is how the daemon tells a provider where Waku lives. Under
+        // `cargo test` the current executable is the test harness, so without
+        // this the bridge would be launched as `cargo_test --agent-bridge` and
+        // Claude would see no tools at all.
+        let waku = test_waku_executable();
+        unsafe { std::env::set_var(crate::APP_EXECUTABLE_ENV, &waku) };
+        let root = std::env::temp_dir().join(format!("waku-claude-delegate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        // A private state directory holding one lead task, so the daemon has a
+        // conversation to derive a delegate from.
+        let store = StateStore::new(root.join("app.db"));
+        let mut state = store.load().unwrap();
+        let project = crate::model::Project::from_path(root.clone());
+        let mut lead =
+            crate::model::AgentSession::new(project.id, crate::model::ProviderKind::Claude);
+        lead.title = "lead".into();
+        lead.begin_turn("open the group");
+        let lead_id = lead.id;
+        state.projects.push(project);
+        state.push_session(lead);
+        store.save(&mut state).unwrap();
+
+        let settings =
+            crate::DaemonSettingsStore::open(root.join("daemon.json")).unwrap();
+        let backend = Arc::new(crate::daemon::WakuBackend::new(settings, store).unwrap());
+
+        // A real daemon, and a real capability minted for the lead task.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        crate::server::publish_daemon_address(&address.to_string());
+        let server = Arc::new(crate::DaemonServer::new(
+            "desktop-token".into(),
+            Arc::new(crate::daemon_identity::DaemonIdentity::generate()),
+            backend.clone(),
+            crate::ServerOptions::default(),
+        ));
+        let runtime_id = Uuid::new_v4();
+        let scoped = server.mint_agent_token(lead_id, runtime_id);
+        let stop = Arc::new(AtomicBool::new(false));
+        let serving = {
+            let server = server.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || server.serve(listener, stop).unwrap())
+        };
+
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let driver = ClaudeDriver::start(
+            DriverStartOptions {
+                binary,
+                cwd: root.clone(),
+                mode: RuntimeMode::FullAccess,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+                // The capability the daemon would hand a lead in the app.
+                agent_bridge: Some(crate::driver::AgentBridgeAccess {
+                    address: address.to_string(),
+                    token: scoped,
+                    session_id: lead_id,
+                    runtime_id,
+                }),
+            },
+            events,
+        )
+        .expect("the lead should start with a bridge");
+
+        driver.prompt(
+            "Call the waku_agents tool spawn_agent with task 'Reply with exactly: DELEGATE_OK' \
+             and title 'probe'. Then report the tool's exact result. Do not do the task yourself."
+                .to_owned(),
+        );
+
+        let mut reply = String::new();
+        while let Ok(event) = event_rx.recv_timeout(std::time::Duration::from_secs(240)) {
+            match event {
+                DriverEvent::TextDelta(delta) => reply.push_str(&delta),
+                DriverEvent::TurnFinished { .. } => break,
+                DriverEvent::Error(error) => panic!("the CLI reported: {error}"),
+                _ => {}
+            }
+        }
+        assert!(
+            !reply.contains("may not perform that request"),
+            "the lead was refused, so the bridge addressed the wrong session: {reply}"
+        );
+        eprintln!("LEAD REPLY: {reply}");
+
+        // The delegate has to be a real second task, not an id string.
+        let listed = crate::Backend::handle(
+            backend.as_ref(),
+            crate::Request {
+                request_id: Uuid::new_v4(),
+                session_id: lead_id,
+                runtime_id,
+                command: crate::Command::LoadTaskState,
+            },
+            server.event_sink_for(lead_id, runtime_id),
+        )
+        .unwrap();
+        let crate::ResponsePayload::TaskState { sessions, .. } = listed else {
+            panic!("the daemon did not return its task list");
+        };
+        assert!(
+            sessions.iter().any(|session| session.id != lead_id),
+            "the lead never created a delegate: {sessions:?}"
+        );
+
+        drop(driver);
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        serving.join().unwrap();
+        std::fs::remove_dir_all(root).ok();
+    }
+
     /// Drives the real CLI through the actual driver, including a second turn
     /// on the same process — the whole point of the transport. Ignored by
     /// default: needs the CLI installed, credentials, and the network.
     #[test]
-    #[ignore = "requires an installed, authenticated claude"]
-    fn claude_streaming_session_against_the_real_cli() {
+    #[ignore = "requires an installed, authenticated claude"]    fn claude_streaming_session_against_the_real_cli() {
         let binary =
             crate::command_env::find_executable("claude").expect("claude is not installed");
         let (events, event_rx) = crate::driver::test_event_channel();

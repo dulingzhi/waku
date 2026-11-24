@@ -458,7 +458,7 @@ pub fn skill_root_path() -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-fn host_executable_path() -> anyhow::Result<PathBuf> {
+pub(crate) fn host_executable_path() -> anyhow::Result<PathBuf> {
     std::env::var_os(crate::APP_EXECUTABLE_ENV)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
