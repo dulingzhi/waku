@@ -1370,20 +1370,36 @@ impl Waku {
                     )
                     .when_some(stop, |header, stop| header.child(stop)),
             )
-            .child(self.render_background_work_detail(item, output, output_viewport, selection, cx))
-            // Steering is a subagent-only affordance: a shell process has no
-            // conversation to say anything into.
-            .when(item.key.kind == BackgroundWorkKind::Subagent, |card| {
-                card.child(self.render_subagent_steer(item, &theme, cx))
-            });
+            .child(self.render_background_work_detail(
+                item,
+                output,
+                output_viewport,
+                selection,
+                cx,
+            ));
+        // Steering is a subagent-only affordance: a shell process has no
+        // conversation to say anything into. It sits below the scrolling body
+        // rather than inside it, so it stays reachable while a long transcript
+        // is scrolled — the same reason the chat composer is pinned.
+        let steer = (item.key.kind == BackgroundWorkKind::Subagent)
+            .then(|| self.render_subagent_steer(item, &theme, cx));
         div()
             .id("background-work-surface")
             .tab_group()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .p(px(12.0))
-            .child(card)
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("background-work-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(12.0))
+                    .child(card),
+            )
+            .when_some(steer, |surface, steer| surface.child(steer))
     }
 
     fn render_background_work_detail(
