@@ -624,6 +624,15 @@ struct ClaudeStreamState {
     /// on the main channel with `parent_tool_use_id` set — can be routed into
     /// that task's output pane instead of this session's transcript.
     subagent_tasks: HashMap<String, String>,
+    /// The item each task last reported through its own bookends.
+    ///
+    /// `background_tasks_changed` says only which tasks can still wake the
+    /// session: it repeats no status, no origin and no title. It also keeps
+    /// arriving after a task settles. The bookends own those fields, so this
+    /// is what the level signal reuses instead of rebuilding an entry from
+    /// scratch — which used to reopen settled subagents and drop the tool call
+    /// that ties a card to its transcript.
+    live_task_items: HashMap<String, BackgroundWorkItem>,
     /// The description each task started with. Progress events reuse the
     /// `description` field for the agent's current activity line, which
     /// belongs in the detail row, never the title.
@@ -1108,24 +1117,67 @@ fn handle_claude_system(
                 // inventing a Process entry beside the real Subagent entry.
                 let kind = known_kind
                     .or_else(|| bare_id.is_none().then(|| claude_task_kind(entry, state)))?;
-                let mut item = BackgroundWorkItem::new(
-                    kind,
-                    task_id.clone(),
-                    match kind {
-                        BackgroundWorkKind::Subagent => tr!("background.subagent"),
-                        BackgroundWorkKind::Monitor => tr!("background.monitor"),
-                        BackgroundWorkKind::Process => tr!("background.process"),
-                    },
-                    match kind {
+                // This signal only says *what can still wake the session*. It
+                // repeats neither a status nor the originating tool call, and
+                // it keeps arriving after a task settles, so building each
+                // entry from scratch would reopen settled subagents on every
+                // signal and drop the tool call that ties a card to its
+                // transcript. The bookends own the status; this owns presence.
+                let known = state
+                    .live_task_items
+                    .get(&task_id)
+                    .filter(|known| known.key.kind == kind);
+                let status = known
+                    .map(|known| known.status)
+                    .unwrap_or_else(|| match kind {
                         BackgroundWorkKind::Monitor => BackgroundWorkStatus::Monitoring,
                         BackgroundWorkKind::Process | BackgroundWorkKind::Subagent => {
                             BackgroundWorkStatus::Running
                         }
-                    },
-                );
+                    });
+                // The description carries the task's own label, so keep it
+                // rather than replacing a real title with the kind's name.
+                let title = known
+                    .map(|known| known.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .or_else(|| {
+                        entry
+                            .get("description")
+                            .or_else(|| entry.get("subject"))
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| match kind {
+                        BackgroundWorkKind::Subagent => tr!("background.subagent"),
+                        BackgroundWorkKind::Monitor => tr!("background.monitor"),
+                        BackgroundWorkKind::Process => tr!("background.process"),
+                    });
+                let mut item = BackgroundWorkItem::new(kind, task_id.clone(), title, status);
                 item.background = true;
-                item.can_stop = true;
-                item.control_id = Some(task_id);
+                item.can_stop = status.is_stoppable();
+                item.control_id = Some(task_id.clone());
+                item.origin_activity_id = known
+                    .and_then(|known| known.origin_activity_id.clone())
+                    .or_else(|| {
+                        entry
+                            .get("tool_use_id")
+                            .or_else(|| entry.get("toolUseId"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
+                item.role = known.and_then(|known| known.role.clone()).or_else(|| {
+                    entry
+                        .get("subagent_type")
+                        .or_else(|| entry.get("subagentType"))
+                        .or_else(|| entry.get("task_type"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
+                item.model = known.and_then(|known| known.model.clone());
+                item.command = known.and_then(|known| known.command.clone());
+                item.updated_at_ms = unix_time_millis();
                 Some(item)
             })
             .collect();
@@ -1142,6 +1194,38 @@ fn handle_claude_system(
         state
             .background_task_kinds
             .insert(task_id.clone(), item.key.kind);
+        // Remember what this task last reported so a later level signal can
+        // reuse it: that signal carries none of these fields.
+        match state.live_task_items.get_mut(&task_id) {
+            Some(known) => {
+                if !item.title.is_empty() {
+                    known.title.clone_from(&item.title);
+                }
+                known.status = item.status;
+                known.can_stop = item.can_stop;
+                if item.detail.is_some() {
+                    known.detail.clone_from(&item.detail);
+                }
+                if item.origin_activity_id.is_some() {
+                    known
+                        .origin_activity_id
+                        .clone_from(&item.origin_activity_id);
+                }
+                if item.role.is_some() {
+                    known.role.clone_from(&item.role);
+                }
+                if item.model.is_some() {
+                    known.model.clone_from(&item.model);
+                }
+                if item.command.is_some() {
+                    known.command.clone_from(&item.command);
+                }
+                known.updated_at_ms = item.updated_at_ms;
+            }
+            None => {
+                state.live_task_items.insert(task_id.clone(), item.clone());
+            }
+        }
         if subtype == "task_started"
             && let Some(tool_use_id) = item.origin_activity_id.clone()
         {
@@ -2298,6 +2382,328 @@ mod tests {
         };
         assert_eq!(completed.key.kind, BackgroundWorkKind::Subagent);
         assert_eq!(completed.status, BackgroundWorkStatus::Completed);
+    }
+
+    /// Captured from CLI 2.1.330 with `--include-partial-messages`, which is
+    /// what Waku passes: the CLI emits `background_tasks_changed` repeatedly,
+    /// and its `tasks` entries carry **no status field**. Reading that as
+    /// "running" would reopen an already-settled subagent on every level
+    /// signal and replace its description with a generic label — the card then
+    /// sits on "working" forever with no idea which agent it is.
+    #[test]
+    fn a_level_signal_does_not_reopen_a_settled_subagent() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({
+                "type": "system", "subtype": "task_started",
+                "task_id": "ab178c2413e4e5a2c",
+                "tool_use_id": "call_x",
+                "description": "List 1 file",
+                "subagent_type": "general-purpose",
+                "is_backgrounded": false,
+                "task_type": "local_agent"
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let _ = event_rx.try_recv().unwrap();
+
+        handle_message(
+            &json!({
+                "type": "system", "subtype": "task_updated",
+                "task_id": "ab178c2413e4e5a2c",
+                "patch": {"status": "completed"}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let _ = event_rx.try_recv().unwrap();
+
+        // The level signal still lists it — the CLI does not always drop it
+        // immediately — and carries only its identity, never a status.
+        handle_message(
+            &json!({
+                "type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{
+                    "task_id": "ab178c2413e4e5a2c",
+                    "task_type": "local_agent",
+                    "subagent_type": "general-purpose",
+                    "description": "List 1 file"
+                }]
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+
+        let mut last = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let DriverEvent::BackgroundWork(BackgroundWorkEvent::ReconcileLive { items }) = event
+            {
+                last = Some(items);
+            }
+        }
+        let items = last.expect("the level signal must reconcile");
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].status,
+            BackgroundWorkStatus::Completed,
+            "a level signal must not reopen a settled subagent"
+        );
+        assert_eq!(
+            items[0].title, "List 1 file",
+            "the level signal's own description belongs on the card"
+        );
+    }
+
+    /// The level signal has to keep using what the bookends learned about a
+    /// task, because it does not repeat the kind or the originating tool call.
+    #[test]
+    fn a_level_signal_keeps_the_kind_and_origin_the_bookends_established() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({
+                "type": "system", "subtype": "task_started",
+                "task_id": "ab178c2413e4e5a2c",
+                "tool_use_id": "call_x",
+                "description": "List 1 file",
+                "subagent_type": "general-purpose",
+                "task_type": "local_agent",
+                "is_backgrounded": false
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let _ = event_rx.try_recv().unwrap();
+        handle_message(
+            &json!({
+                "type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{"task_id": "ab178c2413e4e5a2c"}]
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        let mut items = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let DriverEvent::BackgroundWork(BackgroundWorkEvent::ReconcileLive {
+                items: found,
+            }) = event
+            {
+                items = Some(found);
+            }
+        }
+        let item = &items.expect("level signal")[0];
+        assert_eq!(
+            item.key.kind,
+            BackgroundWorkKind::Subagent,
+            "a bare id keeps the kind its task_started established"
+        );
+        assert_eq!(
+            item.origin_activity_id.as_deref(),
+            Some("call_x"),
+            "the level signal must not strip the originating tool call"
+        );
+    }
+
+    /// Captured from CLI 2.1.330 running three Task subagents at once: every
+    /// subagent message arrives with `parent_tool_use_id` set to the `Task`
+    /// tool call, and the CLI sends a bare `thinking` block before each one.
+    /// The pane must show the narrative and tool lines, and must not be
+    /// emptied by the thinking-only messages that precede them.
+    #[test]
+    fn a_captured_subagent_stream_fills_its_task_pane() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        let transcript = [
+            json!({
+                "type": "system", "subtype": "task_started",
+                "task_id": "ad33119efe684b244",
+                "tool_use_id": "call_a8d088d35bb94b55af6a7237",
+                "description": "List one file",
+                "subagent_type": "general-purpose",
+                "is_backgrounded": false,
+                "task_type": "local_agent"
+            }),
+            json!({"type": "assistant", "parent_tool_use_id": "call_a8d088d35bb94b55af6a7237",
+                "message": {"content": [{"type": "thinking", "thinking": "Which files exist?"}]}}),
+            json!({"type": "assistant", "parent_tool_use_id": "call_a8d088d35bb94b55af6a7237",
+                "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                    "input": {"command": "ls"}}]}}),
+            json!({"type": "assistant", "parent_tool_use_id": "call_a8d088d35bb94b55af6a7237",
+                "message": {"content": [{"type": "thinking", "thinking": "Two files."}]}}),
+            json!({"type": "assistant", "parent_tool_use_id": "call_a8d088d35bb94b55af6a7237",
+                "message": {"content": [{"type": "text", "text": "The directory has two files."}]}}),
+        ];
+        let mut deltas = Vec::new();
+        for message in &transcript {
+            handle_message(message, "s", &events, &commands, &turn, true, &mut state);
+            while let Ok(event) = event_rx.try_recv() {
+                if let DriverEvent::BackgroundWork(BackgroundWorkEvent::OutputDelta {
+                    key,
+                    delta,
+                }) = event
+                {
+                    assert_eq!(key.provider_id, "ad33119efe684b244");
+                    deltas.push(delta);
+                }
+            }
+        }
+
+        assert!(
+            !deltas.is_empty(),
+            "a subagent's transcript must reach its pane, not be dropped"
+        );
+        let joined = deltas.join("");
+        assert!(
+            joined.contains("two files."),
+            "the narrative reaches the pane: {joined:?}"
+        );
+        assert!(
+            joined.contains("Bash") && joined.contains("ls"),
+            "the tool call reaches the pane: {joined:?}"
+        );
+    }
+
+    /// A subagent message whose `parent_tool_use_id` is not a known `Task`
+    /// call must not be silently reinterpreted: the pane it belongs to is
+    /// unknown, so nothing is written and nothing else is disturbed.
+    #[test]
+    fn an_unmapped_subagent_message_is_dropped_without_side_effects() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        handle_message(
+            &json!({"type": "assistant", "parent_tool_use_id": "call_unknown",
+                "message": {"content": [{"type": "text", "text": "orphan"}]}}),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "an unmapped subagent message produces no event"
+        );
+    }
+
+    /// Wire shapes read off CLI 2.1.330, with three Task subagents running at
+    /// once: each one keeps its own item through the interleaved bookends, and
+    /// the ids the CLI sends never collide. A session that collapses them into
+    /// one card shows only whichever arrived last.
+    #[test]
+    fn concurrent_subagents_keep_separate_items_through_interleaved_bookends() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+
+        let started = [
+            ("ad33119e", "call_a", "List one file"),
+            ("a33a76b8", "call_b", "Print number 7"),
+            ("aa05027a", "call_c", "Echo word ok"),
+        ];
+        for (task_id, tool_use_id, description) in started {
+            handle_message(
+                &json!({
+                    "type": "system",
+                    "subtype": "task_started",
+                    "task_id": task_id,
+                    "tool_use_id": tool_use_id,
+                    "description": description,
+                    "subagent_type": "general-purpose",
+                    "is_backgrounded": false,
+                    "task_type": "local_agent",
+                    "prompt": description
+                }),
+                "s",
+                &events,
+                &commands,
+                &turn,
+                true,
+                &mut state,
+            );
+        }
+
+        // Progress and settle arrive interleaved across the three, not grouped.
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_progress",
+                "task_id": "ad33119e",
+                "run_id": "r-a",
+                "description": "Running List files in working directory",
+                "last_tool_name": "Bash"
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+        handle_message(
+            &json!({
+                "type": "system",
+                "subtype": "task_updated",
+                "task_id": "a33a76b8",
+                "run_id": "r-b",
+                "patch": {"status": "completed", "end_time": 1_795_506_827_906u64}
+            }),
+            "s",
+            &events,
+            &commands,
+            &turn,
+            true,
+            &mut state,
+        );
+
+        let mut items: HashMap<String, BackgroundWorkItem> = HashMap::new();
+        while let Ok(event) = event_rx.try_recv() {
+            if let DriverEvent::BackgroundWork(BackgroundWorkEvent::Upsert(item)) = event {
+                items.insert(item.key.provider_id.clone(), item);
+            }
+        }
+
+        assert_eq!(items.len(), 3, "every subagent keeps its own card");
+        assert_eq!(
+            items["ad33119e"].status,
+            BackgroundWorkStatus::Running,
+            "a progress event must not settle the task it describes"
+        );
+        assert_eq!(
+            items["a33a76b8"].status,
+            BackgroundWorkStatus::Completed,
+            "the settled task keeps its own status"
+        );
+        assert_eq!(items["aa05027a"].status, BackgroundWorkStatus::Running);
+        assert_eq!(
+            items["ad33119e"].detail.as_deref(),
+            Some("Running List files in working directory"),
+            "progress goes to the detail row of the task that reported it"
+        );
+        // The settle event itself carries no tool_use_id — the CLI only sends
+        // it on `task_started`/`task_notification` — so the driver must not be
+        // expected to repeat it. The registry keeps the original because
+        // `merge_option` only overwrites with a present value.
+        assert!(
+            items["a33a76b8"].origin_activity_id.is_none(),
+            "a task_updated bookend carries no tool_use_id to repeat"
+        );
     }
 
     /// Wire shapes read off CLI 2.1.226: progress events reuse `description`

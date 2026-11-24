@@ -2319,6 +2319,188 @@ mod tests {
         assert!(output.output_truncated);
     }
 
+    /// `background_tasks_changed` carries only the tasks that can still wake
+    /// the session, and it shrinks as they settle: three, then two, then one,
+    /// then none. A subagent that merely settled must not be marked `Lost` —
+    /// that is what the settle bookend already recorded — and a card that has
+    /// not settled must not lose its live state because another one did.
+    #[test]
+    fn a_shrinking_live_set_does_not_lose_unsettled_cards() {
+        let mut registry = BackgroundWorkRegistry::default();
+        for (id, title) in [
+            ("a1", "List one file"),
+            ("b2", "Print number 7"),
+            ("c3", "Echo ok"),
+        ] {
+            let mut started = BackgroundWorkItem::new(
+                BackgroundWorkKind::Subagent,
+                id,
+                title,
+                BackgroundWorkStatus::Running,
+            );
+            started.background = true;
+            registry.apply(BackgroundWorkEvent::Upsert(started));
+        }
+
+        // b2 settles through its own bookend.
+        let mut settled = BackgroundWorkItem::new(
+            BackgroundWorkKind::Subagent,
+            "b2",
+            "",
+            BackgroundWorkStatus::Completed,
+        );
+        settled.background = true;
+        registry.apply(BackgroundWorkEvent::Upsert(settled));
+
+        // The level signal now lists only the two still running.
+        let live = |id: &str| {
+            let mut item = BackgroundWorkItem::new(
+                BackgroundWorkKind::Subagent,
+                id,
+                "",
+                BackgroundWorkStatus::Running,
+            );
+            item.background = true;
+            item
+        };
+        registry.apply(BackgroundWorkEvent::ReconcileLive {
+            items: vec![live("a1"), live("c3")],
+        });
+
+        let status = |id: &str| {
+            registry.items[&BackgroundWorkKey::new(BackgroundWorkKind::Subagent, id)].status
+        };
+        assert_eq!(
+            status("a1"),
+            BackgroundWorkStatus::Running,
+            "a1 is still running"
+        );
+        assert_eq!(
+            status("c3"),
+            BackgroundWorkStatus::Running,
+            "c3 is still running"
+        );
+        assert_eq!(
+            status("b2"),
+            BackgroundWorkStatus::Completed,
+            "a settled card keeps its completed status, not Lost"
+        );
+    }
+
+    /// The level signal is authoritative about *what is still live*, so a card
+    /// it no longer lists while still marked running really is gone.
+    #[test]
+    fn a_vanished_live_card_is_marked_lost() {
+        let mut registry = BackgroundWorkRegistry::default();
+        let mut started = BackgroundWorkItem::new(
+            BackgroundWorkKind::Subagent,
+            "a1",
+            "gone",
+            BackgroundWorkStatus::Running,
+        );
+        started.background = true;
+        registry.apply(BackgroundWorkEvent::Upsert(started));
+        registry.apply(BackgroundWorkEvent::ReconcileLive { items: vec![] });
+
+        assert_eq!(
+            registry.items[&BackgroundWorkKey::new(BackgroundWorkKind::Subagent, "a1")].status,
+            BackgroundWorkStatus::Lost
+        );
+    }
+
+    /// Three subagents streaming at once, in the order the CLI sends them:
+    /// each `task_started` upserts its card, then its transcript arrives as
+    /// `OutputDelta` for that card alone. Every card must keep its own text —
+    /// interleaving must not pool them into one pane or drop a delta because
+    /// its card had not been created yet.
+    #[test]
+    fn concurrent_subagent_deltas_land_in_their_own_cards() {
+        let mut registry = BackgroundWorkRegistry::default();
+        let tasks = [
+            ("a1", "List one file"),
+            ("b2", "Print number 7"),
+            ("c3", "Echo ok"),
+        ];
+
+        for (id, title) in tasks {
+            let mut started = BackgroundWorkItem::new(
+                BackgroundWorkKind::Subagent,
+                id,
+                title,
+                BackgroundWorkStatus::Running,
+            );
+            started.background = true;
+            registry.apply(BackgroundWorkEvent::Upsert(started));
+        }
+        // Interleaved transcripts: a2, then b2, then a1, then c3.
+        for (id, text) in [
+            ("b2", "› Bash · ls\n"),
+            ("a1", "two files\n"),
+            ("c3", "ok"),
+            ("a1", "done\n"),
+        ] {
+            registry.apply(BackgroundWorkEvent::OutputDelta {
+                key: BackgroundWorkKey::new(BackgroundWorkKind::Subagent, id),
+                delta: text.to_owned(),
+            });
+        }
+        assert!(registry.refresh_output_cache());
+
+        let read = |id: &str| {
+            registry.rendered_output[&BackgroundWorkKey::new(BackgroundWorkKind::Subagent, id)]
+                .to_string()
+        };
+        assert_eq!(read("a1"), "two files\ndone\n");
+        assert_eq!(read("b2"), "› Bash · ls\n");
+        assert_eq!(read("c3"), "ok");
+        assert_eq!(
+            registry.items.len(),
+            3,
+            "interleaved output must not collapse the three cards"
+        );
+    }
+
+    /// A delta that arrives before its card is created has nowhere to go. It
+    /// must be dropped rather than written into some other card, and the card
+    /// that follows must still appear.
+    #[test]
+    fn a_delta_before_its_card_does_not_poison_another() {
+        let mut registry = BackgroundWorkRegistry::default();
+        let mut started = BackgroundWorkItem::new(
+            BackgroundWorkKind::Subagent,
+            "a1",
+            "First",
+            BackgroundWorkStatus::Running,
+        );
+        started.background = true;
+        registry.apply(BackgroundWorkEvent::Upsert(started));
+
+        registry.apply(BackgroundWorkEvent::OutputDelta {
+            key: BackgroundWorkKey::new(BackgroundWorkKind::Subagent, "ghost"),
+            delta: "orphan".to_owned(),
+        });
+        registry.apply(BackgroundWorkEvent::OutputDelta {
+            key: BackgroundWorkKey::new(BackgroundWorkKind::Subagent, "a1"),
+            delta: "real".to_owned(),
+        });
+        assert!(registry.refresh_output_cache());
+
+        assert_eq!(
+            registry.rendered_output[&BackgroundWorkKey::new(BackgroundWorkKind::Subagent, "a1")]
+                .as_ref(),
+            "real"
+        );
+        assert!(
+            !registry
+                .rendered_output
+                .contains_key(&BackgroundWorkKey::new(
+                    BackgroundWorkKind::Subagent,
+                    "ghost"
+                )),
+            "an unmatched delta must not create a card"
+        );
+    }
+
     #[test]
     fn output_cache_strips_split_ansi_sequences() {
         let mut registry = BackgroundWorkRegistry::default();
