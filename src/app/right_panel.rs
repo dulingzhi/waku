@@ -1384,6 +1384,25 @@ mod tests {
         );
     }
 
+    /// The whole point of resolving a relative link: a picture reached through
+    /// `../` leaves the workspace but the panel can still draw it, so it must
+    /// take the preview path rather than the file manager. This walks the same
+    /// decision `open_transcript_link` makes, so the route and the handler have
+    /// to agree.
+    #[test]
+    fn a_relative_picture_outside_the_workspace_still_previews() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let routed = transcript_link_route("../../assets/up_hover.png", Some(workspace));
+        let TranscriptLinkRoute::Finder(path) = routed else {
+            panic!("a path that leaves the workspace routes through the Finder arm: {routed:?}");
+        };
+        assert!(
+            outcome_is_preview(&path),
+            "an image reached by a relative path must preview, not open the file manager: {}",
+            path.display()
+        );
+    }
+
     /// A picture outside the workspace is the case a transcript read produces
     /// constantly: a tool reads a texture in a game install, and the row offers
     /// it. The panel can draw it, so it must open as a preview rather than
