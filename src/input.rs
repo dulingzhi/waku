@@ -790,10 +790,18 @@ impl TextInput {
     /// anywhere else it must keep moving the caret, or a multi-line prompt
     /// could never be edited on its earlier lines.
     ///
-    /// A field that has not painted yet has no geometry to consult, and
-    /// reporting `false` keeps the arrow with the field rather than silently
-    /// swapping its meaning during the first frame.
+    /// A single-line field is always one row, and an empty field is one empty
+    /// row; neither has anything above the caret, so neither needs geometry to
+    /// answer. Asking the layout anyway made Up inert in the state a walk
+    /// starts from most often — a field emptied by its own send, whose layout
+    /// has no glyph to measure and therefore reported a row that was not the
+    /// first. A field that has not painted yet still reports `false` for the
+    /// same reason as before: its geometry is unknown, and the arrow is safer
+    /// with the field for one frame.
     pub fn caret_on_first_row(&self) -> bool {
+        if self.mode == FieldMode::SingleLine || self.content.is_empty() {
+            return true;
+        }
         let Some(layout) = self
             .last_layout
             .as_ref()
@@ -801,9 +809,6 @@ impl TextInput {
         else {
             return false;
         };
-        if self.mode == FieldMode::SingleLine {
-            return true;
-        }
         let Some(position) = layout.position_for_index(self.cursor_offset()) else {
             return false;
         };
@@ -2939,6 +2944,50 @@ mod tests {
         cx.update(|window, cx| window.focus(&composer.read(cx).focus(), cx));
         cx.run_until_parked();
         (composer, cx)
+    }
+
+    /// The row the caret is on decides what Up means, so the empty field — the
+    /// state the composer is in right after a send, and the state Up is most
+    /// often pressed in — has to answer "first row".
+    ///
+    /// This is answered from the *previous* paint's text layout. A field whose
+    /// layout has not caught up with its content reports `false`, which hands
+    /// the arrow back to the field: history then never starts, and pressing Up
+    /// does nothing at all rather than recalling anything.
+    #[gpui::test]
+    fn an_empty_composer_sits_on_its_first_row(cx: &mut TestAppContext) {
+        let (composer, cx) = setup_composer(cx);
+        let on_first_row =
+            cx.read_entity(&composer, |composer, cx| composer.caret_on_first_row(cx));
+        assert!(
+            on_first_row,
+            "the empty composer has no row above the caret, so Up is free for history"
+        );
+    }
+
+    #[gpui::test]
+    fn a_multi_line_composer_is_not_on_its_first_row_with_the_caret_at_the_end(
+        cx: &mut TestAppContext,
+    ) {
+        let (composer, cx) = setup_composer(cx);
+        composer.update(cx, |composer, cx| composer.set_content("one\ntwo", cx));
+        cx.run_until_parked();
+        let on_first_row =
+            cx.read_entity(&composer, |composer, cx| composer.caret_on_first_row(cx));
+        assert!(
+            !on_first_row,
+            "the caret ends on the second row, so Up belongs to the field"
+        );
+    }
+
+    #[gpui::test]
+    fn a_single_row_of_text_composes_on_the_first_row(cx: &mut TestAppContext) {
+        let (composer, cx) = setup_composer(cx);
+        composer.update(cx, |composer, cx| composer.set_content("one line", cx));
+        cx.run_until_parked();
+        let on_first_row =
+            cx.read_entity(&composer, |composer, cx| composer.caret_on_first_row(cx));
+        assert!(on_first_row, "one row of text has no row above it");
     }
 
     #[gpui::test]

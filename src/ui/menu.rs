@@ -1533,7 +1533,7 @@ fn on_menu_key(
 mod tests {
     use std::{cell::Cell, rc::Rc};
 
-    use gpui::{Context, Modifiers, Render, TestAppContext, point, size};
+    use gpui::{AppContext as _, Context, Modifiers, Render, TestAppContext, point, size};
 
     use super::*;
 
@@ -1859,5 +1859,85 @@ mod tests {
         assert_eq!(next_highlight(&focusable, Some(0), "end"), Some(3));
         assert_eq!(next_highlight(&focusable, Some(0), "tab"), None);
         assert_eq!(next_highlight(&[], None, "down"), None);
+    }
+
+    /// The card the composer lives in is what makes Up a history key.
+    ///
+    /// `ComposerPromptHistory > TextInput` is a descendant predicate, so it only
+    /// fires while the card really is an *ancestor* of the focused field. That
+    /// makes the shape of the element tree part of the feature, and it is the
+    /// part no test of the walk itself can see: the state machine is correct
+    /// even when the keystroke never reaches it, which is exactly how a history
+    /// that never recalls anything still passes every unit test.
+    struct HistoryHarness {
+        composer: gpui::Entity<crate::input::ComposerInput>,
+        recalls: Rc<Cell<usize>>,
+        /// Whether the card declares the ancestor half of the predicate. The
+        /// `false` case is the control: it proves the assertion below can tell
+        /// a wired card from an inert one.
+        declares_context: bool,
+    }
+
+    impl Render for HistoryHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let recalls = self.recalls.clone();
+            div().key_context("Waku").child(
+                div()
+                    .when(self.declares_context, |card| {
+                        card.key_context(PROMPT_HISTORY_ELEMENT_CONTEXT)
+                    })
+                    .on_action(move |_: &PromptHistoryPrevious, _, _| {
+                        recalls.set(recalls.get() + 1);
+                    })
+                    .child(self.composer.clone()),
+            )
+        }
+    }
+
+    fn ups_reaching_the_card(declares_context: bool, cx: &mut TestAppContext) -> usize {
+        cx.update(|cx| {
+            crate::input::init(cx);
+            init(cx);
+        });
+        let recalls = Rc::new(Cell::new(0));
+        let (harness, cx) = cx.add_window_view(|window, cx| {
+            let composer = cx.new(|cx| crate::input::ComposerInput::new(window, cx));
+            HistoryHarness {
+                composer,
+                recalls: recalls.clone(),
+                declares_context,
+            }
+        });
+        let composer = cx.read_entity(&harness, |harness, _| harness.composer.clone());
+        cx.update(|window, cx| {
+            let focus = composer.read(cx).focus();
+            window.focus(&focus, cx);
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("up");
+        recalls.get()
+    }
+
+    /// Up inside the composer must arrive as `PromptHistoryPrevious`.
+    ///
+    /// The field binds `up` too, so this also pins the tie-break the binding
+    /// depends on: the deeper predicate has to win over the field's own caret
+    /// move, which only holds because `init` runs after `crate::input::init`.
+    #[gpui::test]
+    fn up_in_the_composer_arrives_as_the_history_action(cx: &mut TestAppContext) {
+        assert_eq!(
+            ups_reaching_the_card(true, cx),
+            1,
+            "the composer's own Up binding has to reach the history action"
+        );
+    }
+
+    #[gpui::test]
+    fn up_without_the_cards_context_stays_with_the_field(cx: &mut TestAppContext) {
+        assert_eq!(
+            ups_reaching_the_card(false, cx),
+            0,
+            "without the ancestor context the arrow belongs to the field"
+        );
     }
 }
