@@ -6,7 +6,6 @@ mod amp;
 mod claude;
 mod codex;
 mod computer_use;
-mod deepseek;
 #[cfg(test)]
 mod fixture;
 mod opencode;
@@ -228,13 +227,16 @@ pub(crate) fn start_local(
         ProviderKind::OhMyPi => {
             Arc::new(pi::PiDriver::start(pi::PiFlavor::OhMyPi, options, events)?)
         }
-        // Cursor, Fx, Grok, and Kimi Code all serve a long-lived ACP session,
-        // which is the only way their Supervised mode can actually ask the user
-        // rather than silently forcing or denying.
-        ProviderKind::Cursor | ProviderKind::Fx | ProviderKind::Grok | ProviderKind::Kimi => {
-            Arc::new(acp::AcpDriver::start(provider, options, events)?)
-        }
-        ProviderKind::DeepSeek => Arc::new(deepseek::DeepSeekDriver::start(options, events)?),
+        // DeepSeek Harness serves standard ACP v1 over stdio through its `acp`
+        // profile, so it rides the same driver as the other ACP providers.
+        // Its older `dsh web` transport is gone: that HTTP surface now issues
+        // a launch token whose cookie handshake Waku never implemented, which
+        // left the provider permanently unauthenticated.
+        ProviderKind::Cursor
+        | ProviderKind::Fx
+        | ProviderKind::Grok
+        | ProviderKind::Kimi
+        | ProviderKind::DeepSeek => Arc::new(acp::AcpDriver::start(provider, options, events)?),
         // OpenCode is not a per-workspace server: one adopted background
         // service carries every workspace, and every Waku task rides its one
         // event stream.

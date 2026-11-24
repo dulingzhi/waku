@@ -40,6 +40,12 @@ pub(crate) struct Endpoint {
 
 impl Endpoint {
     /// An unauthenticated loopback server.
+    ///
+    /// Still the shape OpenCode's loopback service needs; the DeepSeek Harness
+    /// transport that used to share it now speaks ACP over stdio instead. Only
+    /// a test target and the OpenCode module call it, so a library-only build
+    /// sees no use.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn local(port: u16) -> Self {
         Self {
             host: "127.0.0.1".to_owned(),
