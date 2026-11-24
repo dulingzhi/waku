@@ -107,7 +107,17 @@ fn percent_decode_file_path(path: &str) -> String {
     String::from_utf8(decoded).unwrap_or_else(|_| path.to_owned())
 }
 
-fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
+/// Resolves a transcript file link to a path on the daemon host.
+///
+/// A model writes a path the way its own workspace sees it, so most links are
+/// relative (`src/main.rs`, `./shot.png`). They are joined to the workspace
+/// before anything else looks at them: a transcript has no other directory to
+/// resolve against, and without the join a working link was rejected as an
+/// external URL nobody could open.
+///
+/// An absolute path needs no such help and is used as it stands — a file the
+/// model read may sit on another drive entirely.
+fn markdown_file_link_path(target: &str, workspace: Option<&Path>) -> Option<PathBuf> {
     let target = strip_file_location(target.trim());
     if target
         .get(..5)
@@ -115,9 +125,43 @@ fn markdown_file_link_path(target: &str) -> Option<PathBuf> {
     {
         return url::Url::parse(target).ok()?.to_file_path().ok();
     }
+    // Any other scheme names something that is not a path on this host — a web
+    // page, a mail address — and must not be joined to a workspace. Without
+    // this check `https://example.com/a.rs` reads as the relative path
+    // `https:/example.com/a.rs` and lands inside the project.
+    if has_url_scheme(target) {
+        return None;
+    }
 
     let path = PathBuf::from(percent_decode_file_path(target));
-    path.is_absolute().then_some(path)
+    if path.is_absolute() {
+        return Some(path);
+    }
+    // Lexical join only: the desktop must not probe a workspace its daemon may
+    // not share, so this resolves the path the same way the file tree does.
+    workspace.map(|workspace| workspace.join(path))
+}
+
+/// Whether `target` starts with a URL scheme (`https:`, `mailto:`, …).
+///
+/// A single letter is a Windows drive, never a scheme, and `name:stream` is an
+/// alternate data stream — both are paths and are left alone. Anything else
+/// with `scheme:` in front names something off this host.
+fn has_url_scheme(target: &str) -> bool {
+    let Some((scheme, _rest)) = target.split_once(':') else {
+        return false;
+    };
+    // `C:\…`, `C:/…` and a bare `name:stream` are drives and streams.
+    if scheme.len() < 2 {
+        return false;
+    }
+    scheme
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-'))
+        && scheme
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
 }
 
 fn normalized_path(path: &Path) -> PathBuf {
@@ -162,7 +206,7 @@ fn outcome_is_preview(path: &Path) -> bool {
 }
 
 fn transcript_link_route(target: &str, workspace: Option<&Path>) -> TranscriptLinkRoute {
-    let Some(path) = markdown_file_link_path(target) else {
+    let Some(path) = markdown_file_link_path(target, workspace) else {
         return TranscriptLinkRoute::External;
     };
     let path = normalized_path(&path);
@@ -1258,6 +1302,85 @@ mod tests {
         assert_eq!(
             transcript_link_route("https://example.com/file.rs:12", Some(workspace)),
             TranscriptLinkRoute::External
+        );
+    }
+
+    /// A transcript link that names a path relative to the workspace is how
+    /// most models write a path they just worked on (`src/main.rs`,
+    /// `./shot.png`). It has to resolve against the active workspace like a
+    /// relative file-tree path does, not fall through to `External` where
+    /// nothing can open it.
+    #[test]
+    fn a_workspace_relative_link_routes_into_the_project() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Separators follow the host, so build the expectation the same way.
+        let expected = Path::new("src").join("app").join("right_panel.rs");
+        let expected = expected.to_string_lossy().into_owned();
+
+        assert_eq!(
+            transcript_link_route("src/app/right_panel.rs", Some(workspace)),
+            TranscriptLinkRoute::ProjectFile(expected.clone())
+        );
+        assert_eq!(
+            transcript_link_route("./src/app/right_panel.rs:12", Some(workspace)),
+            TranscriptLinkRoute::ProjectFile(expected)
+        );
+        assert_eq!(
+            transcript_link_route("shot.png", Some(workspace)),
+            TranscriptLinkRoute::ProjectFile("shot.png".into())
+        );
+
+        // With no workspace to resolve against there is nothing to open, but
+        // it still must not be mistaken for an external URL.
+        assert_eq!(
+            transcript_link_route("src/main.rs", None),
+            TranscriptLinkRoute::External
+        );
+    }
+
+    /// Resolving relative links must not swallow URLs. `https://…` is not a
+    /// path, and joining it to the workspace would present a web address as a
+    /// project file — and then fail to open it.
+    #[test]
+    fn a_url_is_never_resolved_as_a_relative_path() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for target in [
+            "https://example.com/shot.png",
+            "http://example.com/a.rs:12",
+            "mailto:someone@example.com",
+            "ssh://host/repo/file.rs",
+        ] {
+            assert_eq!(
+                transcript_link_route(target, Some(workspace)),
+                TranscriptLinkRoute::External,
+                "{target} is not a workspace path"
+            );
+        }
+    }
+
+    /// A bare `name:stream` is a Windows alternate data stream, still a path,
+    /// so the URL check must not take it for a scheme.
+    #[test]
+    fn a_drive_relative_link_is_not_mistaken_for_a_scheme() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            transcript_link_route("notes.png:stream", Some(workspace)),
+            TranscriptLinkRoute::ProjectFile(
+                Path::new("notes.png:stream").to_string_lossy().into()
+            )
+        );
+    }
+
+    /// A relative link that climbs out of the workspace is not a project file.
+    /// Resolving it lexically keeps it out of the confined reader, which would
+    /// reject it anyway, and hands it to the file manager like any other path
+    /// the panel cannot address.
+    #[test]
+    fn a_relative_link_escaping_the_workspace_is_not_a_project_file() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            transcript_link_route("../elsewhere/shot.png", Some(workspace)),
+            TranscriptLinkRoute::Finder(normalized_path(&workspace.join("../elsewhere/shot.png")))
         );
     }
 
