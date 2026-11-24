@@ -717,9 +717,6 @@ impl DaemonServer {
     /// equality outside `token_matches`, and it is revoked when the lead's
     /// runtime ends.
     pub fn mint_agent_token(&self, parent_session: Uuid, runtime_id: Uuid) -> String {
-        waku_protocol::diagnostics::log(format!(
-            "waku-daemon minted a scoped agent token for session {parent_session} (runtime {runtime_id})"
-        ));
         let token = minted_token_value();
         self.agent_tokens.lock().insert(
             token.clone(),
@@ -1064,13 +1061,18 @@ where
                             request.runtime_id,
                         )
                     {
-                        let refusal = scope.refusal_reason(
-                            &request.command,
-                            request.session_id,
-                            request.runtime_id,
-                        );
+                        // Name the half that missed. This refusal reached a user
+                        // twice as a bare "may not perform that request" while the
+                        // bridge was quietly addressing Claude's own conversation
+                        // instead of the task, and the log is the only place the
+                        // difference between the two is visible.
                         waku_protocol::diagnostics::log(format!(
-                            "waku-daemon refused a scoped agent request: {refusal}"
+                            "waku-daemon refused a scoped agent request: {}",
+                            scope.refusal_reason(
+                                &request.command,
+                                request.session_id,
+                                request.runtime_id,
+                            )
                         ));
                         write_sealed(
                             &mut sealed,
@@ -1298,19 +1300,6 @@ impl AgentScope {
                 parent_session,
                 runtime_id,
             } => {
-                // Starting a delegate is the one command that does not act on a
-                // running provider process: it creates a new one, and it names no
-                // existing task. So it is checked against the session alone.
-                //
-                // The runtime check is wrong for it in practice, not just in
-                // theory: a lead conversation that is reopened gets a new
-                // runtime while the provider process it already started keeps the
-                // token it was launched with, and every spawn from that process
-                // would then be refused. The session is what the capability is
-                // really about here.
-                if matches!(command, Command::SpawnDelegate { .. }) {
-                    return request_session == parent_session;
-                }
                 request_session == parent_session
                     && request_runtime == runtime_id
                     && matches!(
@@ -1342,7 +1331,8 @@ impl AgentScope {
     /// The two halves fail for very different reasons — a wrong session means the
     /// caller never belonged to this conversation, a wrong runtime means its
     /// capability outlived the process it was minted for — and a bare "not
-    /// allowed" leaves them indistinguishable in a log.
+    /// allowed" leaves them indistinguishable in a log, which is exactly how the
+    /// bridge spent two rounds addressing the wrong session unnoticed.
     fn refusal_reason(
         self,
         command: &Command,
@@ -1805,34 +1795,15 @@ mod tests {
             scope.permits(&spawn, parent, runtime),
             "a lead has to be able to start its delegates"
         );
-        // It is still bound to the lead's own conversation: it is not a licence
-        // to act anywhere.
+        // The permission is still bound to the lead's own session and runtime:
+        // it is not a licence to act anywhere.
         assert!(
             !scope.permits(&spawn, Uuid::new_v4(), runtime),
             "spawning must be refused under another session id"
         );
-        // A reopened conversation gets a new runtime while the provider process
-        // it already started keeps the token it launched with. Refusing on the
-        // runtime would break every spawn from a lead that was reopened, which is
-        // the ordinary way a user comes back to a task — so this one command is
-        // checked against the session alone. It names no existing task, so it
-        // cannot be pointed at a runtime the way `Prompt` can.
         assert!(
-            scope.permits(&spawn, parent, Uuid::new_v4()),
-            "a reopened lead must still be able to start delegates"
-        );
-        // Commands that do act on a running process keep the strict check.
-        assert!(
-            !scope.permits(
-                &Command::Prompt {
-                    prompt: "go".into(),
-                    turn_id: None,
-                    message_id: None,
-                },
-                parent,
-                Uuid::new_v4()
-            ),
-            "a stale runtime must not be able to prompt a replaced process"
+            !scope.permits(&spawn, parent, Uuid::new_v4()),
+            "spawning must be refused under a replaced runtime"
         );
     }
 

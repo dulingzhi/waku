@@ -152,11 +152,8 @@ const AGENT_BRIDGE_SERVER_NAME: &str = "waku_agents";
 /// the servers it starts, so the daemon's address and the scoped token ride in
 /// the provider's environment, where they never appear in a process listing the
 /// way an argv entry would.
-fn configure_agent_bridge(
-    command: &mut Command,
-    session_id: &str,
-    bridge: &crate::driver::AgentBridgeAccess,
-) {    // `waku --agent-bridge` rather than a standalone helper: a package ships one
+fn configure_agent_bridge(command: &mut Command, bridge: &crate::driver::AgentBridgeAccess) {
+    // `waku --agent-bridge` rather than a standalone helper: a package ships one
     // executable, which is the same rule the Computer Use helpers follow.
     let Ok(executable) = std::env::current_exe() else {
         // Without a path to this executable there is nothing to point Claude at.
@@ -176,9 +173,14 @@ fn configure_agent_bridge(
         .args(["--mcp-config", &config.to_string()])
         .env(waku_protocol::DAEMON_ADDRESS_ENV, &bridge.address)
         .env(waku_protocol::DAEMON_TOKEN_ENV, &bridge.token)
-        // The bridge has to name a session and a runtime on every request and
-        // cannot read the token's scope, so both travel with the credential.
-        .env(waku_protocol::DAEMON_SESSION_ENV, session_id)
+        // Both ids come from the capability, never from this driver's own
+        // session id: that one is Claude's provider conversation, and a bridge
+        // told to drive *that* is refused by the daemon on every call. Taking
+        // them from one place is what makes the mistake impossible to repeat.
+        .env(
+            waku_protocol::DAEMON_SESSION_ENV,
+            bridge.session_id.to_string(),
+        )
         .env(
             waku_protocol::DAEMON_RUNTIME_ENV,
             bridge.runtime_id.to_string(),
@@ -274,7 +276,7 @@ impl ClaudeDriver {
         // the capability, so an ordinary task has none and never offers these
         // tools at all.
         if let Some(bridge) = agent_bridge.as_ref() {
-            configure_agent_bridge(&mut command, &session_id, bridge);
+            configure_agent_bridge(&mut command, bridge);
         }
 
         let command = command
@@ -2012,12 +2014,11 @@ mod tests {
         let mut command = Command::new("/usr/bin/true");
         configure_agent_bridge(
             &mut command,
-            "lead-session",
             &crate::driver::AgentBridgeAccess {
                 address: "127.0.0.1:4312".into(),
                 token: "scoped-token".into(),
-                session_id: uuid::Uuid::nil(),
-                runtime_id: uuid::Uuid::nil(),
+                session_id: uuid::Uuid::new_v4(),
+                runtime_id: uuid::Uuid::new_v4(),
             },
         );
 
@@ -2040,6 +2041,127 @@ mod tests {
         );
     }
 
+    /// The bridge must be told the *Waku* task it belongs to.
+    ///
+    /// Claude has its own session id, and it is a different UUID with a different
+    /// meaning. Handing that one to the bridge made every `spawn_agent` fail with
+    /// "this agent token may not perform that request": the daemon scopes the
+    /// token to the task, so a request naming Claude's conversation is refused
+    /// before it reaches the backend. The ids here are made distinct on purpose,
+    /// because the version of this test that passed used one string for both.
+    ///
+    /// This drives the *whole driver* rather than the helper, because the bug was
+    /// at the call site: the helper was told which id to use, and the caller
+    /// passed Claude's. Only launching the real thing can catch that.
+    #[test]
+    fn the_bridge_is_told_the_waku_session_not_claudes_own() {
+        let waku_session = uuid::Uuid::new_v4();
+        let runtime_id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("waku-claude-bridge-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let dump = root.join("env.txt");
+        let stub = fake_claude(&root, &dump);
+
+        let (events, _event_rx) = crate::driver::test_event_channel();
+        let driver = ClaudeDriver::start(
+            DriverStartOptions {
+                binary: stub,
+                cwd: root.clone(),
+                mode: RuntimeMode::FullAccess,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                context_window: None,
+                agent_preset: None,
+                computer_use_enabled: false,
+                provider_cursor: None,
+                agent_bridge: Some(crate::driver::AgentBridgeAccess {
+                    address: "127.0.0.1:4312".into(),
+                    token: "scoped-token".into(),
+                    session_id: waku_session,
+                    runtime_id,
+                }),
+            },
+            events,
+        )
+        .expect("the driver should launch with a bridge");
+        // The stub writes its environment and exits, so the driver's reader ends.
+        drop(driver);
+
+        let written = wait_for_file(&dump);
+        let environment = written
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            environment
+                .get(waku_protocol::DAEMON_SESSION_ENV)
+                .map(String::as_str),
+            Some(waku_session.to_string().as_str()),
+            "the bridge has to address the task the token was minted for, \
+             not Claude's own conversation"
+        );
+        assert_eq!(
+            environment
+                .get(waku_protocol::DAEMON_RUNTIME_ENV)
+                .map(String::as_str),
+            Some(runtime_id.to_string().as_str())
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A stub that dumps its environment to `dump` and exits.
+    ///
+    /// It has to behave like a program Claude is launched as — the driver spawns
+    /// it and reads its stdout — so on Windows it is a batch file and elsewhere a
+    /// shell script, both made executable for this test only.
+    fn fake_claude(root: &std::path::Path, dump: &std::path::Path) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            let path = root.join("stub.cmd");
+            let script = format!(
+                "@echo off\r\nset > \"{}\"\r\n",
+                dump.display()
+            );
+            std::fs::write(&path, script).unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            let path = root.join("stub.sh");
+            let script = format!("#!/bin/sh\nenv > '{}'\n", dump.display());
+            std::fs::write(&path, script).unwrap();
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+    }
+
+    fn wait_for_file(path: &std::path::Path) -> String {
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("the stub never wrote {}", path.display());
+    }
+
+    fn environment_of(
+        command: &Command,
+    ) -> std::collections::HashMap<String, Option<String>> {        command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
     /// The capability must never travel in argv.
     ///
     /// A command line is readable by every process owner on the host, so a token
@@ -2050,13 +2172,13 @@ mod tests {
     fn the_bridge_credential_travels_in_the_environment_not_the_command_line() {
         let mut command = Command::new("/usr/bin/true");
         let runtime_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
         configure_agent_bridge(
             &mut command,
-            "lead-session",
             &crate::driver::AgentBridgeAccess {
                 address: "127.0.0.1:4312".into(),
                 token: "scoped-token".into(),
-                session_id: uuid::Uuid::nil(),
+                session_id,
                 runtime_id,
             },
         );
@@ -2071,15 +2193,7 @@ mod tests {
             "the token must not appear in argv: {rendered}"
         );
 
-        let environment = command
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<std::collections::HashMap<_, _>>();
+        let environment = environment_of(&command);
         assert_eq!(
             environment
                 .get(waku_protocol::DAEMON_TOKEN_ENV)
@@ -2102,7 +2216,7 @@ mod tests {
                 .cloned()
                 .flatten()
                 .as_deref(),
-            Some("lead-session")
+            Some(session_id.to_string().as_str())
         );
         // The runtime is half of the scope the daemon checks, so a bridge that
         // did not receive it would be refused on every call it made.

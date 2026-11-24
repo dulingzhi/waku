@@ -72,12 +72,6 @@ fn a_real_bridge_creates_a_delegate_through_the_real_daemon() {
     ));
     let runtime_id = Uuid::new_v4();
     let scoped = server.mint_agent_token(lead_id, runtime_id);
-    // The lead's provider process keeps the runtime it was launched with, but
-    // coming back to a task mints a fresh one. Passing a different runtime here
-    // is what an already-running lead looks like to the bridge, and spawning has
-    // to survive it: the user's ordinary way back to a conversation used to make
-    // every spawn fail with "this agent token may not perform that request".
-    let reopened_runtime = Uuid::new_v4();
     let stop = Arc::new(AtomicBool::new(false));
     let serving = {
         let server = server.clone();
@@ -91,7 +85,7 @@ fn a_real_bridge_creates_a_delegate_through_the_real_daemon() {
         .env(waku_core::DAEMON_ADDRESS_ENV, address.to_string())
         .env(waku_core::DAEMON_TOKEN_ENV, &scoped)
         .env(waku_core::DAEMON_SESSION_ENV, lead_id.to_string())
-        .env(waku_core::DAEMON_RUNTIME_ENV, reopened_runtime.to_string())
+        .env(waku_core::DAEMON_RUNTIME_ENV, runtime_id.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

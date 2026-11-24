@@ -96,18 +96,22 @@ impl Waku {
         }
     }
 
-    /// Up: recall one entry older, if the caret is on the field's first row.
+    /// Up: recall one entry older.
     ///
-    /// `cx.propagate()` hands the keystroke back to the field, which is what
-    /// must happen on every row but the first — otherwise a multi-line prompt
-    /// could no longer be edited on its earlier lines.
+    /// Entering history needs the caret on the field's first row, so a multi-line
+    /// prompt can still be edited on its earlier lines; `cx.propagate()` hands the
+    /// keystroke back to the field for that. A walk already running keeps the
+    /// arrow, because the caret sits at the end of the recalled text and would
+    /// otherwise end the walk after a single multi-line entry.
     pub(super) fn recall_previous_prompt(
         &mut self,
         _: &crate::ui::menu::PromptHistoryPrevious,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.composer.read(cx).caret_on_first_row(cx) {
+        let walking = self.prompt_history_walk.is_walking();
+        let caret_on_first_row = self.composer.read(cx).caret_on_first_row(cx);
+        if !super::prompt_history::should_step_back(walking, caret_on_first_row) {
             cx.propagate();
             return;
         }
@@ -143,8 +147,12 @@ impl Waku {
     fn apply_recalled_prompt(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         // Armed before the write, because `set_content` emits `Edited`
         // synchronously and the subscriber would otherwise read the recall as
-        // the user typing.
-        self.prompt_history_edit_from_recall = true;
+        // the user typing. Only when the text really changes, though: an
+        // identical recall emits nothing, and leaving the flag armed would make
+        // the user's next real keystroke be mistaken for a recall and keep the
+        // walk alive.
+        let current = self.composer.read(cx).content(cx).to_owned();
+        self.prompt_history_edit_from_recall = current != text;
         self.composer.update(cx, |input, cx| {
             input.set_content(text, cx);
             // Recall is only useful if it can be edited straight away.

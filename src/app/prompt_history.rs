@@ -90,6 +90,17 @@ impl PromptHistoryWalk {
     }
 }
 
+/// Whether one Up should step the walk rather than move the caret.
+///
+/// Entering history needs the caret on the field's first row, so a multi-line
+/// prompt stays editable on its earlier lines. A running walk is different: the
+/// caret lands at the end of the recalled text, so asking for the first row
+/// again stops the walk after one entry — and a long, multi-line prompt is
+/// exactly where walking back through several sends matters most.
+pub(super) fn should_step_back(is_walking: bool, caret_on_first_row: bool) -> bool {
+    is_walking || caret_on_first_row
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,13 +200,28 @@ mod tests {
     }
 
     #[test]
-    fn only_a_send_with_something_to_resend_is_recallable() {
-        // Plain text: yes.
+    fn only_a_send_with_something_to_resend_is_recallable() {        // Plain text: yes.
         assert!(is_recallable_prompt(true, 0));
         // Text plus attachments: the text alone can be resent, so yes.
         assert!(is_recallable_prompt(true, 3));
         // Attachments with no text: the "prompt" is file names whose files are
         // gone, so no.
         assert!(!is_recallable_prompt(false, 1));
+    }
+
+    /// Entering history takes the first row; staying in it does not.
+    ///
+    /// The recalled text puts the caret at its end, so a multi-line entry leaves
+    /// the caret on the last row. Requiring the first row there would let a walk
+    /// take exactly one step and then hand Up back to the caret, which is what
+    /// made recall look broken on anything longer than a line.
+    #[test]
+    fn a_running_walk_keeps_the_arrow_past_the_first_row() {
+        // Entering: only from the first row.
+        assert!(should_step_back(false, true));
+        assert!(!should_step_back(false, false));
+        // Already walking: yes, wherever the caret landed.
+        assert!(should_step_back(true, false));
+        assert!(should_step_back(true, true));
     }
 }
