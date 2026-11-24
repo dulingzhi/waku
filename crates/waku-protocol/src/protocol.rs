@@ -34,6 +34,13 @@ pub const PROTOCOL_VERSION: u32 = 11;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
+/// The session a delegating provider was launched for.
+///
+/// The scoped token already proves this, but the bridge cannot read a token's
+/// scope, and every request it sends has to name a session. Passing the id
+/// alongside keeps the bridge from guessing: a wrong id is refused by the
+/// daemon's own scope check rather than being silently accepted.
+pub const DAEMON_SESSION_ENV: &str = "WAKU_DAEMON_SESSION";
 pub const APP_EXECUTABLE_ENV: &str = "WAKU_APP_EXECUTABLE";
 
 /// The single line the daemon prints on stdout once it is accepting
@@ -428,6 +435,20 @@ pub enum Command {
         cols: u16,
         rows: u16,
     },
+    /// Start one delegate session for the calling lead conversation.
+    ///
+    /// This exists because a lead cannot do it with the ordinary commands: it
+    /// is not allowed to save task state or to start a runtime under an id of
+    /// its own choosing, and both would make an agent token a second full
+    /// client. The daemon copies the lead's own provider, workspace, and
+    /// options onto a new task, starts it, and reports the pair back — so the
+    /// delegate is an ordinary Waku session the user can open and read, while
+    /// the capability that created it stays narrow.
+    SpawnDelegate {
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
     CloseTerminal,
     CloseSession,
 }
@@ -650,6 +671,12 @@ pub enum ResponsePayload {
     },
     Workspace {
         result: WorkspaceResult,
+    },
+    /// The task and runtime a [`Command::SpawnDelegate`] created, so the lead
+    /// can address the delegate with the ordinary prompt and steer commands.
+    DelegateSpawned {
+        session_id: Uuid,
+        runtime_id: Uuid,
     },
 }
 

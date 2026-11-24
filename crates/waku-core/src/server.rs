@@ -97,6 +97,35 @@ impl EventSink {
         Ok(())
     }
 
+    /// Opens the event stream for a runtime this request created.
+    ///
+    /// A backend normally answers for the one session its request named. Spawning
+    /// a delegate is the exception: the new session is not the caller's, so the
+    /// handler needs a sink bound to it. Registering it here is what lets the hub
+    /// accept the delegate's events at all — `emit` drops anything for a runtime
+    /// it does not believe is active.
+    pub fn begin_runtime(&self, session_id: Uuid, runtime_id: Uuid) -> Self {
+        self.hub.begin_runtime(session_id, runtime_id);
+        Self {
+            session_id,
+            runtime_id,
+            hub: self.hub.clone(),
+        }
+    }
+
+    /// A sink for a backend unit test, where no hub or connection exists.
+    ///
+    /// Events sent through it are discarded: a test that only checks the
+    /// response a backend returns needs the parameter, not a real event stream.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        Self {
+            session_id: Uuid::nil(),
+            runtime_id: Uuid::nil(),
+            hub: Arc::new(Hub::default()),
+        }
+    }
+
     /// Broadcast a live-only event without retaining it in the replay journal.
     /// High-volume PTY output is meaningful only to a terminal emulator that
     /// is currently attached; replaying raw chunks into a fresh emulator would
@@ -1265,6 +1294,12 @@ impl AgentScope {
                             | Command::Respond { .. }
                             | Command::RespondUserInput { .. }
                             | Command::ApplyOptions { .. }
+                            // The one command that reaches beyond this session,
+                            // and only to create a *new* one. It names no
+                            // existing task, so it cannot read or drive another
+                            // conversation: the daemon copies the lead's own
+                            // options onto a fresh id and reports it back.
+                            | Command::SpawnDelegate { .. }
                     )
             }
         }
@@ -1689,6 +1724,42 @@ mod tests {
         }
     }
 
+    /// Creating a delegate is the single command that reaches past one session.
+    ///
+    /// It is granted because a lead that cannot start a delegate has no group at
+    /// all, and it is safe for a reason worth pinning: the command names no
+    /// existing task. It cannot be pointed at another conversation the way
+    /// `Prompt` or `Cancel` can, so this one permission does not widen what the
+    /// token can touch.
+    #[test]
+    fn a_delegate_may_spawn_one_but_still_not_reach_another_session() {
+        let parent = Uuid::new_v4();
+        let runtime = Uuid::new_v4();
+        let scope = AgentScope::Delegate {
+            parent_session: parent,
+            runtime_id: runtime,
+        };
+        let spawn = Command::SpawnDelegate {
+            task: "survey the tests".into(),
+            title: None,
+        };
+
+        assert!(
+            scope.permits(&spawn, parent, runtime),
+            "a lead has to be able to start its delegates"
+        );
+        // The permission is still bound to the lead's own session and runtime:
+        // it is not a licence to act anywhere.
+        assert!(
+            !scope.permits(&spawn, Uuid::new_v4(), runtime),
+            "spawning must be refused under another session id"
+        );
+        assert!(
+            !scope.permits(&spawn, parent, Uuid::new_v4()),
+            "spawning must be refused under a replaced runtime"
+        );
+    }
+
     /// The desktop token stays unrestricted. If minting a scoped token had
     /// narrowed it, every existing client would break.
     #[test]
@@ -1734,6 +1805,13 @@ mod tests {
                 Command::CloseSession => {
                     self.runtimes.lock().remove(&session_id);
                     Ok(ResponsePayload::Ack)
+                }
+                Command::SpawnDelegate { .. } => {
+                    let delegate = Uuid::new_v4();
+                    Ok(ResponsePayload::DelegateSpawned {
+                        session_id: delegate,
+                        runtime_id: Uuid::new_v4(),
+                    })
                 }
                 _ => Ok(ResponsePayload::Ack),
             }
@@ -2152,6 +2230,74 @@ mod tests {
             Err(RecvTimeoutError::Disconnected)
         ));
         server.join().unwrap();
+    }
+
+    /// A lead's scoped token has to survive the real server path.
+    ///
+    /// The unit test above checks the decision itself; this one checks that a
+    /// scoped connection reaches the backend at all, which is what was missing
+    /// when the bridge was wired up but nothing could start a delegate. It also
+    /// pins the refusal: the same token cannot close a *different* session.
+    #[test]
+    fn a_scoped_token_can_spawn_a_delegate_over_a_real_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = Arc::new(DaemonServer::new(
+            "desktop-secret".into(),
+            Arc::new(DaemonIdentity::generate()),
+            Arc::new(TestBackend::default()),
+            ServerOptions::default(),
+        ));
+        let lead = Uuid::new_v4();
+        let runtime = Uuid::new_v4();
+        let scoped = server.mint_agent_token(lead, runtime);
+        // The loop stops on this flag, not on the client's `shutdown` message:
+        // this server is not the desktop-owned one, so it refuses to exit on a
+        // client's say-so.
+        let stop = Arc::new(AtomicBool::new(false));
+        let serving = {
+            let server = server.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || server.serve(listener, stop).unwrap())
+        };
+
+        let client = DaemonClient::connect(&address.to_string(), scoped).unwrap();
+        let spawned = client
+            .request(
+                lead,
+                runtime,
+                Command::SpawnDelegate {
+                    task: "survey the tests".into(),
+                    title: None,
+                },
+            )
+            .expect("a lead must be able to start its delegate");
+        assert!(
+            matches!(spawned, ResponsePayload::DelegateSpawned { .. }),
+            "the daemon must report the delegate it created: {spawned:?}"
+        );
+
+        // The capability is still tied to the lead: another conversation is out
+        // of reach even for a command the scope allows. `Prompt` names a live
+        // runtime, so it goes through the same scope check the bridge's calls do.
+        let refused = client.request(
+            Uuid::new_v4(),
+            runtime,
+            Command::Prompt {
+                prompt: "reach into a stranger's task".into(),
+                turn_id: None,
+                message_id: None,
+            },
+        );
+        assert!(
+            refused.is_err(),
+            "a scoped token must not reach another task"
+        );
+
+        client.shutdown();
+        server.revoke_agent_tokens();
+        stop.store(true, Ordering::Release);
+        serving.join().unwrap();
     }
 
     #[test]

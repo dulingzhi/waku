@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use anyhow::{Context as _, anyhow};
 use serde_json::{Value, json};
 
-use waku_client::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, DaemonClient};
+use waku_client::{DAEMON_ADDRESS_ENV, DAEMON_SESSION_ENV, DAEMON_TOKEN_ENV, DaemonClient};
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -200,15 +200,21 @@ fn call_tool(params: &Value) -> anyhow::Result<Value> {
 /// bridge started by a provider inherits them rather than being told anything
 /// new. A bridge that cannot find them cannot act, which is the honest answer:
 /// it is not part of a Waku session.
-fn connect() -> anyhow::Result<DaemonClient> {
+fn connect() -> anyhow::Result<(uuid::Uuid, DaemonClient)> {
     let address = std::env::var(DAEMON_ADDRESS_ENV).ok().filter(|value| !value.trim().is_empty());
     let token = std::env::var(DAEMON_TOKEN_ENV).ok().filter(|value| !value.is_empty());
-    let (Some(address), Some(token)) = (address, token) else {
+    let session = std::env::var(DAEMON_SESSION_ENV).ok().filter(|value| !value.is_empty());
+    let (Some(address), Some(token), Some(session)) = (address, token, session) else {
         return Err(anyhow!(
-            "the agent bridge needs {DAEMON_ADDRESS_ENV} and {DAEMON_TOKEN_ENV} from the daemon"
+            "the agent bridge needs {DAEMON_ADDRESS_ENV}, {DAEMON_TOKEN_ENV} and \
+             {DAEMON_SESSION_ENV} from the daemon"
         ));
     };
-    DaemonClient::connect(address.trim(), token).context("could not reach the Waku daemon")
+    let session = uuid::Uuid::parse_str(session.trim())
+        .context("the daemon sent an invalid session id")?;
+    let client = DaemonClient::connect(address.trim(), token)
+        .context("could not reach the Waku daemon")?;
+    Ok((session, client))
 }
 
 fn text_result(text: impl Into<String>) -> Value {
@@ -222,15 +228,44 @@ fn spawn_agent(arguments: &Value) -> anyhow::Result<Value> {
         .map(str::trim)
         .filter(|task| !task.is_empty())
         .ok_or_else(|| anyhow!("task is required"))?;
-    let agent_id = uuid::Uuid::new_v4();
-    // The delegate must be a real session the desktop already knows how to
-    // drive; this transport only proves the channel, so it starts a task the
-    // same way the desktop does and reports the id it owns.
-    let client = connect()?;
-    let _ = &client;
+    let title = arguments
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned);
+    let (lead, client) = connect()?;
+    // The daemon owns task creation: it copies the lead's provider and
+    // workspace onto a new session, starts it, and hands back the pair. Doing it
+    // here would mean the bridge writing task state, which is exactly the
+    // second-client power the scoped token exists to withhold.
+    let spawned = client.request(
+        lead,
+        // Any runtime id works: the daemon keys a delegate to the lead session
+        // it was asked about, not to the runtime this request claims.
+        uuid::Uuid::new_v4(),
+        waku_client::Command::SpawnDelegate {
+            task: task.to_owned(),
+            title,
+        },
+    )?;
+    let waku_client::ResponsePayload::DelegateSpawned {
+        session_id,
+        runtime_id,
+    } = spawned
+    else {
+        return Err(anyhow!("the daemon did not report a delegate"));
+    };
     Ok(text_result(format!(
-        "spawned {agent_id} for task: {task}"
+        "spawned agent {session_id} for task: {task}"
     )))
+    .map(|mut result| {
+        result["delegate"] = json!({
+            "agent_id": session_id.to_string(),
+            "runtime_id": runtime_id.to_string()
+        });
+        result
+    })
 }
 
 fn send_to_agent(arguments: &Value) -> anyhow::Result<Value> {

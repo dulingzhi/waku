@@ -67,10 +67,10 @@ mod protocol;
 pub mod server;
 
 pub use protocol::{
-    APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, DaemonReady,
-    PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome, ResponsePayload, RpcError,
-    SequencedEvent, ServerMessage, WireComputerToolRequest, WireDriverEvent,
-    WireDriverStartOptions, WireSessionOptions,
+    APP_EXECUTABLE_ENV, ClientMessage, Command, DAEMON_ADDRESS_ENV, DAEMON_SESSION_ENV,
+    DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION, ReplayCursor, Request, ResponseOutcome,
+    ResponsePayload, RpcError, SequencedEvent, ServerMessage, WireComputerToolRequest,
+    WireDriverEvent, WireDriverStartOptions, WireSessionOptions,
 };
 pub use server::{Backend, DaemonServer, EventSink, ServerOptions, serve};
 pub use settings::{DaemonSettings, DaemonSettingsStore};

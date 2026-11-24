@@ -137,6 +137,51 @@ fn start_claude_title_refresh(
     );
 }
 
+/// The MCP server name Claude sees for Waku's delegation tools.
+const AGENT_BRIDGE_SERVER_NAME: &str = "waku_agents";
+
+/// Registers Waku's agent bridge for this one Claude session.
+///
+/// Claude has no global config this build can rewrite per task — its MCP
+/// servers live in a shared user file — so the bridge travels as inline
+/// `--mcp-config` JSON instead. Inline rather than a temp file because the
+/// config is rebuilt for every launch and a file would need its own cleanup
+/// path; version 2.1.330 accepts the JSON form directly.
+///
+/// The credential is **not** in that JSON. Claude passes its own environment to
+/// the servers it starts, so the daemon's address and the scoped token ride in
+/// the provider's environment, where they never appear in a process listing the
+/// way an argv entry would.
+fn configure_agent_bridge(
+    command: &mut Command,
+    session_id: &str,
+    bridge: &crate::driver::AgentBridgeAccess,
+) {
+    // `waku --agent-bridge` rather than a standalone helper: a package ships one
+    // executable, which is the same rule the Computer Use helpers follow.
+    let Ok(executable) = std::env::current_exe() else {
+        // Without a path to this executable there is nothing to point Claude at.
+        // Failing the whole launch would strand a session over an optional tool,
+        // so the bridge is simply absent.
+        return;
+    };
+    let config = serde_json::json!({
+        "mcpServers": {
+            AGENT_BRIDGE_SERVER_NAME: {
+                "command": executable.display().to_string(),
+                "args": ["--agent-bridge"],
+            }
+        }
+    });
+    command
+        .args(["--mcp-config", &config.to_string()])
+        .env(waku_protocol::DAEMON_ADDRESS_ENV, &bridge.address)
+        .env(waku_protocol::DAEMON_TOKEN_ENV, &bridge.token)
+        // The bridge has to name a session on every request and cannot read the
+        // token's scope, so the id travels with the credential.
+        .env(waku_protocol::DAEMON_SESSION_ENV, session_id);
+}
+
 fn configure_stream_command(command: &mut Command, mode: RuntimeMode) {
     command.args([
         "-p",
@@ -184,7 +229,7 @@ impl ClaudeDriver {
             service_tier: _,
             context_window,
             agent_preset: _,
-            agent_bridge: _,
+            agent_bridge,
             computer_use_enabled: _,
             provider_cursor,
         } = options;
@@ -221,6 +266,12 @@ impl ClaudeDriver {
             command.args(["--resume", &session_id]);
         } else {
             command.args(["--session-id", &session_id]);
+        }
+        // Only a lead conversation is launched with a bridge: the daemon mints
+        // the capability, so an ordinary task has none and never offers these
+        // tools at all.
+        if let Some(bridge) = agent_bridge.as_ref() {
+            configure_agent_bridge(&mut command, &session_id, bridge);
         }
 
         let command = command
@@ -1947,8 +1998,107 @@ mod tests {
         );
     }
 
-    fn harness() -> (
-        DriverEventSender,
+    /// A lead conversation gets the delegation tools; an ordinary task does not.
+    ///
+    /// This is the whole wiring: the daemon mints a scoped token and hands it
+    /// over as `AgentBridgeAccess`, and the driver has to turn that into a real
+    /// MCP server registration. Before this, the field was accepted and dropped,
+    /// so `spawn_agent` was unreachable from any session.
+    #[test]
+    fn a_delegating_session_registers_the_agent_bridge() {
+        let mut command = Command::new("/usr/bin/true");
+        configure_agent_bridge(
+            &mut command,
+            "lead-session",
+            &crate::driver::AgentBridgeAccess {
+                address: "127.0.0.1:4312".into(),
+                token: "scoped-token".into(),
+            },
+        );
+
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let flag = arguments
+            .iter()
+            .position(|argument| argument == "--mcp-config")
+            .expect("Claude only learns about the bridge through this flag");
+        let config: Value = serde_json::from_str(&arguments[flag + 1]).unwrap();
+        let server = &config["mcpServers"]["waku_agents"];
+        assert_eq!(server["args"][0], "--agent-bridge");
+        assert!(
+            server["command"]
+                .as_str()
+                .is_some_and(|command| !command.is_empty()),
+            "the bridge has to name an executable: {server:?}"
+        );
+    }
+
+    /// The capability must never travel in argv.
+    ///
+    /// A command line is readable by every process owner on the host, so a token
+    /// pasted into `--mcp-config` would hand the daemon to anyone who can list
+    /// processes. Claude passes its own environment to the servers it starts,
+    /// which is why the credential rides there instead.
+    #[test]
+    fn the_bridge_credential_travels_in_the_environment_not_the_command_line() {
+        let mut command = Command::new("/usr/bin/true");
+        configure_agent_bridge(
+            &mut command,
+            "lead-session",
+            &crate::driver::AgentBridgeAccess {
+                address: "127.0.0.1:4312".into(),
+                token: "scoped-token".into(),
+            },
+        );
+
+        let rendered = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !rendered.contains("scoped-token"),
+            "the token must not appear in argv: {rendered}"
+        );
+
+        let environment = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            environment
+                .get(waku_protocol::DAEMON_TOKEN_ENV)
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("scoped-token")
+        );
+        assert_eq!(
+            environment
+                .get(waku_protocol::DAEMON_ADDRESS_ENV)
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("127.0.0.1:4312")
+        );
+        assert_eq!(
+            environment
+                .get(waku_protocol::DAEMON_SESSION_ENV)
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("lead-session")
+        );
+    }
+
+    fn harness() -> (        DriverEventSender,
         crossbeam_channel::Receiver<DriverEvent>,
         Sender<CommandMessage>,
         crossbeam_channel::Receiver<CommandMessage>,

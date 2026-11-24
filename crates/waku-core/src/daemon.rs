@@ -147,6 +147,115 @@ impl WakuBackend {
         })
     }
 
+    /// Starts one delegate session for a lead conversation.
+    ///
+    /// The new task copies the lead's provider, workspace, model, and runtime
+    /// mode, so a delegate is an ordinary session the user can open and read
+    /// rather than a private channel only the lead can see. It is started with
+    /// no `agent_bridge`, which is what stops a delegate from delegating again
+    /// and fanning out without bound.
+    fn spawn_delegate(
+        &self,
+        lead_session: Uuid,
+        task: String,
+        title: Option<String>,
+        events: EventSink,
+    ) -> anyhow::Result<ResponsePayload> {
+        let (lead, project_cwd) = {
+            let state = self.task_state.lock();
+            let index = state
+                .sessions
+                .iter()
+                .position(|session| session.id == lead_session)
+                .ok_or_else(|| anyhow!("the lead conversation is unavailable"))?;
+            let project_id = state.sessions[index].project_id;
+            let project_cwd = state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .map(|project| project.path.clone());
+            (state.sessions[index].clone(), project_cwd)
+        };
+        let cwd = lead
+            .workspace
+            .path()
+            .or(project_cwd.as_deref())
+            .ok_or_else(|| anyhow!("the lead conversation has no workspace"))?
+            .to_owned();
+        ensure_shell_environment();
+        let binary_override = self
+            .settings
+            .get()
+            .provider_binary_overrides
+            .get(&lead.provider)
+            .cloned();
+        let binary = crate::model::provider_probe(lead.provider, binary_override.as_deref())
+            .path
+            .ok_or_else(|| {
+                anyhow!(
+                    "{} is not installed",
+                    lead.provider.display_name()
+                )
+            })?;
+
+        let delegate = delegated_session(&lead, title);
+        let session_id = delegate.id;
+        let runtime_id = Uuid::new_v4();
+
+        let (wake, _wake_events) = smol::channel::bounded(1);
+        let (event_sender, event_receiver) = driver::event_channel(wake);
+        let options = DriverStartOptions {
+            binary,
+            cwd,
+            mode: delegate.runtime_mode,
+            model: delegate.model.clone(),
+            reasoning_effort: delegate.reasoning_effort.clone(),
+            service_tier: delegate.service_tier.clone(),
+            context_window: delegate.context_window.clone(),
+            agent_preset: delegate.agent_preset.clone(),
+            computer_use_enabled: crate::computer_use::resolve_enabled(false),
+            provider_cursor: None,
+            // A delegate does not delegate: this is what bounds the fan-out.
+            agent_bridge: None,
+        };
+        let handle = driver::start_local(lead.provider, options, event_sender)?;
+
+        let delegate_sink = events.begin_runtime(session_id, runtime_id);
+        std::thread::Builder::new()
+            .name(format!("waku-daemon-events-{session_id}"))
+            .spawn(move || {
+                while let Ok(event) = event_receiver.recv() {
+                    let wire = event_to_wire(event).unwrap_or_else(|error| {
+                        WireDriverEvent::new(
+                            "error",
+                            Value::String(format!("could not encode daemon event: {error}")),
+                        )
+                    });
+                    if delegate_sink.send(wire).is_err() {
+                        break;
+                    }
+                }
+            })
+            .context("could not start delegate event forwarding thread")?;
+
+        self.sessions.lock().insert(session_id, (runtime_id, handle.clone()));
+        {
+            let mut state = self.task_state.lock();
+            state.push_session(delegate);
+            if let Err(error) = self.task_store.save(&mut state) {
+                state.sessions.retain(|session| session.id != session_id);
+                drop(state);
+                self.sessions.lock().remove(&session_id);
+                return Err(error).context("could not save the delegated task");
+            }
+        }
+        handle.prompt(task);
+        Ok(ResponsePayload::DelegateSpawned {
+            session_id,
+            runtime_id,
+        })
+    }
+
     fn open_terminal(
         &self,
         cwd: &Path,
@@ -1030,6 +1139,9 @@ impl Backend for WakuBackend {
                     .lock()
                     .insert(session_id, (runtime_id, handle));
                 Ok(ResponsePayload::Started { supports_steer })
+            }
+            Command::SpawnDelegate { task, title } => {
+                self.spawn_delegate(session_id, task, title, events)
             }
             Command::CloseSession => {
                 let removed = {
@@ -1937,6 +2049,26 @@ fn fork_provider_session(
     })
 }
 
+/// Builds the task record for a delegate of `lead`.
+///
+/// Pulled out of [`WakuBackend::spawn_delegate`] so the rules that make a
+/// delegate safe can be checked without launching a provider: it inherits the
+/// lead's provider, workspace, and options so the user can open and read it as
+/// an ordinary task, and it starts with no transcript of its own.
+fn delegated_session(lead: &AgentSession, title: Option<String>) -> AgentSession {
+    let mut delegate = AgentSession::new(lead.project_id, lead.provider);
+    delegate.title = title
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| AgentSession::DEFAULT_TITLE.to_owned());
+    delegate.model = lead.model.clone();
+    delegate.runtime_mode = lead.runtime_mode;
+    delegate.reasoning_effort = lead.reasoning_effort.clone();
+    delegate.service_tier = lead.service_tier.clone();
+    delegate.context_window = lead.context_window.clone();
+    delegate.agent_preset = lead.agent_preset.clone();
+    delegate
+}
+
 fn handle_driver_command(
     driver: &DriverHandle,
     command: Command,
@@ -2003,6 +2135,7 @@ fn handle_driver_command(
         }
         Command::AttachSession
         | Command::Start { .. }
+        | Command::SpawnDelegate { .. }
         | Command::GetSettings
         | Command::UpdateSettings { .. }
         | Command::ProbeProvider { .. }
@@ -2347,9 +2480,86 @@ struct TurnFinishedWire {
 mod tests {
     use super::*;
 
+    /// A delegate has to be an ordinary task of the same project and provider,
+    /// carrying the lead's options, so the user can open it and read what it
+    /// did. If it were a different provider or mode it would not be the work the
+    /// lead asked for.
     #[test]
-    fn stale_runtime_projection_keeps_newer_transcript_cursor() {
-        let runtime_id = Uuid::new_v4();
+    fn a_delegate_inherits_the_leads_provider_workspace_and_options() {
+        let mut lead = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        lead.model = Some("opus".into());
+        lead.runtime_mode = crate::model::RuntimeMode::Ask;
+
+        let delegate = delegated_session(&lead, Some("Survey the tests".into()));
+
+        assert_eq!(delegate.provider, lead.provider);
+        assert_eq!(delegate.project_id, lead.project_id);
+        assert_eq!(delegate.model.as_deref(), Some("opus"));
+        assert_eq!(delegate.runtime_mode, lead.runtime_mode);
+        assert_eq!(delegate.title, "Survey the tests");
+    }
+
+    /// A delegate starts empty. Copying the lead's transcript would make the
+    /// user's history appear inside a task that never ran it, and the new
+    /// provider process would be resumed into a conversation it does not own.
+    ///
+    /// It also starts without a bridge, which is the only thing bounding the
+    /// fan-out: a delegate that could delegate again would let one prompt
+    /// multiply tasks without limit.
+    #[test]
+    fn a_delegate_starts_with_no_transcript_and_no_provider_cursor() {
+        let mut lead = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        lead.push_message(crate::model::MessageRole::Assistant, "lead's own words");
+
+        let delegate = delegated_session(&lead, None);
+
+        assert!(delegate.messages.is_empty());
+        assert!(delegate.turns.is_empty());
+        assert!(delegate.provider_cursor.is_none());
+        assert_eq!(delegate.title, AgentSession::DEFAULT_TITLE);
+    }
+
+    /// A spawn for a conversation the daemon does not know must say so.
+    ///
+    /// This drives the real [`WakuBackend`] through its real handler — the same
+    /// path a scoped bridge request takes — without launching a provider. An
+    /// unknown lead is the case worth pinning because it is what a bridge with a
+    /// stale session id would send, and silently reporting success there would
+    /// leave a lead waiting on a delegate that was never created.
+    #[test]
+    fn spawning_from_an_unknown_conversation_is_refused() {
+        let root = std::env::temp_dir().join(format!("waku-delegate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = StateStore::new(root.join("app.db"));
+        let settings = DaemonSettingsStore::open(root.join("daemon.json")).unwrap();
+        let backend = WakuBackend::new(settings, store).unwrap();
+
+        let refused = Backend::handle(
+            &backend,
+            Request {
+                request_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                runtime_id: Uuid::new_v4(),
+                command: Command::SpawnDelegate {
+                    task: "go".into(),
+                    title: None,
+                },
+            },
+            // A sink for the runtime this would have created; the spawn must be
+            // refused before anything uses it.
+            EventSink::for_test(),
+        );
+
+        let error = refused.expect_err("an unknown lead cannot start a delegate");
+        assert!(
+            format!("{error}").contains("unavailable"),
+            "the refusal has to name the reason: {error}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn stale_runtime_projection_keeps_newer_transcript_cursor() {        let runtime_id = Uuid::new_v4();
         let epoch = Uuid::new_v4();
         let mut existing = AgentSession::new(Uuid::new_v4(), ProviderKind::Codex);
         existing.status = SessionStatus::Working;
