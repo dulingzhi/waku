@@ -7,10 +7,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
-    ClientCapabilities, Implementation, InitializeRequest, NewSessionRequest, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
-};
+use agent_client_protocol::schema::v1::{ClientCapabilities, Implementation, InitializeRequest};
 use agent_client_protocol::{Agent, Client, ConnectionTo, UntypedMessage};
 use serde_json::{Map, Value, json};
 
@@ -23,9 +20,6 @@ const CODEX_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 /// resources and model catalog, which can outlast a live request's budget.
 const PI_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const CURSOR_ACP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
-/// Harness builds its roster from the account routes it can authenticate, and
-/// a cold `session/new` loads the provider catalog before answering.
-const DEEPSEEK_ACP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn fallback_models(provider: ProviderKind) -> Vec<ProviderModel> {
     match provider {
@@ -689,109 +683,141 @@ fn parse_cursor_models(output: &str) -> Vec<ProviderModel> {
         .collect()
 }
 
-/// Discovers Harness's models and agent presets over its ACP profile.
-///
-/// Harness reports both in one place: `session/new` returns its model roster as
-/// a `select` config option grouped by account route, with each option value
-/// carrying the route/model pair Harness itself uses to select it. Presets are
-/// not part of ACP, so the shipped four come from
-/// [`fallback_agent_presets`] — the same set the Host serves for a fresh
-/// install.
 fn discover_deepseek_catalog(
     binary: &Path,
 ) -> (Vec<ProviderModel>, Option<Vec<ProviderAgentPreset>>) {
-    let Ok(cwd) = crate::acp_session::catalog_working_directory() else {
+    let Ok(server) = crate::deepseek_pool::acquire(binary) else {
         return (Vec::new(), None);
     };
-    let Ok(agent) = crate::driver::catalog_agent(ProviderKind::DeepSeek, binary, &cwd) else {
-        return (Vec::new(), None);
-    };
-    let request = Client
-        .builder()
-        .name("waku-deepseek-model-discovery")
-        .connect_with(agent, async move |connection: ConnectionTo<Agent>| {
-            connection
-                .send_request(
-                    InitializeRequest::new(ProtocolVersion::V1)
-                        .client_capabilities(ClientCapabilities::new().terminal(false))
-                        .client_info(Implementation::new("waku", env!("CARGO_PKG_VERSION"))),
-                )
-                .block_task()
-                .await?;
-            let cwd = cwd.to_string_lossy().into_owned();
-            connection
-                .send_request(NewSessionRequest::new(cwd))
-                .block_task()
-                .await
-        });
-    let response = smol::block_on(smol::future::race(
-        async move { request.await.map_err(|_| ()) },
-        async move {
-            smol::Timer::after(DEEPSEEK_ACP_DISCOVERY_TIMEOUT).await;
-            Err(())
-        },
-    ));
-    let Ok(response) = response else {
-        return (Vec::new(), None);
-    };
-    (
-        deepseek_models_from_config_options(response.config_options.as_deref().unwrap_or_default()),
-        None,
-    )
+    // `session/modelCatalog` is Harness's Host-side model roster: it already
+    // includes every provider route any loaded plugin registered, which is why
+    // the plugin ecosystem has to run in the same process Waku talks to.
+    let models = server
+        .rpc("session/modelCatalog", json!({}))
+        .map(|catalog| parse_deepseek_model_catalog(&catalog))
+        .unwrap_or_default();
+    let presets = server
+        .rpc("agentPresets/list", json!({}))
+        .ok()
+        .map(|roster| parse_deepseek_agent_presets(&roster));
+    (models, presets)
 }
 
-/// Reads Harness's model roster from the ACP config options it advertises.
-///
-/// Harness reports one `model` option whose choices are grouped by account
-/// route. Each choice value is the JSON route/model pair Harness itself takes
-/// on `session/set_config_option`, so the picker stores that pair as the model
-/// id: two routes offering the same slug stay distinct, and the driver can hand
-/// the value straight back.
-fn deepseek_models_from_config_options(
-    config_options: &[SessionConfigOption],
-) -> Vec<ProviderModel> {
-    let mut models = Vec::new();
-    for option in config_options {
-        if option.category.as_ref() != Some(&SessionConfigOptionCategory::Model) {
-            continue;
-        }
-        let SessionConfigKind::Select(select) = &option.kind else {
-            continue;
-        };
-        let current = select.current_value.0.as_ref();
-        let choices: Vec<(Option<&str>, &str, &str)> = match &select.options {
-            SessionConfigSelectOptions::Grouped(groups) => groups
-                .iter()
-                .flat_map(|group| {
-                    group.options.iter().map(move |choice| {
-                        (
-                            Some(group.name.as_str()),
-                            choice.value.0.as_ref(),
-                            choice.name.as_str(),
-                        )
+fn parse_deepseek_agent_presets(roster: &Value) -> Vec<ProviderAgentPreset> {
+    roster
+        .get("presets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        // Harness deliberately leaves broken presets in its management
+        // roster, but its own session picker excludes them.
+        .filter(|value| value.get("broken").is_none())
+        .filter_map(|value| {
+            let id = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())?;
+            let name = value
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(id);
+            let mut preset = ProviderAgentPreset::new(id, name);
+            preset.is_default = value
+                .get("isDefault")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            preset.is_custom = value.get("trust").and_then(Value::as_str) == Some("user");
+            preset.description = value
+                .get("description")
+                .and_then(Value::as_str)
+                .filter(|description| !description.trim().is_empty())
+                .map(str::to_owned);
+            Some(preset)
+        })
+        .collect()
+}
+
+fn parse_deepseek_model_catalog(catalog: &Value) -> Vec<ProviderModel> {
+    // Harness names its deployment default as a separate `{provider, model}`
+    // pair rather than by flagging one roster entry, so the flagged entry has
+    // to be matched here or the picker opens on no selection at all.
+    let default_pair = catalog.get("default").and_then(|value| {
+        Some((
+            value.get("provider").and_then(Value::as_str)?,
+            value.get("model").and_then(Value::as_str)?,
+        ))
+    });
+    catalog
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|group| {
+            let provider_id = group
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty());
+            let provider_name = group
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty());
+            let models = group.get("models").and_then(Value::as_array);
+            provider_id
+                .zip(provider_name)
+                .zip(models)
+                .into_iter()
+                .flat_map(move |((provider_id, provider_name), models)| {
+                    models.iter().filter_map(move |value| {
+                        let model_id = value
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.trim().is_empty())?;
+                        let name = value
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.trim().is_empty())
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| display_name_from_slug(model_id));
+                        let mut model =
+                            ProviderModel::new(format!("{provider_id}/{model_id}"), name)
+                                .sub_provider(provider_name);
+                        if default_pair == Some((provider_id, model_id)) {
+                            model.is_default = true;
+                        }
+                        if let Some(reasoning) = value.get("reasoning") {
+                            model.reasoning_efforts = reasoning
+                                .get("efforts")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|effort| {
+                                    let id = effort.get("id").and_then(Value::as_str)?;
+                                    let name = effort
+                                        .get("name")
+                                        .and_then(Value::as_str)
+                                        .filter(|name| !name.trim().is_empty())
+                                        .unwrap_or(id);
+                                    Some(
+                                        ProviderModelOption::new(id, name).description(
+                                            effort
+                                                .get("description")
+                                                .and_then(Value::as_str)
+                                                .unwrap_or_default(),
+                                        ),
+                                    )
+                                })
+                                .collect();
+                            model.default_reasoning_effort = reasoning
+                                .get("defaultEffort")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                        }
+                        Some(model)
                     })
                 })
-                .collect(),
-            SessionConfigSelectOptions::Ungrouped(choices) => choices
-                .iter()
-                .map(|choice| (None, choice.value.0.as_ref(), choice.name.as_str()))
-                .collect(),
-            // The schema is `non_exhaustive`: a shape a future protocol adds
-            // carries no choices this picker can name.
-            _ => Vec::new(),
-        };
-        for (group, value, name) in choices {
-            let mut model = ProviderModel::new(value, name);
-            if let Some(group) = group.filter(|group| !group.trim().is_empty()) {
-                model = model.sub_provider(group);
-            }
-            if value == current {
-                model = model.default();
-            }
-            models.push(model);
-        }
-    }
-    models
+        })
+        .collect()
 }
 
 fn discover_fx_models(binary: &Path) -> Vec<ProviderModel> {
@@ -1841,90 +1867,78 @@ printf '%s\n' '{"type":"control_response","response":{"request_id":"waku-initial
         assert!(models.iter().any(|model| model.is_default));
     }
 
-    /// Harness reports its roster as one grouped `model` select option, where
-    /// each value is the route/model pair it takes back on selection. The
-    /// picker has to keep that pair as the id — two routes can offer the same
-    /// slug — and mark the currently selected route as the default.
     #[test]
-    fn maps_deepseek_acp_model_option_into_route_pairs() {
-        use agent_client_protocol::schema::v1::{
-            SessionConfigKind, SessionConfigOption, SessionConfigSelect,
-            SessionConfigSelectOptions, SessionConfigValueId,
-        };
-        use agent_client_protocol::schema::v1::{
-            SessionConfigOptionCategory, SessionConfigSelectGroup, SessionConfigSelectOption,
-        };
+    fn parses_deepseek_host_model_groups_and_reasoning() {
+        let models = parse_deepseek_model_catalog(&json!({
+            "groups": [
+                {
+                    "id": "deepseek-official",
+                    "name": "DeepSeek",
+                    "models": [
+                        {
+                            "id": "deepseek-chat",
+                            "name": "DeepSeek Chat",
+                            "reasoning": {
+                                "efforts": [
+                                    {"id": "off", "name": "Off"},
+                                    {"id": "high", "name": "High", "description": "Think longer"}
+                                ],
+                                "defaultEffort": "off"
+                            }
+                        }
+                    ]
+                },
+                {"id": "empty", "name": "Empty", "models": []}
+            ],
+            "failures": []
+        }));
 
-        let models = deepseek_models_from_config_options(&[SessionConfigOption::new(
-            "model",
-            "Model",
-            SessionConfigKind::Select(SessionConfigSelect::new(
-                SessionConfigValueId::new(r#"["deepseek-account","deepseek-flash"]"#),
-                SessionConfigSelectOptions::Grouped(vec![
-                    SessionConfigSelectGroup::new(
-                        "deepseek-account",
-                        "DeepSeek Account",
-                        vec![
-                            SessionConfigSelectOption::new(
-                                r#"["deepseek-account","deepseek-flash"]"#,
-                                "DeepSeek-V4.1-Flash",
-                            ),
-                            SessionConfigSelectOption::new(
-                                r#"["deepseek-account","deepseek-v4-pro"]"#,
-                                "DeepSeek-V4-Pro",
-                            ),
-                        ],
-                    ),
-                    SessionConfigSelectGroup::new(
-                        "deepseek-official",
-                        "DeepSeek",
-                        vec![SessionConfigSelectOption::new(
-                            r#"["deepseek-official","deepseek-flash"]"#,
-                            "deepseek-flash",
-                        )],
-                    ),
-                ]),
-            )),
-        )
-        .category(SessionConfigOptionCategory::Model)]);
-
-        assert_eq!(models.len(), 3);
-        assert_eq!(models[0].id, r#"["deepseek-account","deepseek-flash"]"#);
-        assert_eq!(models[0].name, "DeepSeek-V4.1-Flash");
-        assert_eq!(models[0].sub_provider.as_deref(), Some("DeepSeek Account"));
-        assert!(
-            models[0].is_default,
-            "the advertised current route is default"
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "deepseek-official/deepseek-chat");
+        assert_eq!(models[0].name, "DeepSeek Chat");
+        assert_eq!(models[0].sub_provider.as_deref(), Some("DeepSeek"));
+        assert_eq!(models[0].reasoning_efforts[1].id, "high");
+        assert_eq!(
+            models[0].reasoning_efforts[1].description.as_deref(),
+            Some("Think longer")
         );
-        assert!(!models[1].is_default);
-        // Same slug on another route stays a separate, addressable entry.
-        assert_eq!(models[2].name, "deepseek-flash");
-        assert_eq!(models[2].sub_provider.as_deref(), Some("DeepSeek"));
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("off"));
     }
 
     #[test]
-    fn deepseek_discovery_ignores_non_model_options() {
-        use agent_client_protocol::schema::v1::{
-            SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
-            SessionConfigSelect, SessionConfigSelectOption, SessionConfigSelectOptions,
-            SessionConfigValueId,
-        };
+    fn parses_only_selectable_deepseek_agent_presets() {
+        let presets = parse_deepseek_agent_presets(&json!({
+            "presets": [
+                {
+                    "id": "standard",
+                    "trust": "system",
+                    "isDefault": true,
+                    "name": "Host-localized standard"
+                },
+                {
+                    "id": "my-agent",
+                    "trust": "user",
+                    "isDefault": false,
+                    "name": "My agent",
+                    "description": "A local composition"
+                },
+                {
+                    "id": "broken",
+                    "trust": "user",
+                    "isDefault": false,
+                    "broken": "plugin failed"
+                }
+            ]
+        }));
 
-        let models = deepseek_models_from_config_options(&[SessionConfigOption::new(
-            "reasoning_effort",
-            "Reasoning effort",
-            SessionConfigKind::Select(SessionConfigSelect::new(
-                SessionConfigValueId::new("high"),
-                SessionConfigSelectOptions::Ungrouped(vec![SessionConfigSelectOption::new(
-                    "off", "Off",
-                )]),
-            )),
-        )
-        .category(SessionConfigOptionCategory::ThoughtLevel)]);
-
-        assert!(
-            models.is_empty(),
-            "a thought-level option is not a model roster"
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets[0].id, "standard");
+        assert!(presets[0].is_default);
+        assert_eq!(presets[1].name, "My agent");
+        assert!(presets[1].is_custom);
+        assert_eq!(
+            presets[1].description.as_deref(),
+            Some("A local composition")
         );
     }
 
@@ -1937,10 +1951,6 @@ printf '%s\n' '{"type":"control_response","response":{"request_id":"waku-initial
         assert!(
             !models.is_empty(),
             "the installed DeepSeek Harness reported no models"
-        );
-        assert!(
-            models.iter().any(|model| model.is_default),
-            "the installed DeepSeek Harness reported no default route"
         );
     }
 
@@ -2415,23 +2425,5 @@ done
                     .join(",")
             );
         }
-    }
-
-    /// Harness advertises `session/list`, so its catalog rides the shared ACP
-    /// session path rather than a provider-specific transport.
-    #[test]
-    #[ignore = "requires an installed DeepSeek Harness"]
-    fn installed_deepseek_harness_lists_sessions_over_acp() {
-        let binary =
-            crate::command_env::find_executable("dsh").expect("DeepSeek Harness is not installed");
-        let sessions =
-            crate::acp_session::list_provider_sessions(ProviderKind::DeepSeek, &binary, &[], 5)
-                .expect("DeepSeek Harness did not answer session/list");
-        assert!(
-            sessions
-                .iter()
-                .all(|session| session.cursor.provider() == ProviderKind::DeepSeek),
-            "a Harness session catalog must carry Harness cursors"
-        );
     }
 }

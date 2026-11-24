@@ -688,11 +688,14 @@ impl Backend for WakuBackend {
                     ProviderKind::Codex => {
                         crate::codex_session::list_provider_sessions(&binary, limit)?
                     }
-                    ProviderKind::Cursor | ProviderKind::Fx | ProviderKind::DeepSeek => {
+                    ProviderKind::Cursor | ProviderKind::Fx => {
                         crate::acp_session::list_provider_sessions(provider, &binary, &[], limit)?
                     }
                     ProviderKind::OpenCode => {
                         crate::opencode_session::list_provider_sessions(&binary, limit)?
+                    }
+                    ProviderKind::DeepSeek => {
+                        crate::deepseek_session::list_provider_sessions(&binary, limit)?
                     }
                     ProviderKind::Grok => crate::grok_session::list_provider_sessions(limit)?,
                     ProviderKind::Kimi => crate::kimi_session::list_provider_sessions(limit)?,
@@ -774,12 +777,9 @@ impl Backend for WakuBackend {
                         )?
                     }
                     ProviderResumeCursor::DeepSeek { session_id } => {
-                        let provider = cursor.provider();
-                        let binary = self.provider_binary(provider)?;
-                        crate::acp_session::provider_session_history(
-                            provider,
+                        let binary = self.provider_binary(ProviderKind::DeepSeek)?;
+                        crate::deepseek_session::provider_session_history(
                             &binary,
-                            &cwd,
                             session_id,
                             VISIBLE_TURN_LIMIT,
                         )?

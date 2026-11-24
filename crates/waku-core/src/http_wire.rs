@@ -36,21 +36,33 @@ pub(crate) struct Endpoint {
     pub host: String,
     pub port: u16,
     pub auth: Option<String>,
+    /// A `Cookie` header value sent verbatim.
+    ///
+    /// DeepSeek Harness authenticates `dsh web` with a cookie rather than an
+    /// `Authorization` header: the URL it prints carries a launch token that
+    /// has to be traded for a session cookie at `/connect` first. Holding the
+    /// finished header here keeps the token out of every request path.
+    pub cookie: Option<String>,
 }
 
 impl Endpoint {
     /// An unauthenticated loopback server.
-    ///
-    /// Still the shape OpenCode's loopback service needs; the DeepSeek Harness
-    /// transport that used to share it now speaks ACP over stdio instead. Only
-    /// a test target and the OpenCode module call it, so a library-only build
-    /// sees no use.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn local(port: u16) -> Self {
         Self {
             host: "127.0.0.1".to_owned(),
             port,
             auth: None,
+            cookie: None,
+        }
+    }
+
+    /// A loopback server authenticated by a `Cookie` header.
+    pub(crate) fn with_cookie(port: u16, cookie: Option<String>) -> Self {
+        Self {
+            host: "127.0.0.1".to_owned(),
+            port,
+            auth: None,
+            cookie,
         }
     }
 
@@ -70,6 +82,7 @@ impl Endpoint {
             host,
             port,
             auth: Some(format!("Basic {credential}")),
+            cookie: None,
         })
     }
 
@@ -132,9 +145,14 @@ pub(crate) fn http_request(
         .as_deref()
         .map(|auth| format!("Authorization: {auth}\r\n"))
         .unwrap_or_default();
+    let cookie = endpoint
+        .cookie
+        .as_deref()
+        .map(|cookie| format!("Cookie: {cookie}\r\n"))
+        .unwrap_or_default();
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\n{authorization}{cookie}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
@@ -158,7 +176,73 @@ pub(crate) fn http_request(
         }
         response.extend_from_slice(&buffer[..read]);
     }
-    parse_http_response(&response)
+    let response = parse_http_response(&response)?;
+    Ok(response)
+}
+
+/// The response headers of a bodyless request.
+///
+/// Kept separate from `request_json` for callers that need a handshake header
+/// rather than payload data — notably Harness, whose session cookie arrives
+/// only in `Set-Cookie` on a redirect.
+pub(crate) struct ResponseHeaders {
+    pub headers: Vec<(String, String)>,
+}
+
+/// Sends a bodyless request and returns its response headers.
+pub(crate) fn request_with_headers(
+    endpoint: &Endpoint,
+    method: &str,
+    path: &str,
+    timeout: Duration,
+) -> anyhow::Result<ResponseHeaders> {
+    let address = endpoint.address();
+    let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))
+        .with_context(|| format!("could not connect to {address}"))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let cookie = endpoint
+        .cookie
+        .as_deref()
+        .map(|cookie| format!("Cookie: {cookie}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAccept: application/json\r\n{cookie}Connection: close\r\n\r\n"
+    )?;
+    stream.flush()?;
+
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        if http_response_is_complete(&response).unwrap_or(false) {
+            break;
+        }
+        let read = stream
+            .read(&mut buffer)
+            .with_context(|| format!("failed reading response for {method} {path}"))?;
+        if read == 0 {
+            break;
+        }
+        response.extend_from_slice(&buffer[..read]);
+    }
+    // A redirect carries its cookie in the head and an empty body, and Node's
+    // server may keep the socket open; the head alone is a complete answer for
+    // this call, so stop waiting as soon as it is all that remains.
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("no HTTP response headers for {method} {path}"))?;
+    let head = std::str::from_utf8(&response[..header_end])?;
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_owned(), value.trim().to_owned()))
+        })
+        .collect();
+    Ok(ResponseHeaders { headers })
 }
 
 fn http_response_is_complete(response: &[u8]) -> anyhow::Result<bool> {
@@ -347,9 +431,14 @@ pub(crate) fn open_event_stream(
         .as_deref()
         .map(|auth| format!("Authorization: {auth}\r\n"))
         .unwrap_or_default();
+    let cookie = endpoint
+        .cookie
+        .as_deref()
+        .map(|cookie| format!("Cookie: {cookie}\r\n"))
+        .unwrap_or_default();
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: text/event-stream\r\n{authorization}Connection: keep-alive\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nAccept: text/event-stream\r\n{authorization}{cookie}Connection: keep-alive\r\n\r\n"
     )?;
     stream.flush()?;
     // Consume exactly the response head. A BufReader could read ahead into the

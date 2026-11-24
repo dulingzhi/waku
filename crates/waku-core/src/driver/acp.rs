@@ -97,13 +97,6 @@ fn launch_for(provider: ProviderKind, reasoning_effort: Option<&str>) -> anyhow:
             args: vec!["acp".into()],
             env: Vec::new(),
         }),
-        // DeepSeek Harness has no `acp` subcommand: its profile flag selects
-        // the entry point, so the profile comes first and the harness then
-        // serves standard ACP v1 on stdio with no private additions.
-        ProviderKind::DeepSeek => Ok(AcpLaunch {
-            args: vec!["--profile".into(), "acp".into()],
-            env: Vec::new(),
-        }),
         _ => Err(anyhow!(
             "{} does not speak the Agent Client Protocol",
             provider.display_name()
@@ -240,7 +233,14 @@ fn sdk_agent(
     environment.append(&mut launch.env);
     environment.extend(computer_env);
 
-    let config = sdk_agent_config(binary, cwd, launch, environment);
+    // `AcpAgentConfig` deliberately contains only argv and environment. macOS
+    // `env -C` supplies the session cwd without a shell, preserving exact
+    // argument boundaries and the SDK's process-group lifecycle management.
+    let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
+    args.extend(launch.args);
+    let config = AcpAgentConfig::new("/usr/bin/env")
+        .args(args)
+        .envs(environment);
     Ok(AcpAgent::new(config).with_debug(move |line, direction| {
         if direction != LineDirection::Stderr || line.trim().is_empty() {
             return;
@@ -251,53 +251,6 @@ fn sdk_agent(
         }
         lines.push(line.to_owned());
     }))
-}
-
-/// Builds the SDK's process description for one ACP provider.
-///
-/// `AcpAgentConfig` carries only argv and environment — it has no cwd — so the
-/// launch has to establish the working directory through the program it runs.
-///
-/// On Unix `/usr/bin/env -C <cwd> <binary>` does that without a shell, which
-/// keeps exact argument boundaries and the SDK's process-group teardown.
-///
-/// Windows has no `/usr/bin/env`: `env` only arrives with a Git for Windows
-/// install that a plain user may not have, and it sits on no `PATH` Waku
-/// searches. Windows also cannot `CreateProcess` a batch file, and several CLIs
-/// ship only a `.cmd` shim — `dsh` is one — so something has to go through
-/// `cmd`.
-///
-/// That `cmd` is best left to `std::process::Command`, which detects a `.cmd`
-/// target and runs it through `cmd.exe /c` itself, quoting each argument by
-/// the rules `cmd` expects. A hand-built command line cannot be forwarded
-/// intact here: `AcpAgentConfig` stores plain argv that the SDK hands to
-/// `Command::args`, which escapes every element again, so a pre-quoted line
-/// would arrive double-escaped and never parse.
-///
-/// The cwd needs no process-level handling: every ACP request that has to know
-/// a working directory carries it explicitly (`session/new` takes one), so the
-/// child inheriting Waku's own directory changes nothing.
-fn sdk_agent_config(
-    binary: &str,
-    cwd: &str,
-    launch: AcpLaunch,
-    environment: Vec<(String, String)>,
-) -> AcpAgentConfig {
-    #[cfg(unix)]
-    {
-        let mut args = vec!["-C".to_owned(), cwd.to_owned(), binary.to_owned()];
-        args.extend(launch.args);
-        AcpAgentConfig::new("/usr/bin/env")
-            .args(args)
-            .envs(environment)
-    }
-    #[cfg(windows)]
-    {
-        let _ = cwd;
-        AcpAgentConfig::new(binary)
-            .args(launch.args)
-            .envs(environment)
-    }
 }
 
 /// Builds a short-lived ACP process for session discovery or history replay.
@@ -1173,127 +1126,6 @@ fn set_model_params(
     params
 }
 
-/// Applies DeepSeek Harness's model and thought-level selections.
-///
-/// Harness advertises both as ordinary ACP config options: `model` carries a
-/// JSON array string such as `["deepseek-account","deepseek-flash"]` because a
-/// route and a model are chosen together, and `reasoning_effort` is a separate
-/// `thought_level` option. Both have to be set through
-/// `session/set_config_option`; Harness has no `session/set_model`.
-///
-/// The values refresh after each selection — switching the route can replace
-/// the available models — so the thought level is applied against the option
-/// set the model request returned, never a stale one.
-async fn apply_deepseek_config(
-    connection: &ConnectionTo<Agent>,
-    session_id: &SessionId,
-    config_options: Option<&[SessionConfigOption]>,
-    model: &str,
-    reasoning_effort: Option<&str>,
-    events: &DriverEventSender,
-) {
-    let mut options = config_options.unwrap_or_default().to_vec();
-    let Some(model_option) = deepseek_model_option(&options) else {
-        let _ = events.send(DriverEvent::Error(tr!(
-            "errors.select_model",
-            error = "DeepSeek Harness did not advertise its model configuration"
-        )));
-        return;
-    };
-    let model_option = model_option.clone();
-    let selection = deepseek_model_selection(&model_option, model);
-    let Some(selection) = selection else {
-        let _ = events.send(DriverEvent::Error(tr!(
-            "errors.select_model",
-            error = format!("DeepSeek Harness did not advertise model {model}")
-        )));
-        return;
-    };
-    if session_config_current_value(&model_option) != Some(selection.as_str()) {
-        match connection
-            .send_request(SetSessionConfigOptionRequest::new(
-                session_id.clone(),
-                model_option.id.clone(),
-                selection.as_str(),
-            ))
-            .block_task()
-            .await
-        {
-            Ok(response) => options = response.config_options,
-            Err(error) => {
-                let _ = events.send(DriverEvent::Error(tr!(
-                    "errors.select_model",
-                    error = error
-                )));
-                return;
-            }
-        }
-    }
-
-    let Some(effort) = reasoning_effort.filter(|effort| !effort.is_empty()) else {
-        return;
-    };
-    let Some(option) = options
-        .iter()
-        .find(|option| option.category == Some(SessionConfigOptionCategory::ThoughtLevel))
-        .cloned()
-    else {
-        // Thought level is an optional extension: a build that does not offer
-        // one simply runs at its own default.
-        return;
-    };
-    let values = session_config_select_values(&option);
-    let Some(value) = values
-        .iter()
-        .find(|value| value.eq_ignore_ascii_case(effort))
-        .copied()
-    else {
-        return;
-    };
-    if session_config_current_value(&option) == Some(value) {
-        return;
-    }
-    // Non-fatal for the same reason the option itself is: a rejected thought
-    // level must not turn a usable session into a failed one.
-    let _ = connection
-        .send_request(SetSessionConfigOptionRequest::new(
-            session_id.clone(),
-            option.id.clone(),
-            value,
-        ))
-        .block_task()
-        .await;
-}
-
-fn deepseek_model_option(config_options: &[SessionConfigOption]) -> Option<&SessionConfigOption> {
-    config_options.iter().find(|option| {
-        option.category == Some(SessionConfigOptionCategory::Model)
-            && option.id.to_string().eq_ignore_ascii_case("model")
-    })
-}
-
-/// Picks the advertised value matching `model`.
-///
-/// Harness names a model as a route/model JSON pair, while Waku stores one flat
-/// id. The picker's `id` keeps the pair intact so two routes offering the same
-/// model slug stay distinct; older state and hand-typed ids carry the bare
-/// slug, which still has to resolve.
-fn deepseek_model_selection(option: &SessionConfigOption, model: &str) -> Option<String> {
-    let values = session_config_select_values(option);
-    if values.contains(&model) {
-        return Some(model.to_owned());
-    }
-    values
-        .iter()
-        .find(|value| {
-            serde_json::from_str::<Vec<String>>(value)
-                .ok()
-                .and_then(|pair| pair.last().cloned())
-                .is_some_and(|slug| slug == model)
-        })
-        .map(|value| (*value).to_owned())
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn apply_model(
     connection: &ConnectionTo<Agent>,
@@ -1350,19 +1182,6 @@ async fn apply_model(
                 )));
             }
         }
-        return;
-    }
-
-    if provider == ProviderKind::DeepSeek {
-        apply_deepseek_config(
-            connection,
-            session_id,
-            config_options,
-            model,
-            reasoning_effort,
-            events,
-        )
-        .await;
         return;
     }
 
@@ -2425,50 +2244,6 @@ mod tests {
         let launch = launch_for(ProviderKind::Fx, None).unwrap();
         assert_eq!(launch.args, ["acp"]);
         assert!(launch.env.is_empty());
-    }
-
-    /// Harness selects its ACP entry point with a profile flag rather than a
-    /// subcommand, and adds nothing else: its ACP surface is standard v1, so
-    /// any extra argv or environment would be Waku-private protocol.
-    #[test]
-    fn deepseek_launches_the_harness_acp_profile() {
-        let launch = launch_for(ProviderKind::DeepSeek, None).unwrap();
-        assert_eq!(launch.args, ["--profile", "acp"]);
-        assert!(launch.env.is_empty());
-    }
-
-    /// The reasoning effort belongs to Harness's own `reasoning_effort` config
-    /// option, so it must not be smuggled into the launch as a flag.
-    #[test]
-    fn deepseek_launch_ignores_reasoning_effort() {
-        let launch = launch_for(ProviderKind::DeepSeek, Some("high")).unwrap();
-        assert_eq!(launch.args, ["--profile", "acp"]);
-    }
-
-    /// Harness names a model as a route/model JSON pair. A stored pair selects
-    /// directly; a bare slug still has to resolve to the route advertising it.
-    #[test]
-    fn deepseek_model_selection_accepts_pairs_and_bare_slugs() {
-        let option = select_config_option(
-            "model",
-            SessionConfigOptionCategory::Model,
-            r#"["deepseek-account","deepseek-flash"]"#,
-            &[
-                r#"["deepseek-account","deepseek-flash"]"#,
-                r#"["deepseek-account","deepseek-v4-pro"]"#,
-            ],
-        );
-
-        assert_eq!(
-            deepseek_model_selection(&option, r#"["deepseek-account","deepseek-v4-pro"]"#)
-                .as_deref(),
-            Some(r#"["deepseek-account","deepseek-v4-pro"]"#)
-        );
-        assert_eq!(
-            deepseek_model_selection(&option, "deepseek-flash").as_deref(),
-            Some(r#"["deepseek-account","deepseek-flash"]"#)
-        );
-        assert!(deepseek_model_selection(&option, "not-offered").is_none());
     }
 
     #[test]
