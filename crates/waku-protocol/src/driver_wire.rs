@@ -25,6 +25,12 @@ pub fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
         DriverEvent::RuntimeEventCursorAdvanced(_) => {
             bail!("client-only runtime cursors cannot be sent by the daemon")
         }
+        // The daemon never emits this: it is what a client builds when it
+        // receives a relayed delegate event, and the relay itself is assembled
+        // on the wire side from the delegate's own already-encoded events.
+        DriverEvent::DelegateStreamed { .. } => {
+            bail!("a relayed delegate event is not sent again as one")
+        }
         DriverEvent::Connected { provider_cursor } => {
             ("connected", serde_json::to_value(provider_cursor)?)
         }

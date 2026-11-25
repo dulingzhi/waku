@@ -25,6 +25,7 @@ use crate::model::{
 use crate::persistence::{ComposerDraftStore, PersistedState, StateStore};
 use crate::settings::DaemonSettingsStore;
 use waku_protocol::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
+use waku_protocol::{DELEGATE_EVENT_KIND, DelegateEventPayload};
 
 /// How many fully hydrated transcripts the daemon keeps resident.
 ///
@@ -276,11 +277,19 @@ impl WakuBackend {
         // returned — and a thread holding `&self` would tie the record's
         // lifetime to a backend that may be dropped first.
         let delegates = self.delegates.clone();
+        // The lead's own stream, so a conversation watching the group sees each
+        // delegate's reply as it is written. A delegate runs in its own process
+        // and publishes only on its own runtime; without this relay the lead's
+        // cards could not move until the delegate's turn settled and its
+        // transcript was read back.
+        let lead_sink = events.clone();
         std::thread::Builder::new()
             .name(format!("waku-daemon-events-{session_id}"))
             .spawn(move || {
                 while let Ok(event) = event_receiver.recv() {
                     record_delegate_event(&delegates, session_id, &event);
+                    let relayed =
+                        delegate_relay_event(&event).and_then(|event| event_to_wire(event).ok());
                     let wire = event_to_wire(event).unwrap_or_else(|error| {
                         WireDriverEvent::new(
                             "error",
@@ -289,6 +298,18 @@ impl WakuBackend {
                     });
                     if delegate_sink.send(wire).is_err() {
                         break;
+                    }
+                    // Best effort: a lead that closed its window must not stop
+                    // the delegate it started.
+                    if let Some(inner) = relayed {
+                        let payload = serde_json::to_value(DelegateEventPayload {
+                            session_id,
+                            event: inner,
+                        });
+                        if let Ok(payload) = payload {
+                            let _ =
+                                lead_sink.send(WireDriverEvent::new(DELEGATE_EVENT_KIND, payload));
+                        }
                     }
                 }
             })
@@ -383,7 +404,11 @@ impl WakuBackend {
             if record.lead != lead {
                 bail!("agent {delegate} was not started by this conversation");
             }
-            (record.runtime_id, record.status.is_busy(), record.sink.clone())
+            (
+                record.runtime_id,
+                record.status.is_busy(),
+                record.sink.clone(),
+            )
         };
         let driver = {
             let sessions = self.sessions.lock();
@@ -2224,9 +2249,26 @@ fn fork_provider_session(
 /// Builds the task record for a delegate of `lead`.
 ///
 /// Pulled out of [`WakuBackend::spawn_delegate`] so the rules that make a
-/// delegate safe can be checked without launching a provider: it inherits the
-/// lead's provider, workspace, and options so the user can open and read it as
-/// an ordinary task, and it starts with no transcript of its own.
+/// What of a delegate's stream its lead's conversation also receives.
+///
+/// Deliberately four kinds, not a mirror of everything. A lead's cards show what
+/// the delegate is saying and whether it is done; the delegate's tool calls,
+/// reasoning, permissions and checkpoints belong to the delegate's own task,
+/// where opening it reads the full transcript. Forwarding those too would put a
+/// second process's internals into the lead's UI for no reader.
+fn delegate_relay_event(event: &DriverEvent) -> Option<DriverEvent> {
+    match event {
+        DriverEvent::TextDelta(text) => Some(DriverEvent::TextDelta(text.clone())),
+        DriverEvent::TurnStarted => Some(DriverEvent::TurnStarted),
+        DriverEvent::TurnFinished { success, summary } => Some(DriverEvent::TurnFinished {
+            success: *success,
+            summary: summary.clone(),
+        }),
+        DriverEvent::Error(error) => Some(DriverEvent::Error(error.clone())),
+        _ => None,
+    }
+}
+
 /// Folds one provider event into what the daemon remembers about a delegate.
 ///
 /// Only three things matter to a lead reading a delegate: whether it is still
@@ -2448,6 +2490,11 @@ fn event_to_wire(event: DriverEvent) -> anyhow::Result<WireDriverEvent> {
     let (kind, payload) = match event {
         DriverEvent::RuntimeEventCursorAdvanced(_) => {
             bail!("client-only runtime cursors cannot be sent by the daemon")
+        }
+        // Received by a client, never produced by the daemon: the relay below
+        // builds its wire form directly from the delegate's own encoded event.
+        DriverEvent::DelegateStreamed { .. } => {
+            bail!("a relayed delegate event is not sent again as one")
         }
         DriverEvent::Connected { provider_cursor } => {
             ("connected", serde_json::to_value(provider_cursor)?)
@@ -2712,6 +2759,58 @@ struct TurnFinishedWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lead's conversation receives a delegate's reply as it is written, and
+    /// nothing else about it.
+    ///
+    /// The four relayed kinds are the ones a reader follows: the text, the turn
+    /// opening and closing, and an error. Everything else a delegate's process
+    /// reports — tool calls, reasoning, permission prompts, checkpoints — belongs
+    /// to the delegate's own task. Forwarding those would put a second process's
+    /// internals in the lead's UI, and the transcript is where they are read.
+    #[test]
+    fn a_lead_receives_its_delegates_words_but_not_its_internals() {
+        assert!(matches!(
+            delegate_relay_event(&DriverEvent::TextDelta("half an answer".into())),
+            Some(DriverEvent::TextDelta(text)) if text == "half an answer"
+        ));
+        assert!(matches!(
+            delegate_relay_event(&DriverEvent::TurnStarted),
+            Some(DriverEvent::TurnStarted)
+        ));
+        assert!(matches!(
+            delegate_relay_event(&DriverEvent::TurnFinished {
+                success: true,
+                summary: None
+            }),
+            Some(DriverEvent::TurnFinished { success: true, .. })
+        ));
+        assert!(matches!(
+            delegate_relay_event(&DriverEvent::Error("boom".into())),
+            Some(DriverEvent::Error(error)) if error == "boom"
+        ));
+
+        for internal in [
+            DriverEvent::ReasoningDelta("thinking".into()),
+            DriverEvent::Activity {
+                id: None,
+                kind: ActivityKind::Tool,
+                title: "ran the tests".into(),
+                detail: None,
+                complete: true,
+            },
+            DriverEvent::UsageUpdated {
+                context_tokens: Some(1),
+                context_window: Some(2),
+            },
+            DriverEvent::ProcessExited,
+        ] {
+            assert!(
+                delegate_relay_event(&internal).is_none(),
+                "{internal:?} belongs to the delegate's own task, not the lead's UI"
+            );
+        }
+    }
 
     /// A delegate has to be an ordinary task of the same project and provider,
     /// carrying the lead's options, so the user can open it and read what it

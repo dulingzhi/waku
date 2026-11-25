@@ -392,6 +392,44 @@ impl Waku {
                     );
                 }
             }
+            DriverEvent::DelegateStreamed {
+                session_id: delegate,
+                kind,
+                payload,
+            } => {
+                // A delegate's turn is not this conversation's turn, so nothing
+                // here goes through the transcript: this is the text a lead's
+                // card shows while the subagent is still writing. It stays until
+                // the *next* turn opens, because the text relayed here is the
+                // same text the delegate's own transcript settles into. Dropping
+                // it at the turn's end would blank the card for the moment it
+                // takes the transcript to sync, while keeping it shows the
+                // finished answer either way.
+                match kind.as_str() {
+                    "textDelta" => {
+                        if let Ok(delta) = serde_json::from_value::<String>(payload) {
+                            self.delegate_streams
+                                .entry(delegate)
+                                .or_default()
+                                .push_str(&delta);
+                            cx.notify();
+                        }
+                    }
+                    "turnStarted" => {
+                        // The old text is stale now, and a new one is about to
+                        // arrive — clear rather than let the two collide.
+                        self.delegate_streams.remove(&delegate);
+                        cx.notify();
+                    }
+                    "turnFinished" | "error" => {
+                        // Keep the text just written: it is the answer the
+                        // delegate settled on, and the card should still show
+                        // it if the transcript has not synced yet.
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            }
             DriverEvent::TextDelta(delta) => {
                 if self.accepts_turn_output(session_id) {
                     self.append_text_delta(session_id, runtime, delta);

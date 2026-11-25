@@ -331,7 +331,14 @@ fn delegate_tally(sessions: &[AgentSession], lead_session: Uuid) -> (usize, usiz
         .iter()
         .filter(|session| session.parent_session_id == Some(lead_session))
         .fold((0, 0), |(total, running), session| {
-            (total + 1, if session.is_busy() { running + 1 } else { running })
+            (
+                total + 1,
+                if session.is_busy() {
+                    running + 1
+                } else {
+                    running
+                },
+            )
         })
 }
 
@@ -1818,7 +1825,8 @@ impl Waku {
         cx.notify();
     }
 
-    fn render_sidebar_session_item(&self, session_id: Uuid, cx: &mut Context<Self>) -> AnyElement {        let theme = Theme::current(cx);
+    fn render_sidebar_session_item(&self, session_id: Uuid, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::current(cx);
         let Some(session) = self
             .state
             .sessions

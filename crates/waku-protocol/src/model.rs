@@ -2002,6 +2002,22 @@ pub enum DriverEvent {
         message: String,
         reason: String,
     },
+    /// One delegate's stream, relayed into the conversation that started it.
+    ///
+    /// A delegate runs as its own task, so its text arrives on its own runtime
+    /// and nowhere else. The lead's conversation is where a group is watched, so
+    /// the daemon republishes the parts a reader follows under this variant;
+    /// `session_id` names the delegate they belong to.
+    ///
+    /// Carries the same flat shape a task's own event does rather than another
+    /// [`DriverEvent`], because it travels on the wire: the nested event is
+    /// decoded on arrival, and a recursive enum here would make every event able
+    /// to contain every other one.
+    DelegateStreamed {
+        session_id: Uuid,
+        kind: String,
+        payload: serde_json::Value,
+    },
     /// Context-window occupancy reported by the live stream. Fields arrive at
     /// different moments — token counts with each assistant message, the
     /// window size with the settled turn — so each is optional and the app

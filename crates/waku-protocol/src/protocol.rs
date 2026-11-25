@@ -28,6 +28,10 @@ use crate::claude::{
 /// a client that sends them to an older daemon would get an error it cannot
 /// distinguish from a real failure.
 ///
+/// 14 relays a delegate's own stream to its lead's conversation under a new
+/// event kind. A client built before this cannot decode that kind, so it would
+/// read the delegate's live text as an invalid daemon event rather than seeing it.
+///
 /// 13 gives a session the conversation that spawned it as a delegate. A client
 /// built before this would list a group run's subagents as tasks of their own,
 /// and one built after it would expect a field an older daemon never sends.
@@ -37,7 +41,7 @@ use crate::claude::{
 ///
 /// 10 adds the marketplace, available-plugin, plugin-detail, install and
 /// update commands, which extend the same surface for the same reason.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -538,6 +542,30 @@ impl WireDriverEvent {
     }
 }
 
+/// The event kind that carries a delegate's stream to its lead's conversation.
+///
+/// A delegate runs as its own task with its own provider process, so its text
+/// arrives on its own runtime and nowhere else. The lead's conversation is where
+/// a user watches a group work, and it can show a delegate live only if that
+/// text also reaches the lead's stream. Rather than widen every event with an
+/// optional subject, the daemon republishes the delegate's own events under this
+/// one kind, with the delegate's id beside the original event.
+///
+/// Only what a reader watches travels this way — text, the turn's start and
+/// finish, and an error. Tool calls, reasoning and checkpoints stay on the
+/// delegate's runtime, where opening the task reads them from its transcript.
+pub const DELEGATE_EVENT_KIND: &str = "delegateEvent";
+
+/// The payload of a [`DELEGATE_EVENT_KIND`] event.
+///
+/// `sessionId` names the delegate the inner `event` happened to.
+#[derive(Clone, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegateEventPayload {
+    pub session_id: Uuid,
+    pub event: WireDriverEvent,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SequencedEvent {
@@ -813,7 +841,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 13);
+        assert_eq!(PROTOCOL_VERSION, 14);
     }
 
     #[test]
@@ -822,7 +850,7 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 13);
+        assert_eq!(PROTOCOL_VERSION, 14);
     }
 
     #[test]
@@ -1015,5 +1043,33 @@ mod tests {
             "futureField": 1,
         });
         assert!(serde_json::from_value::<DaemonReady>(with_extra).is_ok());
+    }
+
+    /// A relayed delegate event survives the wire with its subject intact.
+    ///
+    /// The envelope has to name the delegate *and* carry the delegate's own
+    /// event unchanged: the lead's card is keyed by that id, and dropping it
+    /// would leave the text with no card to land in. This is the contract the
+    /// daemon writes and the desktop reads, so it is pinned on both sides of the
+    /// JSON.
+    #[test]
+    fn a_relayed_delegate_event_names_its_delegate_and_keeps_its_event() {
+        let delegate = Uuid::new_v4();
+        let envelope = WireDriverEvent::new(
+            DELEGATE_EVENT_KIND,
+            serde_json::to_value(DelegateEventPayload {
+                session_id: delegate,
+                event: WireDriverEvent::new("textDelta", serde_json::json!("half an answer")),
+            })
+            .unwrap(),
+        );
+
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["kind"], DELEGATE_EVENT_KIND);
+
+        let decoded: DelegateEventPayload = serde_json::from_value(envelope.payload).unwrap();
+        assert_eq!(decoded.session_id, delegate);
+        assert_eq!(decoded.event.kind, "textDelta");
+        assert_eq!(decoded.event.payload, serde_json::json!("half an answer"));
     }
 }

@@ -1434,6 +1434,14 @@ pub struct Waku {
     /// Runtime-only by design: providers reconcile their authoritative state
     /// when the resident transport reconnects.
     background_work: HashMap<Uuid, BackgroundWorkRegistry>,
+    /// The live text of each delegate, as it streams to its lead.
+    ///
+    /// Runtime-only on purpose: it is the delegate's own turn being written
+    /// right now, and the task's transcript is what survives — this exists so a
+    /// lead's card moves while the delegate is still thinking, before any turn
+    /// has settled for the transcript to hold. Cleared per turn, so a steer does
+    /// not append the new answer to the old one.
+    delegate_streams: HashMap<Uuid, String>,
     last_background_work_tick: Instant,
     /// The steering field of the subagent whose surface is open, if any.
     ///
@@ -3184,6 +3192,7 @@ impl Waku {
                 runtime_attach_pending: HashSet::new(),
                 runtime_attach_misses: HashMap::new(),
                 background_work: HashMap::new(),
+                delegate_streams: HashMap::new(),
                 last_background_work_tick: Instant::now(),
                 subagent_steer: None,
                 submission_preparations: HashSet::new(),

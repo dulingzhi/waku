@@ -2086,13 +2086,26 @@ impl Waku {
         for delegate in delegates {
             let status = delegate.label_for_status();
             let running = delegate.is_busy();
-            let preview = delegate
-                .messages
-                .iter()
-                .rev()
-                .find(|message| message.role == MessageRole::Assistant)
-                .map(|message| message.content.trim().to_owned())
-                .filter(|text| !text.is_empty());
+            // The live stream wins while a turn is still being written: the
+            // transcript only holds turns that have already settled, so reading
+            // it alone would leave the card frozen for the whole of the
+            // delegate's work. Once the turn finishes the daemon stops relaying
+            // and this falls back to the stored answer, which is the copy that
+            // survives a restart.
+            let preview = self
+                .delegate_streams
+                .get(&delegate.id)
+                .map(|live| live.trim().to_owned())
+                .filter(|text| !text.is_empty())
+                .or_else(|| {
+                    delegate
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|message| message.role == MessageRole::Assistant)
+                        .map(|message| message.content.trim().to_owned())
+                        .filter(|text| !text.is_empty())
+                });
             let title = delegate
                 .auto_title
                 .clone()
@@ -2186,7 +2199,8 @@ impl Waku {
             .into_any_element()
     }
 
-    fn render_working_indicator_row(&self, theme: &Theme) -> AnyElement {        let session = self.selected_session();
+    fn render_working_indicator_row(&self, theme: &Theme) -> AnyElement {
+        let session = self.selected_session();
         let elapsed = session
             .and_then(|session| session.turns.last())
             .filter(|turn| turn.status == TurnStatus::Running)

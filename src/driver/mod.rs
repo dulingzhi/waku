@@ -120,11 +120,32 @@ fn connect_remote(
                                 epoch: sequenced.epoch,
                                 sequence: sequenced.sequence,
                             };
-                            let event = match waku_client::event_from_wire(sequenced.event) {
-                                Ok(event) => event,
-                                Err(error) => DriverEvent::Error(format!(
-                                    "Waku daemon sent an invalid event: {error}"
-                                )),
+                            let event = match sequenced.event.kind.as_str() {
+                                // A relayed delegate event names the subagent it
+                                // belongs to, so it is split off before the
+                                // ordinary decode: the flat envelope is what
+                                // carries the id, and the inner event is decoded
+                                // exactly as a task's own would be.
+                                waku_client::DELEGATE_EVENT_KIND => {
+                                    match serde_json::from_value::<waku_client::DelegateEventPayload>(
+                                        sequenced.event.payload,
+                                    ) {
+                                        Ok(relayed) => DriverEvent::DelegateStreamed {
+                                            session_id: relayed.session_id,
+                                            kind: relayed.event.kind,
+                                            payload: relayed.event.payload,
+                                        },
+                                        Err(error) => DriverEvent::Error(format!(
+                                            "Waku daemon sent an invalid delegate event: {error}"
+                                        )),
+                                    }
+                                }
+                                _ => match waku_client::event_from_wire(sequenced.event) {
+                                    Ok(event) => event,
+                                    Err(error) => DriverEvent::Error(format!(
+                                        "Waku daemon sent an invalid event: {error}"
+                                    )),
+                                },
                             };
                             let process_exited = matches!(&event, DriverEvent::ProcessExited);
                             if forwarding_events.send(event).is_err()
