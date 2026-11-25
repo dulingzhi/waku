@@ -70,6 +70,8 @@ struct BackgroundSummaryEntry {
 pub(super) struct DelegateSummaryEntry {
     pub(super) session_id: Uuid,
     /// The identity it runs as, or `None` for a delegate started without one.
+    /// Shown as the row's tooltip so a reader can tell an agent with a saved
+    /// role from one its lead started ad hoc.
     pub(super) identity: Option<String>,
     pub(super) label: String,
     pub(super) role: String,
@@ -1758,6 +1760,7 @@ fn background_work_count_summary(processes: usize, agents: usize) -> String {
     parts.join(" · ")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_background_summary_card(
     handle: &ContextMenuHandle,
     session_id: Uuid,
@@ -2190,6 +2193,9 @@ fn render_delegate_summary_section(
                 .gap(px(2.0))
                 .cursor_default()
                 .hover(|style| style.bg(theme.overlay))
+                .when_some(entry.identity.clone(), |row, identity| {
+                    row.tooltip(Tooltip::text(tr!("agents.running_as", id = identity)))
+                })
                 .child(
                     div()
                         .flex()

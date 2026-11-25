@@ -1654,6 +1654,13 @@ pub struct Waku {
     agents_selected_team: Option<String>,
     /// Whether the page's detail pane is showing identities or teams.
     agents_view: agents_page::AgentsView,
+    /// The identity being edited, and the fields it is edited through. `None`
+    /// means the pane is reading, not editing.
+    ///
+    /// One draft at a time on purpose: two half-edited identities would each
+    /// need their own validation and their own save, and the page holds one
+    /// detail pane anyway.
+    agents_draft: Option<agents_page::AgentDraft>,
     /// Parsed markdown for the selected skill's document, keyed by the skill
     /// directory it was built from. One entry: only one detail shows at once.
     skills_detail_markdown: RefCell<Option<(PathBuf, MarkdownView)>>,
@@ -3345,6 +3352,7 @@ impl Waku {
                 agents_selected: None,
                 agents_selected_team: None,
                 agents_view: agents_page::AgentsView::Identities,
+                agents_draft: None,
                 skills_detail_markdown: RefCell::new(None),
                 skills_selection: TranscriptSelection::default(),
                 skills_detail_scroll: ScrollHandle::new(),

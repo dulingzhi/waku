@@ -572,6 +572,27 @@ agents.tools: ツール
 agents.brief: 共有ブリーフ
 agents.members: メンバー
 agents.problems: 読み込めないファイルがあります
+agents.field_name: 名前
+agents.field_role: 役割ラベル
+agents.field_description: 何のためか
+agents.field_name_placeholder: 監査役
+agents.field_role_placeholder: RV
+agents.field_description_placeholder: 変更を読み、そこに潜むリスクを報告する。
+agents.field_instructions_placeholder: このエージェントの進め方。
+agents.field_boundaries_placeholder: 決してしてはいけないこと。
+agents.name_and_role_required: エージェントには名前と役割ラベルが必要です。
+agents.edit: 編集
+agents.copy_to_edit: 複製して編集
+agents.new: 新しいエージェント
+agents.edit_identity: エージェントを編集
+agents.new_identity: 新しいエージェント
+agents.builtin_read_only: これはアプリ同梱です。複製すると編集できます。
+agents.delete: 削除
+agents.no_teams_description: チームは複数のアイデンティティを同時に起動でき、まとめて再利用できます。
+agents.create_team: 既存のアイデンティティでチームを作る
+agents.team_needs_identities: まずアイデンティティを一つ保存してください。
+agents.default_team_name: チーム
+agents.running_as: "アイデンティティ: %{id}"
 skills.scope_user_detail: すべてのプロジェクトで利用可能
 skills.scope_in_project: "%{project} 内"
 skills.filter_all: すべてのスキル

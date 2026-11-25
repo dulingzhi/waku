@@ -210,7 +210,10 @@ fn read_json_files(dir: &Path, problems: &mut Vec<AgentCatalogProblem>) -> Vec<(
     let mut files = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
         .collect::<Vec<_>>();
     files.sort();
     let mut sources = Vec::with_capacity(files.len());
@@ -315,7 +318,11 @@ pub fn delete_definition(
     remove_file(definition_path(scope, project, id))
 }
 
-pub fn delete_team(project: Option<&Path>, scope: AgentDefinitionScope, id: &str) -> io::Result<()> {
+pub fn delete_team(
+    project: Option<&Path>,
+    scope: AgentDefinitionScope,
+    id: &str,
+) -> io::Result<()> {
     remove_file(team_path(scope, project, id))
 }
 
@@ -351,7 +358,8 @@ mod tests {
     use super::*;
 
     fn temp_root(label: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("waku-agents-{label}-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("waku-agents-{label}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -415,7 +423,9 @@ mod tests {
             },
         ]);
         assert_eq!(
-            catalog.find("auditor").map(|found| found.description.as_str()),
+            catalog
+                .find("auditor")
+                .map(|found| found.description.as_str()),
             Some("the project's version")
         );
         assert_eq!(

@@ -1111,6 +1111,48 @@ agents.members:
   en: Members
 agents.problems:
   en: Some files could not be read
+agents.field_name:
+  en: Name
+agents.field_role:
+  en: Role label
+agents.field_description:
+  en: What it is for
+agents.field_name_placeholder:
+  en: Auditor
+agents.field_role_placeholder:
+  en: RV
+agents.field_description_placeholder:
+  en: Reviews changes and reports the risks they carry.
+agents.field_instructions_placeholder:
+  en: How this agent should work.
+agents.field_boundaries_placeholder:
+  en: What it must never do.
+agents.name_and_role_required:
+  en: An agent needs a name and a role label.
+agents.edit:
+  en: Edit
+agents.copy_to_edit:
+  en: Copy to edit
+agents.new:
+  en: New agent
+agents.edit_identity:
+  en: Edit agent
+agents.new_identity:
+  en: New agent
+agents.builtin_read_only:
+  en: This one ships with the app. Copy it to change it.
+agents.delete:
+  en: Delete
+agents.no_teams_description:
+  en: A team starts several identities at once, so a whole group can be reused.
+agents.create_team:
+  en: Build a team
+agents.team_needs_identities:
+  en: Save at least one agent identity first.
+agents.default_team_name:
+  en: Team of
+agents.running_as:
+  en: "Running as: %{id}"
 skills.scope_user_detail:
   en: available in every project
 skills.scope_in_project:
