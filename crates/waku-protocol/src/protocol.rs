@@ -24,13 +24,16 @@ use crate::claude::{
     McpScope, PluginCatalog, PluginConfigCatalog, PluginDetails,
 };
 
-/// Bumped because the new Claude MCP and plugin commands below change the
-/// command surface: a client that sends them to an older daemon would get an
-/// error it cannot distinguish from a real failure.
+/// Bumped because the new delegate commands below change the command surface:
+/// a client that sends them to an older daemon would get an error it cannot
+/// distinguish from a real failure.
+///
+/// 12 adds `readDelegate` and `promptDelegate`, the two commands an agent
+/// bridge uses to read back and steer the delegates it started.
 ///
 /// 10 adds the marketplace, available-plugin, plugin-detail, install and
 /// update commands, which extend the same surface for the same reason.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -806,7 +809,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 11);
+        assert_eq!(PROTOCOL_VERSION, 12);
     }
 
     #[test]
@@ -815,7 +818,7 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 11);
+        assert_eq!(PROTOCOL_VERSION, 12);
     }
 
     #[test]
