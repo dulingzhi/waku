@@ -240,7 +240,7 @@ session.status_working: 工作中
 session.status_waiting: 等待中
 session.status_background: 后台运行
 session.status_failed: 失败
-transcript.delegates_heading: 子代理
+transcript.delegates_heading: 并行代理
 sidebar.today: 今天
 sidebar.search: 搜索
 sidebar.options: 侧边栏选项
@@ -257,8 +257,8 @@ sidebar.this_month: 本月
 sidebar.this_year: 今年
 sidebar.more: 更早
 sidebar.working: 工作中 · %{elapsed}
-sidebar.delegates: "%{count} 个子代理"
-sidebar.delegates_running: "%{count} 个子代理 · %{running} 运行中"
+sidebar.delegates: "%{count} 个并行代理"
+sidebar.delegates_running: "%{count} 个并行代理 · %{running} 运行中"
 sidebar.just_now: 刚刚
 sidebar.minutes_ago: "%{count} 分钟前"
 sidebar.hours_ago: "%{count} 小时前"
@@ -751,8 +751,8 @@ right_panel.files_description: 浏览并阅读工作区文件
 right_panel.diff_description: 审阅文件更改
 right_panel.terminal_unavailable: 终端不可用
 right_panel.terminal_unavailable_description: 请重新打开终端面板以启动 Shell
-right_panel.delegate: 子代理
-right_panel.delegate_unavailable: 子代理不可用
+right_panel.delegate: 并行代理
+right_panel.delegate_unavailable: 并行代理不可用
 right_panel.delegate_unavailable_description: 该会话已不存在
 right_panel.delegate_default_model: 默认模型
 right_panel.delegate_prompt: 任务
@@ -790,14 +790,14 @@ commit.committed: 已提交更改
 commit.committed_and_pushed: 已提交并推送更改
 commit.pushed: 已推送更改
 background.title: 后台工作
-background.description: 查看智能体启动的进程和子智能体
+background.description: 查看智能体启动的进程和子代理
 background.processes: 后台进程
-background.agents: 子智能体
+background.agents: 子代理
 background.process: 进程
 background.monitor: 监控
-background.subagent: 子智能体
+background.subagent: 子代理
 background.no_work: 暂无后台工作
-background.no_work_description: 长时间运行的命令和子智能体显示在这里。
+background.no_work_description: 长时间运行的命令和子代理显示在这里。
 background.view: 查看
 background.stop: 停止
 background.stop_named: 停止 %{name}
@@ -815,8 +815,8 @@ background.exit_code: 退出码
 background.output_truncated: 较早的输出已截断
 background.process_count: "%{count} 个后台进程"
 background.process_count_one: 1 个后台进程
-background.agent_count: "%{count} 个子智能体"
-background.agent_count_one: 1 个子智能体
+background.agent_count: "%{count} 个子代理"
+background.agent_count_one: 1 个子代理
 background.status.starting: 正在启动
 background.status.running: 正在运行
 background.status.monitoring: 正在监控

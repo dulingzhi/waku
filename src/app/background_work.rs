@@ -194,6 +194,28 @@ impl BackgroundWorkRegistry {
         }
     }
 
+    /// The text a surface shows for one card.
+    ///
+    /// `rendered_output` is a 10 Hz benched rendering of the output, not the
+    /// output itself. Reading only the cache means a surface opened between two
+    /// refreshes — or one whose cache was never filled, because the card
+    /// appeared while its turn was still running — shows "no output" while the
+    /// subagent's own words are already in [`Self::items`]. That is the exact
+    /// shape of "it only ever shows the prompt it was started with": the prompt
+    /// is the item's metadata row, and the transcript is this output.
+    ///
+    /// The cache stays first because it is the ANSI-stripped, bounded copy the
+    /// refresh path already paid for; the live item is the fallback that keeps a
+    /// freshly arrived transcript from being invisible.
+    fn output_for(&self, key: &BackgroundWorkKey) -> Option<SharedString> {
+        self.rendered_output.get(key).cloned().or_else(|| {
+            self.items
+                .get(key)
+                .and_then(|item| item.output.as_deref())
+                .map(|output| SharedString::from(strip_ansi(output)))
+        })
+    }
+
     fn append_output(&mut self, key: &BackgroundWorkKey, delta: &str) {
         if delta.is_empty() {
             return;
@@ -1247,9 +1269,7 @@ impl Waku {
                         ),
                 );
         };
-        let output = registry
-            .and_then(|registry| registry.rendered_output.get(key))
-            .cloned();
+        let output = registry.and_then(|registry| registry.output_for(key));
         let output_viewport = registry
             .and_then(|registry| registry.output_viewports.get(key))
             .cloned()
@@ -2499,6 +2519,64 @@ mod tests {
                 )),
             "an unmatched delta must not create a card"
         );
+    }
+
+    /// Output that has arrived but has not been through a cache refresh yet
+    /// must still be readable, or a surface opened in that window shows nothing
+    /// while the subagent is talking.
+    ///
+    /// This is the bug the user reported as "I only ever see the prompt it was
+    /// started with": the prompt is metadata and always renders, while the
+    /// transcript was reachable only through a cache that had not been filled.
+    #[test]
+    fn a_transcript_is_readable_before_its_cache_refresh() {
+        let mut registry = BackgroundWorkRegistry::default();
+        let key = BackgroundWorkKey::new(BackgroundWorkKind::Subagent, "a1");
+        let mut started = BackgroundWorkItem::new(
+            BackgroundWorkKind::Subagent,
+            "a1",
+            "Count 1 to 5 slowly",
+            BackgroundWorkStatus::Running,
+        );
+        started.background = true;
+        registry.apply(BackgroundWorkEvent::Upsert(started));
+        registry.apply(BackgroundWorkEvent::OutputDelta {
+            key: key.clone(),
+            delta: "1 — first\n2 — second\n".to_owned(),
+        });
+
+        // Nothing has refreshed the cache yet.
+        assert!(
+            !registry.rendered_output.contains_key(&key),
+            "the cache is empty at this point, which is what the surface used to read"
+        );
+        assert_eq!(
+            registry.output_for(&key).as_deref(),
+            Some("1 — first\n2 — second\n"),
+            "the arrived transcript must be readable before the cache catches up"
+        );
+    }
+
+    /// Once the cache has been filled it stays the source, so this fallback
+    /// cannot silently double-render or re-apply ANSI stripping differently.
+    #[test]
+    fn the_cache_still_wins_once_it_exists() {
+        let mut registry = BackgroundWorkRegistry::default();
+        let key = BackgroundWorkKey::new(BackgroundWorkKind::Subagent, "a1");
+        let mut started = BackgroundWorkItem::new(
+            BackgroundWorkKind::Subagent,
+            "a1",
+            "task",
+            BackgroundWorkStatus::Running,
+        );
+        started.background = true;
+        registry.apply(BackgroundWorkEvent::Upsert(started));
+        registry.apply(BackgroundWorkEvent::OutputDelta {
+            key: key.clone(),
+            delta: "raw".to_owned(),
+        });
+        assert!(registry.refresh_output_cache());
+        assert_eq!(registry.output_for(&key).as_deref(), Some("raw"));
     }
 
     #[test]

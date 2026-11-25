@@ -3616,6 +3616,50 @@ mod tests {
         assert!(state.pending_user_inputs.lock().contains_key("ask-1"));
     }
 
+    /// The whole captured stream, fed through the real entry point line by
+    /// line: this is the only shape the desktop ever sees. A capture that has
+    /// the subagent's text on the wire but produces no output for its card
+    /// means the pane is empty while the subagent works — the reported
+    /// symptom — no matter how correct the per-message tests look.
+    #[test]
+    fn a_real_capture_feeds_the_subagent_card_through_the_entry_point() {
+        let (events, event_rx, commands, _command_rx, turn, mut state) = harness();
+        let capture = include_str!("../../tests/fixtures/claude_subagent_capture.jsonl");
+
+        let mut output = String::new();
+        let mut statuses = Vec::new();
+        for line in capture.lines().filter(|line| !line.trim().is_empty()) {
+            let value: Value = serde_json::from_str(line).expect("capture line");
+            handle_message(&value, "s", &events, &commands, &turn, true, &mut state);
+            while let Ok(event) = event_rx.try_recv() {
+                if let DriverEvent::BackgroundWork(event) = event {
+                    match event {
+                        BackgroundWorkEvent::OutputDelta { delta, .. } => output.push_str(&delta),
+                        BackgroundWorkEvent::Upsert(item) => {
+                            statuses.push((item.title.clone(), item.status))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        assert!(
+            output.contains("1 — first") && output.contains("5 — fifth"),
+            "the subagent's words must reach its card from the real capture: {output:?}"
+        );
+        assert!(
+            statuses.iter().any(|(title, _)| title.contains("Count")),
+            "the card exists under the name the capture gave it: {statuses:?}"
+        );
+        assert!(
+            statuses
+                .iter()
+                .any(|(_, status)| *status == BackgroundWorkStatus::Completed),
+            "the settle notification marks it completed: {statuses:?}"
+        );
+    }
+
     #[test]
     fn the_result_message_settles_the_turn_exactly_once() {
         let (events, event_rx, commands, _command_rx, turn, mut state) = harness();

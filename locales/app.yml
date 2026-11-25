@@ -525,9 +525,9 @@ sidebar.more:
 sidebar.working:
   en: Working for %{elapsed}
 sidebar.delegates:
-  en: "%{count} subagents"
+  en: "%{count} parallel agents"
 sidebar.delegates_running:
-  en: "%{count} subagents · %{running} running"
+  en: "%{count} parallel agents · %{running} running"
 sidebar.just_now:
   en: just now
 sidebar.minutes_ago:
@@ -1536,9 +1536,9 @@ right_panel.terminal_unavailable:
 right_panel.terminal_unavailable_description:
   en: Open the Terminal surface again to start a shell
 right_panel.delegate:
-  en: Subagent
+  en: Parallel agent
 right_panel.delegate_unavailable:
-  en: Subagent unavailable
+  en: Parallel agent unavailable
 right_panel.delegate_unavailable_description:
   en: This conversation no longer exists
 right_panel.delegate_default_model:
@@ -1984,7 +1984,7 @@ transcript.you_stopped_after:
 transcript.working_for:
   en: Working for %{duration}
 transcript.delegates_heading:
-  en: Subagents
+  en: Parallel agents
 transcript.thinking:
   en: Thinking
 transcript.thought_for:
