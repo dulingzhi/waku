@@ -57,4 +57,25 @@ source: string, scope: string, cwd: string | null, } | { "type": "removeClaudeMa
 /**
  * Report what would be removed without removing it.
  */
-dryRun: boolean, scope: MarketplaceScope, cwd: string | null, } | { "type": "loadTaskState" } | { "type": "saveTaskState", projects: Array<Project>, liveSessionIds: Array<string>, sessions: Array<AgentSession>, } | { "type": "removeSession" } | { "type": "hydrateSession", sessionId: string, } | { "type": "searchSessionMessages", query: string, limit: number, } | { "type": "listProviderSessions", provider: ProviderKind, limit: number, } | { "type": "loadProviderSession", cursor: ProviderResumeCursor, cwd: string, } | { "type": "loadComposerDrafts" } | { "type": "saveComposerDrafts", drafts: ComposerDrafts, generation: number, } | { "type": "applyComposerDraftChanges", changes: Array<ComposerDraftChange>, } | { "type": "storeBlob", mimeType: string, bytes: string, } | { "type": "importAttachment", name: string, upload: AttachmentUpload, } | { "type": "importPathAttachment", path: string, } | { "type": "readBlob", reference: string, } | { "type": "readAttachment", reference: string, path: string, } | { "type": "sweepBlobs" } | { "type": "forkSessionFromResponse", turnCount: number, } | { "type": "rewindSessionToMessage", turnCount: number, } | { "type": "forkProviderSession", request: ProviderSessionForkRequest, } | { "type": "workspace", operation: WorkspaceOperation, } | { "type": "openTerminal", cwd: string, cols: number, rows: number, } | { "type": "writeTerminal", data: string, } | { "type": "resizeTerminal", cols: number, rows: number, } | { "type": "spawnDelegate", task: string, title?: string | null, } | { "type": "readDelegate", sessionId: string, } | { "type": "promptDelegate", sessionId: string, prompt: string, } | { "type": "closeTerminal" } | { "type": "closeSession" };
+dryRun: boolean, scope: MarketplaceScope, cwd: string | null, } | { "type": "loadTaskState" } | { "type": "saveTaskState", projects: Array<Project>, liveSessionIds: Array<string>, sessions: Array<AgentSession>, } | { "type": "removeSession" } | { "type": "hydrateSession", sessionId: string, } | { "type": "searchSessionMessages", query: string, limit: number, } | { "type": "listProviderSessions", provider: ProviderKind, limit: number, } | { "type": "loadProviderSession", cursor: ProviderResumeCursor, cwd: string, } | { "type": "loadComposerDrafts" } | { "type": "saveComposerDrafts", drafts: ComposerDrafts, generation: number, } | { "type": "applyComposerDraftChanges", changes: Array<ComposerDraftChange>, } | { "type": "storeBlob", mimeType: string, bytes: string, } | { "type": "importAttachment", name: string, upload: AttachmentUpload, } | { "type": "importPathAttachment", path: string, } | { "type": "readBlob", reference: string, } | { "type": "readAttachment", reference: string, path: string, } | { "type": "sweepBlobs" } | { "type": "forkSessionFromResponse", turnCount: number, } | { "type": "rewindSessionToMessage", turnCount: number, } | { "type": "forkProviderSession", request: ProviderSessionForkRequest, } | { "type": "workspace", operation: WorkspaceOperation, } | { "type": "openTerminal", cwd: string, cols: number, rows: number, } | { "type": "writeTerminal", data: string, } | { "type": "resizeTerminal", cols: number, rows: number, } | { "type": "spawnDelegate", task: string, title?: string | null,
+/**
+ * The identity to start this delegate as, by id from the catalog the
+ * lead was given. `None` starts an anonymous delegate that inherits
+ * the lead's provider and model, which is what an install with no
+ * identities defined has.
+ *
+ * The id travels rather than resolved instructions so the daemon
+ * stays the authority on which identities exist: a bridge cannot
+ * invent one by writing its own prompt into a spawn.
+ */
+persona?: string | null, } | { "type": "spawnTeam", team: string,
+/**
+ * The task every member is started on. A team is a set of roles, not a
+ * set of tasks, so the caller supplies the one job the group shares;
+ * each member applies its own identity to it.
+ */
+task: string,
+/**
+ * A short label prefixed onto each member's session title.
+ */
+title?: string | null, } | { "type": "readDelegate", sessionId: string, } | { "type": "promptDelegate", sessionId: string, prompt: string, } | { "type": "closeTerminal" } | { "type": "closeSession" };

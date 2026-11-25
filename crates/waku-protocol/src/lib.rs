@@ -61,6 +61,7 @@ pub use protocol::{
     DAEMON_SESSION_ENV, DAEMON_TOKEN_ENV, DELEGATE_EVENT_KIND, DaemonPairing, DaemonReady,
     DelegateEventPayload, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, ReplayCursor, Request,
     ResponseOutcome, ResponsePayload, RpcError, SequencedEvent, ServerMessage,
+    SpawnedDelegate,
     WireComputerToolRequest, WireDriverEvent, WireDriverStartOptions, WireSessionOptions,
 };
 pub use agents::{AgentCatalogProblem, AgentDefinition, AgentDefinitionScope, AgentsCatalog, AgentTeam};

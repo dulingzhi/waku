@@ -857,6 +857,7 @@ background.title: バックグラウンド
 background.description: エージェントが起動したプロセスとサブエージェントを確認します
 background.processes: バックグラウンドプロセス
 background.agents: サブエージェント
+background.parallel_agents: 並列エージェント
 background.process: プロセス
 background.monitor: モニター
 background.subagent: サブエージェント

@@ -2083,9 +2083,16 @@ impl Waku {
             return div().into_any_element();
         }
         let mut cards = Vec::with_capacity(delegates.len());
+        let catalog = self.agents_catalog.clone();
         for delegate in delegates {
             let status = delegate.label_for_status();
             let running = delegate.is_busy();
+            // The identity, when the delegate was started as one, so a card
+            // says which agent is speaking rather than only which task.
+            let identity = delegate
+                .agent_identity
+                .as_deref()
+                .and_then(|id| catalog.as_deref().and_then(|catalog| catalog.find(id)));
             // The live stream wins while a turn is still being written: the
             // transcript only holds turns that have already settled, so reading
             // it alone would leave the card frozen for the whole of the
@@ -2113,6 +2120,11 @@ impl Waku {
                 .unwrap_or_else(|| delegate.title.clone());
             let delegate_id = delegate.id;
             let weak = cx.entity().downgrade();
+            // A delegate started as an identity says so: the role label is what
+            // a reader scans for, and the card's own title is the task.
+            let role = identity
+                .map(|identity| identity.role.clone())
+                .unwrap_or_default();
             cards.push(
                 div()
                     .id(SharedString::from(format!("delegate-card-{delegate_id}")))
@@ -2135,7 +2147,11 @@ impl Waku {
                             .items_center()
                             .gap(px(6.0))
                             .child(icon(
-                                "icons/bot.svg",
+                                if identity.is_some() {
+                                    "icons/users.svg"
+                                } else {
+                                    "icons/bot.svg"
+                                },
                                 12.0,
                                 if running {
                                     theme.accent
@@ -2143,6 +2159,15 @@ impl Waku {
                                     theme.text_tertiary
                                 },
                             ))
+                            .when(!role.trim().is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(sp(10.5))
+                                        .text_color(theme.accent)
+                                        .child(SharedString::from(role)),
+                                )
+                            })
                             .child(
                                 div()
                                     .min_w_0()

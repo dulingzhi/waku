@@ -378,6 +378,103 @@ impl WakuBackend {
         })
     }
 
+    /// Starts one delegate per member of a saved team.
+    ///
+    /// Each member is an ordinary spawn, so a team is exactly the group its
+    /// members are and nothing is shared between them beyond the brief: no
+    /// process, no runtime, no transcript. A member that cannot start is
+    /// reported in its own slot rather than failing the call — one identity the
+    /// user deleted must not cost them the other four agents.
+    ///
+    /// The team's brief is prepended to every member's task. It is the context
+    /// they all need and none of them can see, since a delegate has no view of
+    /// the conversation that started it.
+    fn spawn_team(
+        &self,
+        lead_session: Uuid,
+        team_id: &str,
+        task: &str,
+        title: Option<String>,
+        events: EventSink,
+    ) -> anyhow::Result<ResponsePayload> {
+        let cwd = {
+            let state = self.task_state.lock();
+            let lead = state
+                .sessions
+                .iter()
+                .find(|session| session.id == lead_session)
+                .ok_or_else(|| anyhow!("the lead conversation is unavailable"))?;
+            lead.workspace
+                .path()
+                .map(Path::to_path_buf)
+                .or_else(|| {
+                    state
+                        .projects
+                        .iter()
+                        .find(|project| project.id == lead.project_id)
+                        .map(|project| project.path.clone())
+                })
+                .ok_or_else(|| anyhow!("the lead conversation has no workspace"))?
+        };
+        let catalog = crate::agents::load_catalog(Some(&cwd));
+        let team = catalog
+            .find_team(team_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no agent team named {team_id} is defined for this project"))?;
+        if team.members.is_empty() {
+            bail!("team {team_id} has no members to start");
+        }
+        let brief = team.brief.trim();
+        let member_task = if brief.is_empty() {
+            task.to_owned()
+        } else {
+            format!("{brief}\n\n{task}")
+        };
+        let mut spawned = Vec::with_capacity(team.members.len());
+        for member in &team.members {
+            let member_title = Some(match title.as_deref() {
+                Some(title) if !title.trim().is_empty() => format!("{title} · {member}"),
+                _ => member.clone(),
+            });
+            // Each member gets its own sink: `begin_runtime` registers per
+            // runtime, so sharing one would route every member's events to
+            // whichever delegate registered last.
+            let result = self.spawn_delegate(
+                lead_session,
+                member_task.clone(),
+                member_title,
+                Some(member.clone()),
+                events.clone(),
+            );
+            match result {
+                Ok(ResponsePayload::DelegateSpawned {
+                    session_id,
+                    runtime_id,
+                }) => spawned.push(waku_protocol::SpawnedDelegate {
+                    session_id,
+                    runtime_id,
+                    persona: member.clone(),
+                    error: None,
+                }),
+                Ok(_) => spawned.push(waku_protocol::SpawnedDelegate {
+                    session_id: Uuid::nil(),
+                    runtime_id: Uuid::nil(),
+                    persona: member.clone(),
+                    error: Some("the spawn returned an unexpected reply".into()),
+                }),
+                Err(error) => spawned.push(waku_protocol::SpawnedDelegate {
+                    session_id: Uuid::nil(),
+                    runtime_id: Uuid::nil(),
+                    persona: member.clone(),
+                    error: Some(format!("{error:#}")),
+                }),
+            }
+        }
+        Ok(ResponsePayload::DelegateTeamSpawned {
+            delegates: spawned,
+        })
+    }
+
     /// One delegate's live state, checked against the lead that asks.
     ///
     /// The two ids come from different places on purpose: the lead is the one
@@ -1407,6 +1504,9 @@ impl Backend for WakuBackend {
                 session_id: delegate,
                 prompt,
             } => self.prompt_delegate(session_id, delegate, prompt),
+            Command::SpawnTeam { team, task, title } => {
+                self.spawn_team(session_id, &team, &task, title, events)
+            }
             Command::CloseSession => {
                 let removed = {
                     let mut sessions = self.sessions.lock();
@@ -2483,6 +2583,7 @@ fn handle_driver_command(
         Command::AttachSession
         | Command::Start { .. }
         | Command::SpawnDelegate { .. }
+        | Command::SpawnTeam { .. }
         | Command::ReadDelegate { .. }
         | Command::PromptDelegate { .. }
         | Command::GetSettings
@@ -3387,4 +3488,45 @@ persona: None,
             } if id == "reviewer"
         ));
     }
+
+    /// A team spawn has to decode from what a bridge actually sends: a team id,
+    /// the shared task, and an optional title.
+    #[test]
+    fn a_team_spawn_decodes_from_its_wire_form() {
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "type": "spawnTeam",
+            "team": "review-crew",
+            "task": "audit the release",
+        }))
+        .expect("a team spawn has to decode");
+        assert!(matches!(
+            command,
+            Command::SpawnTeam {
+                ref team,
+                ref task,
+                title: None,
+            } if team == "review-crew" && task == "audit the release"
+        ));
+    }
+
+    /// A member that failed carries its own reason, so the caller can tell
+    /// which roles it actually has running.
+    #[test]
+    fn a_failed_team_member_reports_its_own_reason() {
+        let delegate = waku_protocol::SpawnedDelegate {
+            session_id: Uuid::nil(),
+            runtime_id: Uuid::nil(),
+            persona: "reviewer".into(),
+            error: Some("no agent identity named reviewer is defined for this project".into()),
+        };
+        assert_eq!(delegate.persona, "reviewer");
+        assert!(
+            delegate
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("reviewer")),
+            "the report has to name the member that failed: {delegate:?}"
+        );
+    }
 }
+

@@ -816,6 +816,7 @@ background.title: 后台工作
 background.description: 查看智能体启动的进程和子代理
 background.processes: 后台进程
 background.agents: 子代理
+background.parallel_agents: 并行代理
 background.process: 进程
 background.monitor: 监控
 background.subagent: 子代理

@@ -5420,6 +5420,15 @@ impl Waku {
                 .clone()
                 .unwrap_or_else(|| tr!("right_panel.delegate_default_model"))
         );
+        // Which agent this is, when it was started as one. Read from the
+        // catalog without blocking: an identity edited or removed since the
+        // spawn leaves the panel showing what the session recorded.
+        let identity = delegate.agent_identity.as_deref().and_then(|id| {
+            self.agents_catalog
+                .as_deref()
+                .and_then(|catalog| catalog.find(id))
+                .map(|identity| (identity.name.clone(), identity.role.clone()))
+        });
         // The live relay is what makes this panel usable while the agent is
         // still working; the transcript behind it lags by however long the
         // synced turn takes to settle.
@@ -5530,7 +5539,24 @@ impl Waku {
                             .flex()
                             .items_center()
                             .gap(px(6.0))
-                            .child(icon("icons/bot.svg", 13.0, theme.accent))
+                            .child(icon(
+                                if identity.is_some() {
+                                    "icons/users.svg"
+                                } else {
+                                    "icons/bot.svg"
+                                },
+                                13.0,
+                                theme.accent,
+                            ))
+                            .when_some(identity.as_ref().map(|(_, role)| role.clone()), |row, role| {
+                                row.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(sp(10.5))
+                                        .text_color(theme.accent)
+                                        .child(SharedString::from(role)),
+                                )
+                            })
                             .child(
                                 div()
                                     .min_w_0()

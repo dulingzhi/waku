@@ -513,6 +513,23 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         persona: Option<String>,
     },
+    /// Start one delegate per member of a saved team, so a whole group can be
+    /// set up in one call.
+    ///
+    /// The team is named by id and resolved by the daemon, for the same reason a
+    /// single spawn names its identity rather than its prompt: the daemon stays
+    /// the authority on which teams and identities exist, and a bridge cannot
+    /// invent a group by describing one.
+    SpawnTeam {
+        team: String,
+        /// The task every member is started on. A team is a set of roles, not a
+        /// set of tasks, so the caller supplies the one job the group shares;
+        /// each member applies its own identity to it.
+        task: String,
+        /// A short label prefixed onto each member's session title.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
     /// What one delegate the calling lead started is doing, and what it has
     /// said in its current turn.
     ///
@@ -616,6 +633,23 @@ pub const DELEGATE_EVENT_KIND: &str = "delegateEvent";
 pub struct DelegateEventPayload {
     pub session_id: Uuid,
     pub event: WireDriverEvent,
+}
+
+/// One delegate a team spawn started.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnedDelegate {
+    pub session_id: Uuid,
+    pub runtime_id: Uuid,
+    /// The identity it was started as, so the caller can report which members
+    /// actually started instead of assuming the whole team did.
+    pub persona: String,
+    /// Why this member could not start. A team is worth starting when most of
+    /// it can: one bad identity must not cost the caller the other four, so a
+    /// per-member failure is reported beside the successes rather than as one
+    /// error for the whole call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -794,6 +828,10 @@ pub enum ResponsePayload {
     DelegateSpawned {
         session_id: Uuid,
         runtime_id: Uuid,
+    },
+    /// One delegate per member of a team, each with its own identity.
+    DelegateTeamSpawned {
+        delegates: Vec<SpawnedDelegate>,
     },
     /// One delegate's live state, as the daemon sees it.
     ///

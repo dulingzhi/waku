@@ -60,6 +60,26 @@ struct BackgroundSummaryEntry {
     stop_focus: FocusHandle,
 }
 
+/// One delegate this conversation started, as the header popover lists it.
+///
+/// A delegate is not background work: it is an ordinary Waku task with its own
+/// runtime, its own transcript and its own identity. It appears in this popover
+/// because that is where a reader looks to see everything working for the
+/// conversation at once, not because it shares a lifetime with a shell process.
+#[derive(Clone)]
+pub(super) struct DelegateSummaryEntry {
+    pub(super) session_id: Uuid,
+    /// The identity it runs as, or `None` for a delegate started without one.
+    pub(super) identity: Option<String>,
+    pub(super) label: String,
+    pub(super) role: String,
+    pub(super) status: String,
+    pub(super) busy: bool,
+    /// The last thing it said, so the row answers "what is it doing" without
+    /// opening a panel.
+    pub(super) preview: Option<String>,
+}
+
 #[derive(Clone)]
 struct EnvironmentSummary {
     commit_status: Option<String>,
@@ -871,6 +891,64 @@ impl Waku {
         self.open_right_panel_surface(RightPanelSurface::BackgroundWork { key, title }, cx);
     }
 
+    /// The delegates one conversation started, newest activity first.
+    ///
+    /// Read from the session list rather than from a runtime: a delegate may
+    /// have been started by a lead in another process, so its own client need
+    /// never have attached to it. The identity is looked up for its label only;
+    /// a delegate whose identity was deleted later still shows its session
+    /// title.
+    fn delegate_summary_entries(&self, lead_session: Uuid) -> Vec<DelegateSummaryEntry> {
+        let catalog = self.agents_catalog.as_deref();
+        self.state
+            .sessions
+            .iter()
+            .filter(|session| session.parent_session_id == Some(lead_session))
+            .map(|session| {
+                let definition = session
+                    .agent_identity
+                    .as_deref()
+                    .and_then(|id| catalog.and_then(|catalog| catalog.find(id)));
+                let identity = session.agent_identity.clone();
+                let label = definition
+                    .map(|definition| definition.name.clone())
+                    .unwrap_or_else(|| {
+                        session
+                            .auto_title
+                            .clone()
+                            .filter(|title| !title.trim().is_empty())
+                            .unwrap_or_else(|| session.title.clone())
+                    });
+                let role = definition
+                    .map(|definition| definition.role.clone())
+                    .unwrap_or_default();
+                let preview = self
+                    .delegate_streams
+                    .get(&session.id)
+                    .map(|live| live.trim().to_owned())
+                    .filter(|text| !text.is_empty())
+                    .or_else(|| {
+                        session
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|message| message.role == MessageRole::Assistant)
+                            .map(|message| message.content.trim().to_owned())
+                            .filter(|text| !text.is_empty())
+                    });
+                DelegateSummaryEntry {
+                    session_id: session.id,
+                    identity,
+                    label,
+                    role,
+                    status: tr!(session.label_for_status()),
+                    busy: session.is_busy(),
+                    preview,
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn render_background_work_summary(&self, cx: &mut Context<Self>) -> AnyElement {
         let session = self.selected_session();
         let session_id = session.map(|session| session.id);
@@ -930,7 +1008,14 @@ impl Waku {
         let (processes, agents) = session_id
             .map(|session_id| self.background_work_counts(session_id))
             .unwrap_or_default();
-        let has_live_work = processes > 0 || agents > 0;
+        // The delegates this conversation started, which are not background
+        // work at all: they are Waku tasks of their own, reached from here so
+        // the popover answers "who is working for this conversation" in one
+        // place rather than splitting agents across two surfaces.
+        let delegates = session_id
+            .map(|session_id| self.delegate_summary_entries(session_id))
+            .unwrap_or_default();
+        let has_live_work = processes > 0 || agents > 0 || delegates.iter().any(|entry| entry.busy);
         let summary = background_work_count_summary(processes, agents);
         let theme = Theme::current(cx);
         let refresh_weak = cx.entity().downgrade();
@@ -1042,6 +1127,7 @@ impl Waku {
                     identifiers.clone(),
                     environment.clone(),
                     entries.clone(),
+                    delegates.clone(),
                     weak.clone(),
                     cx,
                 )
@@ -1678,6 +1764,7 @@ fn render_background_summary_card(
     identifiers: Option<TaskIdentifierSection>,
     environment: Option<EnvironmentSummary>,
     entries: Rc<Vec<BackgroundSummaryEntry>>,
+    delegates: Vec<DelegateSummaryEntry>,
     weak: WeakEntity<Waku>,
     cx: &mut App,
 ) -> AnyElement {
@@ -1702,6 +1789,7 @@ fn render_background_summary_card(
         .gap(px(8.0));
     let has_environment = environment.is_some();
     let has_background = !processes.is_empty() || !agents.is_empty();
+    let has_delegates = !delegates.is_empty();
     let has_identifiers = identifiers.is_some();
     if let Some(environment) = environment {
         content = content.child(render_environment_summary_section(
@@ -1734,7 +1822,18 @@ fn render_background_summary_card(
             &theme,
         ));
     }
-    if has_identifiers && (has_environment || has_background) {
+    if has_delegates {
+        if has_environment || has_background {
+            content = content.child(div().mx(px(8.0)).h(px(1.0)).bg(theme.border));
+        }
+        content = content.child(render_delegate_summary_section(
+            delegates,
+            handle.clone(),
+            weak.clone(),
+            &theme,
+        ));
+    }
+    if has_identifiers && (has_environment || has_background || has_delegates) {
         content = content.child(div().mx(px(8.0)).h(px(1.0)).bg(theme.border));
     }
     if let Some(identifiers) = identifiers {
@@ -2060,6 +2159,109 @@ fn render_background_summary_section(
                 .text_size(sp(13.0))
                 .text_color(theme.text_tertiary)
                 .child(label),
+        )
+        .child(rows)
+}
+
+/// The delegates a conversation started, each opening its panel.
+///
+/// Separate from the background-work rows because a delegate is not a process
+/// this conversation owns: it is a task, with its own provider, that the reader
+/// opens rather than stops from here.
+fn render_delegate_summary_section(
+    delegates: Vec<DelegateSummaryEntry>,
+    _handle: ContextMenuHandle,
+    weak: WeakEntity<Waku>,
+    theme: &Theme,
+) -> Div {
+    let mut rows = div().w_full().flex().flex_col().gap(px(2.0));
+    for entry in delegates {
+        let session_id = entry.session_id;
+        let open = weak.clone();
+        rows = rows.child(
+            div()
+                .id(SharedString::from(format!("delegate-summary-{session_id}")))
+                .w_full()
+                .px(px(8.0))
+                .py(px(5.0))
+                .rounded(px(6.0))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .cursor_default()
+                .hover(|style| style.bg(theme.overlay))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(icon(
+                            "icons/users.svg",
+                            12.0,
+                            if entry.busy {
+                                theme.accent
+                            } else {
+                                theme.text_tertiary
+                            },
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .text_size(sp(12.5))
+                                .text_color(theme.text)
+                                .child(SharedString::from(entry.label)),
+                        )
+                        .when(!entry.role.trim().is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(sp(10.5))
+                                    .text_color(theme.accent)
+                                    .child(SharedString::from(entry.role)),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(sp(11.0))
+                                .text_color(if entry.busy {
+                                    theme.accent
+                                } else {
+                                    theme.text_tertiary
+                                })
+                                .child(SharedString::from(entry.status)),
+                        ),
+                )
+                .when_some(entry.preview, |row, preview| {
+                    row.child(
+                        div()
+                            .text_size(sp(11.0))
+                            .line_height(sp(15.0))
+                            .text_color(theme.text_tertiary)
+                            .line_clamp(2)
+                            .child(SharedString::from(preview)),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    let _ = open.update(cx, |this, cx| {
+                        this.open_delegate_surface(session_id, cx);
+                    });
+                }),
+        );
+    }
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(5.0))
+        .child(
+            div()
+                .px(px(8.0))
+                .text_size(sp(13.0))
+                .text_color(theme.text_tertiary)
+                .child(tr!("background.parallel_agents")),
         )
         .child(rows)
 }

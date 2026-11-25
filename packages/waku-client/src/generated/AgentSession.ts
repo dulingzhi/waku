@@ -85,6 +85,15 @@ provider_session_id?: string | null,
  */
 parent_session_id?: string | null,
 /**
+ * The agent identity this session was started as, by catalog id.
+ *
+ * Only a delegate has one, and only when its lead named an identity when
+ * spawning it. Kept on the session rather than looked up from the catalog
+ * at render time: the identity may be edited or deleted later, and what a
+ * finished task ran as is a fact about that task.
+ */
+agent_identity?: string | null,
+/**
  * Not stored in the session JSON — these are rows in the `messages`
  * table, reattached when the session is hydrated.
  */

@@ -72,6 +72,33 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "spawn_team",
+            "description": "Start one delegate per member of a saved team, each running as its own identity. Use this when a job needs several roles at once; the members share the team's brief and each applies its own role to the same task.",
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "team": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Id of a team from the roster you were given."
+                    },
+                    "task": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The job every member works on, written as if it had no other context."
+                    },
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                        "description": "Short label prefixed onto each member's session title."
+                    }
+                },
+                "required": ["team", "task"]
+            }
+        }),
+        json!({
             "name": "send_to_agent",
             "description": "Send another instruction to a running delegate. It joins the delegate's current turn as a steer, so it can redirect work already in progress.",
             "inputSchema": {
@@ -229,6 +256,7 @@ fn call_tool(params: &Value) -> anyhow::Result<Value> {
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
     match name {
         "spawn_agent" => spawn_agent(&arguments),
+        "spawn_team" => spawn_team(&arguments),
         "send_to_agent" => send_to_agent(&arguments),
         "check_agent" => check_agent(&arguments),
         "wait_agent" => wait_agent(&arguments),
@@ -325,6 +353,64 @@ fn spawn_agent(arguments: &Value) -> anyhow::Result<Value> {
         });
         result
     })
+}
+
+/// Starts one delegate per member of a saved team.
+///
+/// A member that could not start is reported as such, because the caller has to
+/// know which of the roles it asked for are actually running: a report that
+/// says "the team started" while two of five failed would make the lead wait
+/// for answers that are never coming.
+fn spawn_team(arguments: &Value) -> anyhow::Result<Value> {
+    let team = arguments
+        .get("team")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|team| !team.is_empty())
+        .ok_or_else(|| anyhow!("team is required"))?;
+    let task = arguments
+        .get("task")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|task| !task.is_empty())
+        .ok_or_else(|| anyhow!("task is required"))?;
+    let title = arguments
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned);
+    let (lead, runtime, client) = connect()?;
+    let spawned = client.request(
+        lead,
+        runtime,
+        waku_client::Command::SpawnTeam {
+            team: team.to_owned(),
+            task: task.to_owned(),
+            title,
+        },
+    )?;
+    let waku_client::ResponsePayload::DelegateTeamSpawned { delegates } = spawned else {
+        return Err(anyhow!("the daemon did not report the team's delegates"));
+    };
+    let mut started = Vec::new();
+    let mut failed = Vec::new();
+    for delegate in delegates {
+        if let Some(error) = delegate.error {
+            failed.push(format!("{}: {error}", delegate.persona));
+        } else {
+            started.push(format!("{} ({})", delegate.persona, delegate.session_id));
+        }
+    }
+    let mut text = if started.is_empty() {
+        format!("no member of team {team} could start")
+    } else {
+        format!("started {} of team {team}: {}", started.len(), started.join(", "))
+    };
+    if !failed.is_empty() {
+        text.push_str(&format!("\nfailed: {}", failed.join("; ")));
+    }
+    Ok(text_result(text))
 }
 
 fn send_to_agent(arguments: &Value) -> anyhow::Result<Value> {
@@ -515,7 +601,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            ["spawn_agent", "send_to_agent", "check_agent", "wait_agent"]
+            ["spawn_agent", "spawn_team", "send_to_agent", "check_agent", "wait_agent"]
         );
     }
 

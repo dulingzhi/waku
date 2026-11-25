@@ -1669,6 +1669,8 @@ background.processes:
   en: Background processes
 background.agents:
   en: Subagents
+background.parallel_agents:
+  en: Parallel agents
 background.process:
   en: Process
 background.monitor:
