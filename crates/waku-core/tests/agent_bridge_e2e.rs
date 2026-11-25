@@ -161,6 +161,58 @@ fn a_real_bridge_creates_a_delegate_through_the_real_daemon() {
         "the delegate must be stored, not only resident"
     );
 
+    // A delegate the lead cannot read is only half a feature, so the same real
+    // bridge is asked about the task the same real daemon started. The check is
+    // deliberately "not the stub": the old tool answered every id with
+    // "unknown", which is what this replaces.
+    let checked = call(serde_json::json!({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "check_agent", "arguments": {"agent_id": delegate_id.to_string()}}
+    }));
+    assert!(
+        checked.get("error").is_none(),
+        "the bridge refused to read its own delegate: {checked}"
+    );
+    let checked_text = checked["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !checked_text.contains("unknown"),
+        "check_agent is still the placeholder: {checked_text}"
+    );
+    assert!(
+        checked_text.contains(&delegate_id.to_string()),
+        "a report has to name the agent it is about: {checked_text}"
+    );
+    assert!(
+        ["still working", "finished", "failed"]
+            .iter()
+            .any(|state| checked_text.contains(state)),
+        "a report has to carry the delegate's state: {checked_text}"
+    );
+
+    // Steering has to reach the daemon too. Which of the two shapes it takes is
+    // the daemon's decision, so both answers are accepted and the old echo is
+    // not.
+    let steered = call(serde_json::json!({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "send_to_agent", "arguments": {
+            "agent_id": delegate_id.to_string(),
+            "message": "also list the benches"
+        }}
+    }));
+    assert!(
+        steered.get("error").is_none(),
+        "the bridge could not reach its own delegate: {steered}"
+    );
+    let steered_text = steered["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        steered_text.contains("steered") || steered_text.contains("started a new turn"),
+        "send_to_agent has to report how the message landed: {steered_text}"
+    );
+
     let _ = bridge.kill();
     let _ = bridge.wait();
     stop.store(true, Ordering::Release);

@@ -54,8 +54,44 @@ type CheckpointCaptureLocks = Mutex<HashMap<(PathBuf, Uuid, usize), Arc<Mutex<()
 pub type AgentBridgeMinter =
     Arc<dyn Fn(Uuid, Uuid) -> String + Send + Sync>;
 
+/// What the daemon remembers about one delegate it started.
+///
+/// A delegate has no guaranteed client: it is an ordinary task, but the lead
+/// runs inside a provider process and may be the only thing watching it. The
+/// provider's own event stream is therefore the only place a delegate's reply
+/// is guaranteed to pass through, and this is what keeps it: the forwarding
+/// thread folds the stream in here as it arrives.
+#[derive(Clone)]
+struct DelegateRecord {
+    /// The conversation that started this delegate. Leads may read and steer
+    /// only their own delegates, so this is the authority check — not the
+    /// caller's word for which task it is allowed to address.
+    lead: Uuid,
+    /// The runtime the delegate was started under, so a prompt reaches the
+    /// process the lead is actually reading rather than a restarted one.
+    runtime_id: Uuid,
+    /// The delegate's own event stream, so a turn the daemon opens on the
+    /// lead's behalf is announced the way a submitted prompt always is. Without
+    /// it a client watching the task would show the answer with no question
+    /// above it.
+    sink: EventSink,
+    status: SessionStatus,
+    /// Everything the delegate has said in its current turn. Cleared when a
+    /// turn opens, so a steer does not return the previous answer alongside the
+    /// new one.
+    reply: String,
+    /// Why the last turn failed. Never set on a successful turn: a delegate
+    /// that worked must not carry a stale complaint into its next report.
+    failure: Option<String>,
+}
+
 pub struct WakuBackend {
     sessions: Mutex<HashMap<Uuid, (Uuid, DriverHandle)>>,
+    /// The delegates this daemon started, by their own session id. Kept in
+    /// memory on purpose: a delegate is only addressable while its runtime is
+    /// alive, which is the same lifetime as the scoped token that can ask about
+    /// it — a daemon restart ends both.
+    delegates: Arc<Mutex<HashMap<Uuid, DelegateRecord>>>,
     /// Mints the scoped capability a delegate-driving provider is launched
     /// with. Installed by the daemon once its server exists, because the token
     /// table lives there; a backend without one simply never delegates.
@@ -96,6 +132,7 @@ impl WakuBackend {
             .to_owned();
         Ok(Self {
             sessions: Mutex::new(HashMap::new()),
+            delegates: Arc::new(Mutex::new(HashMap::new())),
             terminals: Mutex::new(HashMap::new()),
             #[cfg(all(test, unix))]
             terminal_shell: None,
@@ -223,10 +260,27 @@ impl WakuBackend {
         let handle = driver::start_local(lead.provider, options, event_sender)?;
 
         let delegate_sink = events.begin_runtime(session_id, runtime_id);
+        self.delegates.lock().insert(
+            session_id,
+            DelegateRecord {
+                lead: lead_session,
+                runtime_id,
+                sink: delegate_sink.clone(),
+                status: SessionStatus::Working,
+                reply: String::new(),
+                failure: None,
+            },
+        );
+        // The map is shared rather than borrowed: the lead asks about this
+        // delegate later, from another process, long after `spawn_delegate`
+        // returned — and a thread holding `&self` would tie the record's
+        // lifetime to a backend that may be dropped first.
+        let delegates = self.delegates.clone();
         std::thread::Builder::new()
             .name(format!("waku-daemon-events-{session_id}"))
             .spawn(move || {
                 while let Ok(event) = event_receiver.recv() {
+                    record_delegate_event(&delegates, session_id, &event);
                     let wire = event_to_wire(event).unwrap_or_else(|error| {
                         WireDriverEvent::new(
                             "error",
@@ -261,6 +315,7 @@ impl WakuBackend {
                 state.sessions.retain(|session| session.id != session_id);
                 drop(state);
                 self.sessions.lock().remove(&session_id);
+                self.delegates.lock().remove(&session_id);
                 return Err(error).context("could not save the delegated task");
             }
         }
@@ -270,6 +325,99 @@ impl WakuBackend {
         Ok(ResponsePayload::DelegateSpawned {
             session_id,
             runtime_id,
+        })
+    }
+
+    /// One delegate's live state, checked against the lead that asks.
+    ///
+    /// The two ids come from different places on purpose: the lead is the one
+    /// the caller's token is scoped to, and the delegate is the one the command
+    /// names. Only the daemon knows which leads own which delegates, so this is
+    /// where that question is answered — a bridge cannot widen its reach by
+    /// guessing a session id.
+    fn delegate_report(&self, lead: Uuid, delegate: Uuid) -> anyhow::Result<ResponsePayload> {
+        let (status, reply, failure) = {
+            let delegates = self.delegates.lock();
+            let record = delegates
+                .get(&delegate)
+                .ok_or_else(|| anyhow!("agent {delegate} was not started by this conversation"))?;
+            if record.lead != lead {
+                bail!("agent {delegate} was not started by this conversation");
+            }
+            (record.status, record.reply.clone(), record.failure.clone())
+        };
+        let title = self
+            .task_state
+            .lock()
+            .sessions
+            .iter()
+            .find(|session| session.id == delegate)
+            .map(|session| session.title.clone())
+            .unwrap_or_default();
+        Ok(ResponsePayload::DelegateReport {
+            session_id: delegate,
+            title,
+            status,
+            reply,
+            failure,
+        })
+    }
+
+    /// Adds an instruction to a delegate, letting the daemon decide how.
+    ///
+    /// A delegate that is still working gets a steer, so a correction lands in
+    /// the turn it was meant for; an idle one needs a new turn, because a steer
+    /// into a finished turn is refused by every provider. Only the daemon sees
+    /// the delegate's live state, so this choice cannot be made by the caller.
+    fn prompt_delegate(
+        &self,
+        lead: Uuid,
+        delegate: Uuid,
+        prompt: String,
+    ) -> anyhow::Result<ResponsePayload> {
+        let (runtime_id, running, sink) = {
+            let delegates = self.delegates.lock();
+            let record = delegates
+                .get(&delegate)
+                .ok_or_else(|| anyhow!("agent {delegate} was not started by this conversation"))?;
+            if record.lead != lead {
+                bail!("agent {delegate} was not started by this conversation");
+            }
+            (record.runtime_id, record.status.is_busy(), record.sink.clone())
+        };
+        let driver = {
+            let sessions = self.sessions.lock();
+            sessions
+                .get(&delegate)
+                .filter(|(active_runtime_id, _)| *active_runtime_id == runtime_id)
+                .map(|(_, driver)| driver.clone())
+                .ok_or_else(|| anyhow!("agent {delegate} is no longer running"))?
+        };
+        if running {
+            driver.steer(prompt);
+        } else {
+            // A turn the daemon opens is announced the way a client's own
+            // submission is: every attached viewer mirrors the question from
+            // this event, so the transcript they save describes the turn the
+            // provider is about to run.
+            sink.send(event_to_wire(DriverEvent::PromptSubmitted {
+                message: prompt.clone(),
+                turn_id: Uuid::new_v4(),
+                message_id: Uuid::new_v4(),
+            })?)?;
+            driver.prompt(prompt);
+            // The record turns over here rather than waiting for the provider's
+            // own `TurnStarted`, so a report asked for immediately after this
+            // call does not answer with the previous turn's text.
+            if let Some(record) = self.delegates.lock().get_mut(&delegate) {
+                record.status = SessionStatus::Working;
+                record.reply.clear();
+                record.failure = None;
+            }
+        }
+        Ok(ResponsePayload::DelegatePrompted {
+            session_id: delegate,
+            steered: running,
         })
     }
 
@@ -1160,6 +1308,13 @@ impl Backend for WakuBackend {
             Command::SpawnDelegate { task, title } => {
                 self.spawn_delegate(session_id, task, title, events)
             }
+            Command::ReadDelegate {
+                session_id: delegate,
+            } => self.delegate_report(session_id, delegate),
+            Command::PromptDelegate {
+                session_id: delegate,
+                prompt,
+            } => self.prompt_delegate(session_id, delegate, prompt),
             Command::CloseSession => {
                 let removed = {
                     let mut sessions = self.sessions.lock();
@@ -2072,6 +2227,59 @@ fn fork_provider_session(
 /// delegate safe can be checked without launching a provider: it inherits the
 /// lead's provider, workspace, and options so the user can open and read it as
 /// an ordinary task, and it starts with no transcript of its own.
+/// Folds one provider event into what the daemon remembers about a delegate.
+///
+/// Only three things matter to a lead reading a delegate: whether it is still
+/// working, what it has said in this turn, and how it failed. Tool calls,
+/// reasoning and checkpoints belong to the transcript, which whoever opens the
+/// task projects for itself.
+///
+/// The success/failure decision lives here and nowhere else, so a successful
+/// turn can never leave an earlier turn's complaint attached to a delegate that
+/// is now fine.
+fn record_delegate_event(
+    delegates: &Mutex<HashMap<Uuid, DelegateRecord>>,
+    session_id: Uuid,
+    event: &DriverEvent,
+) {
+    let mut delegates = delegates.lock();
+    let Some(record) = delegates.get_mut(&session_id) else {
+        return;
+    };
+    match event {
+        DriverEvent::TurnStarted => {
+            record.status = SessionStatus::Working;
+            record.reply.clear();
+            record.failure = None;
+        }
+        DriverEvent::TextDelta(text) => record.reply.push_str(text),
+        DriverEvent::TurnFinished { success, summary } => {
+            if *success {
+                record.status = SessionStatus::Idle;
+                record.failure = None;
+            } else {
+                record.status = SessionStatus::Failed;
+                record.failure = Some(
+                    summary
+                        .clone()
+                        .unwrap_or_else(|| "the delegate's turn failed".to_owned()),
+                );
+            }
+        }
+        DriverEvent::Error(error) => {
+            record.status = SessionStatus::Failed;
+            record.failure = Some(error.clone());
+        }
+        // A delegate that dies mid-turn must stop reporting as working; one
+        // whose turn had already settled is simply finished.
+        DriverEvent::ProcessExited if record.status.is_busy() => {
+            record.status = SessionStatus::Failed;
+            record.failure = Some("the delegate's process exited".to_owned());
+        }
+        _ => {}
+    }
+}
+
 fn delegated_session(lead: &AgentSession, title: Option<String>) -> AgentSession {
     let mut delegate = AgentSession::new(lead.project_id, lead.provider);
     delegate.title = title
@@ -2153,6 +2361,8 @@ fn handle_driver_command(
         Command::AttachSession
         | Command::Start { .. }
         | Command::SpawnDelegate { .. }
+        | Command::ReadDelegate { .. }
+        | Command::PromptDelegate { .. }
         | Command::GetSettings
         | Command::UpdateSettings { .. }
         | Command::ProbeProvider { .. }
@@ -2572,6 +2782,240 @@ mod tests {
             format!("{error}").contains("unavailable"),
             "the refusal has to name the reason: {error}"
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn a_delegate_started_by(lead: Uuid) -> (Arc<Mutex<HashMap<Uuid, DelegateRecord>>>, Uuid) {
+        let delegates = Arc::new(Mutex::new(HashMap::new()));
+        let delegate = Uuid::new_v4();
+        delegates.lock().insert(
+            delegate,
+            DelegateRecord {
+                lead,
+                runtime_id: Uuid::new_v4(),
+                sink: EventSink::for_test(),
+                status: SessionStatus::Working,
+                reply: String::new(),
+                failure: None,
+            },
+        );
+        (delegates, delegate)
+    }
+
+    fn recorded(
+        delegates: &Mutex<HashMap<Uuid, DelegateRecord>>,
+        delegate: Uuid,
+    ) -> DelegateRecord {
+        delegates.lock().get(&delegate).cloned().unwrap()
+    }
+
+    /// What a lead reads is the text the delegate's own stream produced.
+    ///
+    /// The daemon is the only observer a delegate is guaranteed to have, so this
+    /// record is where its words exist between the provider emitting them and
+    /// somebody opening the task. Assembling them out of deltas — rather than
+    /// keeping the last one — is what makes a streamed answer readable at all.
+    #[test]
+    fn a_delegate_report_carries_what_the_provider_streamed() {
+        let (delegates, delegate) = a_delegate_started_by(Uuid::new_v4());
+
+        record_delegate_event(
+            &delegates,
+            delegate,
+            &DriverEvent::TextDelta("Tuesday".into()),
+        );
+        record_delegate_event(
+            &delegates,
+            delegate,
+            &DriverEvent::TextDelta(", the 25th".into()),
+        );
+
+        let report = recorded(&delegates, delegate);
+        assert_eq!(report.reply, "Tuesday, the 25th");
+        assert_eq!(report.status, SessionStatus::Working);
+        assert!(report.failure.is_none());
+
+        record_delegate_event(
+            &delegates,
+            delegate,
+            &DriverEvent::TurnFinished {
+                success: true,
+                summary: Some("answered the question".into()),
+            },
+        );
+
+        let report = recorded(&delegates, delegate);
+        assert_eq!(report.status, SessionStatus::Idle);
+        assert_eq!(report.reply, "Tuesday, the 25th");
+    }
+
+    /// A second turn must not hand back the first turn's answer.
+    ///
+    /// A lead that steers a finished delegate and then reads it again would
+    /// otherwise see the old answer appended to the new one, which reads as if
+    /// the delegate had answered the new instruction twice.
+    #[test]
+    fn a_new_turn_clears_what_the_lead_already_read() {
+        let (delegates, delegate) = a_delegate_started_by(Uuid::new_v4());
+        record_delegate_event(
+            &delegates,
+            delegate,
+            &DriverEvent::TextDelta("first".into()),
+        );
+        record_delegate_event(
+            &delegates,
+            delegate,
+            &DriverEvent::TurnFinished {
+                success: true,
+                summary: None,
+            },
+        );
+
+        record_delegate_event(&delegates, delegate, &DriverEvent::TurnStarted);
+        assert_eq!(recorded(&delegates, delegate).reply, "");
+        record_delegate_event(
+            &delegates,
+            delegate,
+            &DriverEvent::TextDelta("second".into()),
+        );
+        assert_eq!(recorded(&delegates, delegate).reply, "second");
+    }
+
+    /// Only a failed turn carries a reason, and success clears the old one.
+    ///
+    /// The rule is enforced by the one function that writes the record, because
+    /// a delegate that recovered must not drag an earlier complaint into every
+    /// later report — a lead would read it as a current failure.
+    #[test]
+    fn a_failed_turn_keeps_its_reason_and_a_good_one_drops_it() {
+        let (delegates, delegate) = a_delegate_started_by(Uuid::new_v4());
+
+        record_delegate_event(
+            &delegates,
+            delegate,
+            &DriverEvent::TurnFinished {
+                success: false,
+                summary: Some("context window exhausted".into()),
+            },
+        );
+        let failed = recorded(&delegates, delegate);
+        assert_eq!(failed.status, SessionStatus::Failed);
+        assert_eq!(failed.failure.as_deref(), Some("context window exhausted"));
+
+        record_delegate_event(&delegates, delegate, &DriverEvent::TurnStarted);
+        record_delegate_event(
+            &delegates,
+            delegate,
+            &DriverEvent::TurnFinished {
+                success: true,
+                summary: Some("recovered".into()),
+            },
+        );
+        let recovered = recorded(&delegates, delegate);
+        assert_eq!(recovered.status, SessionStatus::Idle);
+        assert!(
+            recovered.failure.is_none(),
+            "a successful turn must not keep an earlier failure attached"
+        );
+    }
+
+    /// A delegate whose process dies mid-turn must stop reporting as working.
+    ///
+    /// Otherwise `wait_agent` would poll a delegate that can never answer until
+    /// its own deadline, and the lead would learn nothing it could act on.
+    #[test]
+    fn a_delegate_whose_process_exits_is_reported_as_failed() {
+        let (delegates, delegate) = a_delegate_started_by(Uuid::new_v4());
+        record_delegate_event(&delegates, delegate, &DriverEvent::TextDelta("half".into()));
+
+        record_delegate_event(&delegates, delegate, &DriverEvent::ProcessExited);
+
+        let report = recorded(&delegates, delegate);
+        assert_eq!(report.status, SessionStatus::Failed);
+        assert_eq!(report.reply, "half");
+        assert!(report.failure.is_some(), "the lead has to learn why");
+    }
+
+    /// Events for a session the daemon never delegated are ignored, not
+    /// attributed to whichever record happens to be nearby.
+    #[test]
+    fn events_for_an_unknown_session_touch_no_record() {
+        let (delegates, delegate) = a_delegate_started_by(Uuid::new_v4());
+        record_delegate_event(
+            &delegates,
+            Uuid::new_v4(),
+            &DriverEvent::TextDelta("nope".into()),
+        );
+        assert_eq!(recorded(&delegates, delegate).reply, "");
+    }
+
+    fn a_backend_in(root: &std::path::Path) -> WakuBackend {
+        let store = StateStore::new(root.join("app.db"));
+        let settings = DaemonSettingsStore::open(root.join("daemon.json")).unwrap();
+        WakuBackend::new(settings, store).unwrap()
+    }
+
+    /// One lead cannot read another lead's delegate.
+    ///
+    /// The delegate id travels in the command while the token stays scoped to
+    /// the lead, so this check is the only thing standing between a bridge and
+    /// every other task the daemon knows. A guessable id must not be enough.
+    #[test]
+    fn reading_another_leads_delegate_is_refused() {
+        let root = std::env::temp_dir().join(format!("waku-delegate-read-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = a_backend_in(&root);
+
+        let other_lead = Uuid::new_v4();
+        let delegate = Uuid::new_v4();
+        backend.delegates.lock().insert(
+            delegate,
+            DelegateRecord {
+                lead: other_lead,
+                runtime_id: Uuid::new_v4(),
+                sink: EventSink::for_test(),
+                status: SessionStatus::Working,
+                reply: "someone else's work".into(),
+                failure: None,
+            },
+        );
+
+        let refused = backend
+            .delegate_report(Uuid::new_v4(), delegate)
+            .expect_err("a delegate belongs to the lead that started it");
+        assert!(
+            format!("{refused}").contains("not started by this conversation"),
+            "the refusal has to say what was wrong: {refused}"
+        );
+
+        // The owner still reads it: the check must not refuse everyone.
+        let owns = backend
+            .delegate_report(other_lead, delegate)
+            .expect("the lead that started it may read it");
+        let ResponsePayload::DelegateReport { reply, .. } = owns else {
+            panic!("the daemon did not answer with a report");
+        };
+        assert_eq!(reply, "someone else's work");
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// An id the daemon never handed out must be reported as unknown rather
+    /// than as a delegate with nothing to say.
+    #[test]
+    fn reading_an_agent_this_daemon_never_started_is_refused() {
+        let root = std::env::temp_dir().join(format!("waku-delegate-unknown-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = a_backend_in(&root);
+
+        let refused = backend
+            .delegate_report(Uuid::new_v4(), Uuid::new_v4())
+            .expect_err("an unknown agent has no state to report");
+        assert!(
+            format!("{refused}").contains("not started by this conversation"),
+            "the refusal has to name the reason: {refused}"
+        );
+
         std::fs::remove_dir_all(root).ok();
     }
 

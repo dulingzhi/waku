@@ -27,6 +27,14 @@ use waku_client::{
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
+/// How long `wait_agent` blocks before handing the delegate back with whatever
+/// it has. A model turn can be long, but an unbounded wait would hold the lead's
+/// tool call open forever if the delegate never settles.
+const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+/// Bounded by the turn it watches, not by a tick: the delegate's state is read
+/// from the daemon each time rather than cached here.
+const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+
 const SERVER_INSTRUCTIONS: &str = "This server runs Waku sessions for a lead agent. \
 Use `spawn_agent` to start a delegate on a self-contained task, then `check_agent` \
 or `wait_agent` to read what it produced. `spawn_agent` returns immediately — start \
@@ -278,34 +286,155 @@ fn spawn_agent(arguments: &Value) -> anyhow::Result<Value> {
 }
 
 fn send_to_agent(arguments: &Value) -> anyhow::Result<Value> {
-    let agent_id = arguments
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("agent_id is required"))?;
+    let agent_id = agent_id(arguments)?;
     let message = arguments
         .get("message")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|message| !message.is_empty())
         .ok_or_else(|| anyhow!("message is required"))?;
-    let _ = (agent_id, message);
-    Ok(text_result(format!("sent to {agent_id}")))
+    let (lead, runtime, client) = connect()?;
+    // Which of the two shapes this takes is the daemon's call: only it knows
+    // whether the delegate's turn is still open, and a steer into a finished
+    // turn is refused by every provider.
+    let prompted = client.request(
+        lead,
+        runtime,
+        waku_client::Command::PromptDelegate {
+            session_id: agent_id,
+            prompt: message.to_owned(),
+        },
+    )?;
+    let waku_client::ResponsePayload::DelegatePrompted { steered, .. } = prompted else {
+        return Err(anyhow!("the daemon did not report how the message landed"));
+    };
+    Ok(text_result(if steered {
+        format!("agent {agent_id} was working, so the message steered its running turn")
+    } else {
+        format!("agent {agent_id} was idle, so the message started a new turn")
+    }))
 }
 
 fn check_agent(arguments: &Value) -> anyhow::Result<Value> {
-    let agent_id = arguments
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("agent_id is required"))?;
-    Ok(text_result(format!("{agent_id}: unknown")))
+    let agent_id = agent_id(arguments)?;
+    let (lead, runtime, client) = connect()?;
+    let report = read_delegate(&client, lead, runtime, agent_id)?;
+    Ok(text_result(describe_delegate(&report)))
 }
 
+/// Blocks until the delegate's turn settles, then returns what it wrote.
+///
+/// Polled rather than pushed: the bridge is a synchronous MCP server answering
+/// one tool call at a time, so there is nowhere to put a subscription that
+/// outlives this call. A poll every few hundred milliseconds is cheap next to a
+/// model turn, and it keeps the state it reads authoritative — the daemon's own
+/// record, not a copy this process made.
 fn wait_agent(arguments: &Value) -> anyhow::Result<Value> {
-    let agent_id = arguments
+    let agent_id = agent_id(arguments)?;
+    let (lead, runtime, client) = connect()?;
+    let deadline = std::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        let report = read_delegate(&client, lead, runtime, agent_id)?;
+        if !report.status.is_busy() || std::time::Instant::now() >= deadline {
+            return Ok(text_result(describe_delegate(&report)));
+        }
+        std::thread::sleep(WAIT_POLL_INTERVAL);
+    }
+}
+
+fn read_delegate(
+    client: &DaemonClient,
+    lead: uuid::Uuid,
+    runtime: uuid::Uuid,
+    agent_id: uuid::Uuid,
+) -> anyhow::Result<DelegateReport> {
+    let report = client.request(
+        lead,
+        runtime,
+        waku_client::Command::ReadDelegate {
+            session_id: agent_id,
+        },
+    )?;
+    match report {
+        waku_client::ResponsePayload::DelegateReport {
+            session_id,
+            title,
+            status,
+            reply,
+            failure,
+        } => Ok(DelegateReport {
+            session_id,
+            title,
+            status,
+            reply,
+            failure,
+        }),
+        _ => Err(anyhow!("the daemon did not report on that agent")),
+    }
+}
+
+/// One delegate as the bridge reads it.
+///
+/// The wire variant is matched once, on the way in, so formatting has a single
+/// input shape rather than a `let … else` at every call site.
+struct DelegateReport {
+    session_id: uuid::Uuid,
+    title: String,
+    status: waku_client::model::SessionStatus,
+    reply: String,
+    failure: Option<String>,
+}
+
+/// How a report reads to the lead.
+///
+/// State first, because it decides whether waiting longer is worth it; then the
+/// reason it failed, which is what the lead has to act on; then the delegate's
+/// own words, which are what it asked for.
+fn describe_delegate(report: &DelegateReport) -> String {
+    let label = match report.status {
+        waku_client::model::SessionStatus::Idle => "finished",
+        waku_client::model::SessionStatus::Failed => "failed",
+        _ => "still working",
+    };
+    let title = report.title.trim();
+    let mut text = if title.is_empty() {
+        format!("agent {} ({label})", report.session_id)
+    } else {
+        format!("agent {} \"{title}\" ({label})", report.session_id)
+    };
+    if let Some(failure) = report
+        .failure
+        .as_deref()
+        .map(str::trim)
+        .filter(|failure| !failure.is_empty())
+    {
+        text.push_str(&format!("\nreason: {failure}"));
+    }
+    text.push('\n');
+    let reply = report.reply.trim();
+    if reply.is_empty() {
+        text.push_str(if report.status.is_busy() {
+            "it has not written anything yet"
+        } else {
+            "it finished without writing anything"
+        });
+    } else {
+        text.push_str(reply);
+    }
+    text
+}
+
+/// The agent id a tool call names.
+///
+/// Parsed here so every tool refuses a made-up id the same way, instead of
+/// sending the daemon a string it would have to interpret.
+fn agent_id(arguments: &Value) -> anyhow::Result<uuid::Uuid> {
+    let raw = arguments
         .get("agent_id")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("agent_id is required"))?;
-    Ok(text_result(format!("{agent_id}: no reply")))
+    uuid::Uuid::parse_str(raw.trim())
+        .with_context(|| format!("agent_id {raw:?} is not one spawn_agent returned"))
 }
 
 fn write_message(output: &mut impl Write, message: &Value) -> anyhow::Result<()> {
@@ -394,5 +523,70 @@ mod tests {
         )
         .unwrap();
         assert!(output.is_empty(), "notifications are not answered");
+    }
+
+    /// A report leads with the state, then the reason it failed, then the
+    /// delegate's own words.
+    ///
+    /// That order is the one a lead can act on: the state decides whether to
+    /// wait longer, the reason says whether waiting could help at all, and the
+    /// words are what it came to read.
+    #[test]
+    fn a_report_reads_state_then_reason_then_the_delegates_words() {
+        let id = uuid::Uuid::new_v4();
+        let working = describe_delegate(&DelegateReport {
+            session_id: id,
+            title: "probe".into(),
+            status: waku_client::model::SessionStatus::Working,
+            reply: "half an answer".into(),
+            failure: None,
+        });
+        assert!(working.contains("still working"), "{working}");
+        assert!(
+            working.contains("probe"),
+            "the title belongs in it: {working}"
+        );
+        assert!(working.ends_with("half an answer"), "{working}");
+
+        let failed = describe_delegate(&DelegateReport {
+            session_id: id,
+            title: String::new(),
+            status: waku_client::model::SessionStatus::Failed,
+            reply: String::new(),
+            failure: Some("context window exhausted".into()),
+        });
+        assert!(failed.contains("failed"), "{failed}");
+        assert!(failed.contains("context window exhausted"), "{failed}");
+        assert!(
+            failed.contains("finished without writing anything"),
+            "a settled delegate must not claim it is still writing: {failed}"
+        );
+        assert!(
+            !failed.contains("\"\""),
+            "an absent title must not render as empty quotes: {failed}"
+        );
+    }
+
+    /// The reading tools refuse an id that `spawn_agent` could not have
+    /// returned, instead of asking the daemon about a string it would have to
+    /// interpret.
+    #[test]
+    fn the_reading_tools_refuse_an_id_that_was_never_handed_out() {
+        for tool in ["check_agent", "wait_agent"] {
+            let refused = call_tool(&json!({
+                "name": tool,
+                "arguments": {"agent_id": "not-a-uuid"}
+            }));
+            let error = refused.expect_err("a made-up id cannot name a delegate");
+            assert!(
+                format!("{error}").contains("not one spawn_agent returned"),
+                "{tool} has to explain the bad id: {error}"
+            );
+        }
+        let refused = call_tool(&json!({
+            "name": "send_to_agent",
+            "arguments": {"agent_id": "not-a-uuid", "message": "carry on"}
+        }));
+        assert!(refused.is_err(), "send_to_agent must refuse the same id");
     }
 }

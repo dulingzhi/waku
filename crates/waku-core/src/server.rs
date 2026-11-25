@@ -1321,6 +1321,14 @@ impl AgentScope {
                             // conversation: the daemon copies the lead's own
                             // options onto a fresh id and reports it back.
                             | Command::SpawnDelegate { .. }
+                            // Its two companions, which name a delegate in the
+                            // command rather than in the request: the request
+                            // still carries only the lead's own session, and the
+                            // daemon checks that the named task is a delegate
+                            // this lead started. Reading another conversation
+                            // from here is therefore not expressible.
+                            | Command::ReadDelegate { .. }
+                            | Command::PromptDelegate { .. }
                     )
             }
         }
@@ -1813,6 +1821,46 @@ mod tests {
     fn the_desktop_token_is_unchanged_by_agent_scoping() {
         assert!(token_matches("desktop-token", "desktop-token"));
         assert!(!token_matches("desktop-token", "someone-else"));
+    }
+
+    /// Reading and steering a delegate travels the same narrow road as creating
+    /// one.
+    ///
+    /// The delegate id rides in the command while the request keeps naming the
+    /// lead's own session and runtime, so the token's scope is checked exactly as
+    /// it was before. What the command names is then the daemon's question to
+    /// answer — it asks which lead started that task, which is the half a token
+    /// cannot express and must not be able to.
+    #[test]
+    fn a_delegate_may_read_and_steer_its_own_agents() {
+        let parent = Uuid::new_v4();
+        let runtime = Uuid::new_v4();
+        let scope = AgentScope::Delegate {
+            parent_session: parent,
+            runtime_id: runtime,
+        };
+        for command in [
+            Command::ReadDelegate {
+                session_id: Uuid::new_v4(),
+            },
+            Command::PromptDelegate {
+                session_id: Uuid::new_v4(),
+                prompt: "keep going".into(),
+            },
+        ] {
+            assert!(
+                scope.permits(&command, parent, runtime),
+                "{command:?} has to reach the lead's own delegate"
+            );
+            assert!(
+                !scope.permits(&command, Uuid::new_v4(), runtime),
+                "{command:?} must be refused under another session id"
+            );
+            assert!(
+                !scope.permits(&command, parent, Uuid::new_v4()),
+                "{command:?} must be refused under a replaced runtime"
+            );
+        }
     }
 
     /// Two mints must never collide, and neither may be derivable from the

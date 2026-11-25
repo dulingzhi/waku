@@ -9,7 +9,7 @@ use crate::attachments::{AttachmentUpload, StoredAttachment};
 use crate::computer_use::ComputerPermissions;
 use crate::model::{
     AgentSession, GoalOperation, Project, ProviderKind, ProviderProbe, ProviderResumeCursor,
-    ProviderSessionHistory, ProviderSessionSummary, UserInputAnswer,
+    ProviderSessionHistory, ProviderSessionSummary, SessionStatus, UserInputAnswer,
 };
 use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatch};
 use crate::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
@@ -455,6 +455,27 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
+    /// What one delegate the calling lead started is doing, and what it has
+    /// said in its current turn.
+    ///
+    /// Named by the delegate rather than the conversation, because a lead
+    /// addresses a delegate's *task* while its own token stays scoped to the
+    /// lead's conversation. The daemon is the authority on which delegates
+    /// belong to which lead, so it checks the pair rather than trusting the
+    /// caller to name a task it may see.
+    ReadDelegate {
+        session_id: Uuid,
+    },
+    /// Add an instruction to a delegate the calling lead started.
+    ///
+    /// The daemon chooses how it lands: a delegate still working has it steered
+    /// into the running turn, and an idle one starts a new turn. The lead does
+    /// not get to pick, because only the daemon knows which of the two is
+    /// possible at the moment the message arrives.
+    PromptDelegate {
+        session_id: Uuid,
+        prompt: String,
+    },
     CloseTerminal,
     CloseSession,
 }
@@ -683,6 +704,28 @@ pub enum ResponsePayload {
     DelegateSpawned {
         session_id: Uuid,
         runtime_id: Uuid,
+    },
+    /// One delegate's live state, as the daemon sees it.
+    ///
+    /// `reply` is the delegate's own text for its current turn, taken from the
+    /// provider's stream. It is the only place that text is guaranteed to
+    /// exist: a delegate may have no client attached at all, so nothing else is
+    /// guaranteed to have projected its transcript yet.
+    DelegateReport {
+        session_id: Uuid,
+        title: String,
+        status: SessionStatus,
+        reply: String,
+        /// Why the last turn failed, when it did. `None` on success, and also
+        /// while the delegate is still working.
+        failure: Option<String>,
+    },
+    /// How a [`Command::PromptDelegate`] was delivered.
+    DelegatePrompted {
+        session_id: Uuid,
+        /// `true` when the message joined a turn already in progress, `false`
+        /// when it opened a new one.
+        steered: bool,
     },
 }
 
