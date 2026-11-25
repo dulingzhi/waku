@@ -1193,7 +1193,7 @@ impl StateStore {
         let mut sessions = connection
             .prepare(
                 "SELECT id, project_id, title, auto_title, provider, model, status,
-                        created_at, updated_at, last_reply_at
+                        created_at, updated_at, last_reply_at, parent_session_id
                  FROM sessions ORDER BY updated_at",
             )
             .map_err(to_io_error)?;
@@ -1211,6 +1211,7 @@ impl StateStore {
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             })
             .map_err(to_io_error)?
@@ -1308,6 +1309,10 @@ impl StateStore {
         session.context_window = stored.context_window;
         session.context_usage = stored.context_usage;
         session.runtime_event_cursor = stored.runtime_event_cursor;
+        // The list row already carries the relationship, but a detail blob
+        // written before the column existed has none, and a session must not
+        // lose its parent merely because its transcript was reloaded.
+        session.parent_session_id = session.parent_session_id.or(stored.parent_session_id);
 
         let mut statement = connection
             .prepare(
@@ -1556,6 +1561,7 @@ type SessionColumns = (
     i64,
     i64,
     Option<i64>,
+    Option<String>,
 );
 
 /// Builds a list-only session from its columns. `messages`,
@@ -1575,6 +1581,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         created_at,
         updated_at,
         last_reply_at,
+        parent_session_id,
     ) = row;
     Some(AgentSession {
         id: Uuid::parse_str(&id).ok()?,
@@ -1600,6 +1607,9 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         context_usage: None,
         runtime_event_cursor: None,
         provider_session_id: None,
+        // The list row carries the relationship, so listing a session never
+        // needs its transcript to know whether it is a delegate.
+        parent_session_id: parent_session_id.and_then(|id| Uuid::parse_str(&id).ok()),
         messages: Vec::new(),
         transcript_blocks: Vec::new(),
         turns: Vec::new(),
@@ -1799,8 +1809,8 @@ fn message_fingerprint(message: &Message, position: usize) -> u64 {
 /// listing sessions never has to deserialize a transcript.
 const UPSERT_SESSION: &str = "INSERT INTO sessions(
          id, project_id, title, auto_title, provider, model, status,
-         created_at, updated_at, last_reply_at
-     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         created_at, updated_at, last_reply_at, parent_session_id
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
      ON CONFLICT(id) DO UPDATE SET
          project_id    = excluded.project_id,
          title         = excluded.title,
@@ -1810,7 +1820,8 @@ const UPSERT_SESSION: &str = "INSERT INTO sessions(
          status        = excluded.status,
          created_at    = excluded.created_at,
          updated_at    = excluded.updated_at,
-         last_reply_at = excluded.last_reply_at";
+         last_reply_at = excluded.last_reply_at,
+         parent_session_id = excluded.parent_session_id";
 
 const INSERT_PROJECT: &str = "INSERT INTO projects(id, name, path, position, created_at)
      VALUES(?1, ?2, ?3, ?4, ?5)
@@ -1849,6 +1860,9 @@ fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
         session
             .last_reply_at
             .map_or(Value::Null, |at| Value::Integer(at as i64)),
+        session
+            .parent_session_id
+            .map_or(Value::Null, |id| Value::Text(id.to_string())),
     ]
 }
 
@@ -1881,8 +1895,76 @@ mod tests {
 
     /// `load` returns list-only sessions by design; tests that assert on
     /// transcripts fetch them the way the app does when a session is opened.
-    fn load_hydrated(store: &StateStore) -> PersistedState {
-        let mut state = store.load().unwrap();
+    /// A delegate's owner survives a restart, and survives it *in the list*.
+    ///
+    /// The sidebar decides what to hide while listing, and `load` returns
+    /// list-only sessions whose transcripts were never read. Keeping the
+    /// relationship only in the detail blob would therefore work in every test
+    /// that hydrates a session and fail in the one place it is used: a restarted
+    /// app would list every delegate as an ordinary task again.
+    #[test]
+    fn a_delegates_owner_is_read_back_without_loading_its_transcript() {
+        let directory = temporary_directory();
+        let store = store_in(&directory);
+        let mut state = PersistedState::empty();
+        let project = Project::from_path(directory.clone());
+        let project_id = project.id;
+        state.projects.push(project);
+
+        let lead = AgentSession::new(project_id, ProviderKind::Claude);
+        let lead_id = lead.id;
+        // The store only writes a task that owns a transcript step, and a real
+        // lead has one: it is the conversation the user typed into.
+        let mut lead = lead;
+        lead.begin_turn("start the group");
+        state.push_session(lead);
+
+        let mut delegate = AgentSession::new(project_id, ProviderKind::Claude);
+        delegate.parent_session_id = Some(lead_id);
+        delegate.begin_turn("survey the tests");
+        let delegate_id = delegate.id;
+        state.push_session(delegate);
+        store.save(&mut state).unwrap();
+
+        // The list path: no transcript can be involved, because `load` does not
+        // read one.
+        let reloaded = store.load().unwrap();
+        let listed = reloaded
+            .sessions
+            .iter()
+            .find(|session| session.id == delegate_id)
+            .expect("the delegate is still a stored task");
+        assert_eq!(
+            listed.parent_session_id,
+            Some(lead_id),
+            "a restarted app must still know which conversation owns the delegate"
+        );
+        assert!(listed.is_delegate());
+        assert!(
+            !listed.detail_loaded,
+            "this assertion is only meaningful on a list row"
+        );
+
+        let lead_row = reloaded
+            .sessions
+            .iter()
+            .find(|session| session.id == lead_id)
+            .expect("the lead is stored too");
+        assert!(
+            !lead_row.is_delegate(),
+            "a conversation the user started is not a delegate"
+        );
+
+        // Hydrating must not drop it either: a delegate whose transcript is
+        // reloaded would otherwise silently become a top-level task.
+        let mut hydrated = listed.clone();
+        store.hydrate(&mut hydrated).unwrap();
+        assert_eq!(hydrated.parent_session_id, Some(lead_id));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    fn load_hydrated(store: &StateStore) -> PersistedState {        let mut state = store.load().unwrap();
         for session in &mut state.sessions {
             store.hydrate(session).unwrap();
         }

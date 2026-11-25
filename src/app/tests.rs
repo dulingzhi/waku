@@ -1274,7 +1274,7 @@ fn checkpoint_completion_invalidates_the_cached_transcript_rows() {
     let turn_id = session.begin_turn("Build it");
     session.push_message(MessageRole::Assistant, "Done.");
     session.finish_active_turn(TurnStatus::Completed, None);
-    let before = transcript_rows_fingerprint(&session, &HashSet::new());
+    let before = transcript_rows_fingerprint(&session, &HashSet::new(), false);
 
     attach_changed_files(
         &mut session,
@@ -1286,7 +1286,7 @@ fn checkpoint_completion_invalidates_the_cached_transcript_rows() {
     );
 
     assert_ne!(
-        transcript_rows_fingerprint(&session, &HashSet::new()),
+        transcript_rows_fingerprint(&session, &HashSet::new(), false),
         before
     );
     assert_eq!(response_footer_message_index(&session, turn_id), Some(1));
@@ -1360,11 +1360,11 @@ fn the_row_fingerprint_moves_whenever_the_rows_do() {
         )
     };
     let baseline_rows = rows(&base);
-    let baseline_fingerprint = transcript_rows_fingerprint(&base, &settled);
+    let baseline_fingerprint = transcript_rows_fingerprint(&base, &settled, false);
 
     // Collapsing lives outside the session, so check it against the same base.
     assert_ne!(
-        transcript_rows_fingerprint(&base, &HashSet::from([turn_id])),
+        transcript_rows_fingerprint(&base, &HashSet::from([turn_id]), false),
         baseline_fingerprint,
         "collapsing a turn"
     );
@@ -1415,7 +1415,7 @@ fn the_row_fingerprint_moves_whenever_the_rows_do() {
             "{description} should change the rows — the case no longer proves anything"
         );
         assert_ne!(
-            transcript_rows_fingerprint(&session, &settled),
+            transcript_rows_fingerprint(&session, &settled, false),
             baseline_fingerprint,
             "{description} changed the rows but not the fingerprint, so the \
              cached rows would go stale"
@@ -1427,7 +1427,7 @@ fn the_row_fingerprint_moves_whenever_the_rows_do() {
     let mut streamed = base.clone();
     streamed.messages[2].content.push_str(" Let me know.");
     assert_eq!(
-        transcript_rows_fingerprint(&streamed, &settled),
+        transcript_rows_fingerprint(&streamed, &settled, false),
         baseline_fingerprint,
         "appending to a message leaves the rows exactly where they were"
     );
@@ -2566,14 +2566,14 @@ fn a_busy_turn_pins_the_working_indicator_after_the_last_row() {
     // marked running. Busy-ness is the only input that moved, so the
     // fingerprint must move with it or the stale indicator lingers.
     session.status = SessionStatus::Working;
-    let busy_fingerprint = transcript_rows_fingerprint(&session, &HashSet::new());
+    let busy_fingerprint = transcript_rows_fingerprint(&session, &HashSet::new(), false);
     session.status = SessionStatus::Failed;
     assert_eq!(
         folded_transcript_row_kinds(&session, &HashSet::new()),
         vec![Message(0), Message(1)]
     );
     assert_ne!(
-        transcript_rows_fingerprint(&session, &HashSet::new()),
+        transcript_rows_fingerprint(&session, &HashSet::new(), false),
         busy_fingerprint,
         "dropping the busy status changed the rows but not the fingerprint"
     );
@@ -3043,13 +3043,13 @@ fn the_row_fingerprint_is_deterministic_and_order_sensitive() {
     let a = with_id();
     let b = with_id();
     assert_eq!(
-        transcript_rows_fingerprint(&a, &HashSet::new()),
-        transcript_rows_fingerprint(&a, &HashSet::new()),
+        transcript_rows_fingerprint(&a, &HashSet::new(), false),
+        transcript_rows_fingerprint(&a, &HashSet::new(), false),
         "repeat calls on an unchanged session must agree"
     );
     assert_eq!(
-        transcript_rows_fingerprint(&a, &HashSet::new()),
-        transcript_rows_fingerprint(&b, &HashSet::new()),
+        transcript_rows_fingerprint(&a, &HashSet::new(), false),
+        transcript_rows_fingerprint(&b, &HashSet::new(), false),
         "two sessions with equal content must agree"
     );
 
@@ -3064,8 +3064,8 @@ fn the_row_fingerprint_is_deterministic_and_order_sensitive() {
     reversed.messages[0].role = MessageRole::Assistant;
     reversed.messages[1].role = MessageRole::User;
     assert_ne!(
-        transcript_rows_fingerprint(&forward, &HashSet::new()),
-        transcript_rows_fingerprint(&reversed, &HashSet::new()),
+        transcript_rows_fingerprint(&forward, &HashSet::new(), false),
+        transcript_rows_fingerprint(&reversed, &HashSet::new(), false),
         "reordering two messages must change the fingerprint"
     );
 
@@ -3075,8 +3075,8 @@ fn the_row_fingerprint_is_deterministic_and_order_sensitive() {
     let mut other_session = with_id();
     other_session.id = Uuid::new_v4();
     assert_ne!(
-        transcript_rows_fingerprint(&a, &HashSet::new()),
-        transcript_rows_fingerprint(&other_session, &HashSet::new()),
+        transcript_rows_fingerprint(&a, &HashSet::new(), false),
+        transcript_rows_fingerprint(&other_session, &HashSet::new(), false),
         "a different session id must not share a fingerprint"
     );
 }
@@ -3158,14 +3158,14 @@ fn fingerprints_separate_what_renders_differently_and_share_what_does_not() {
     };
     let turn_id = expanded_probe.turns[0].id;
     assert_ne!(
-        transcript_rows_fingerprint(&expanded_probe, &HashSet::new()),
-        transcript_rows_fingerprint(&expanded_probe, &HashSet::from([turn_id])),
+        transcript_rows_fingerprint(&expanded_probe, &HashSet::new(), false),
+        transcript_rows_fingerprint(&expanded_probe, &HashSet::from([turn_id]), false),
         "expanding a fold must move the fingerprint"
     );
 
     let mut seen = std::collections::HashMap::new();
     for (label, session) in &distinct {
-        let fingerprint = transcript_rows_fingerprint(session, &HashSet::new());
+        let fingerprint = transcript_rows_fingerprint(session, &HashSet::new(), false);
         if let Some(previous) = seen.insert(fingerprint, *label) {
             panic!(
                 "two transcript states with different rows shared fingerprint \
@@ -3187,7 +3187,7 @@ fn fingerprints_separate_what_renders_differently_and_share_what_does_not() {
         session.status = status;
         (
             status,
-            transcript_rows_fingerprint(&session, &HashSet::new()),
+            transcript_rows_fingerprint(&session, &HashSet::new(), false),
         )
     });
     let baseline = busy_fingerprints[1].1;
@@ -3201,7 +3201,7 @@ fn fingerprints_separate_what_renders_differently_and_share_what_does_not() {
     // ...and a settled status is never mistaken for a busy one.
     let mut idle = live.clone();
     idle.status = SessionStatus::Idle;
-    let settled_fingerprint = transcript_rows_fingerprint(&idle, &HashSet::new());
+    let settled_fingerprint = transcript_rows_fingerprint(&idle, &HashSet::new(), false);
     assert_ne!(
         settled_fingerprint, baseline,
         "settling must move the fingerprint"
@@ -3212,7 +3212,7 @@ fn fingerprints_separate_what_renders_differently_and_share_what_does_not() {
     let mut failed = live.clone();
     failed.status = SessionStatus::Failed;
     assert_eq!(
-        transcript_rows_fingerprint(&failed, &HashSet::new()),
+        transcript_rows_fingerprint(&failed, &HashSet::new(), false),
         settled_fingerprint,
         "Idle and Failed render identically, so they must share a fingerprint"
     );

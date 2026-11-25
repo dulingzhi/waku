@@ -42,11 +42,21 @@ export const sessions = sqliteTable(
     updatedAt: integer("updated_at").notNull(),
     /** Completion of the most recent assistant turn, unix seconds. */
     lastReplyAt: integer("last_reply_at"),
+    /**
+     * The conversation that spawned this one as a delegate.
+     *
+     * Null means a task the user started. Kept on the list row rather than in
+     * the transcript so the sidebar can hide the delegates of a group run
+     * without loading any transcript at all — the decision this column exists
+     * for is made while listing.
+     */
+    parentSessionId: text("parent_session_id"),
   },
   (table) => [
     index("sessions_by_project").on(table.projectId, table.updatedAt),
     index("sessions_by_updated_at").on(table.updatedAt),
     index("sessions_by_last_reply_at").on(table.lastReplyAt),
+    index("sessions_by_parent").on(table.parentSessionId),
   ],
 );
 

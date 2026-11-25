@@ -479,6 +479,18 @@ common.rename:
 
 session.new_task:
   en: New task
+session.status_idle:
+  en: Finished
+session.status_connecting:
+  en: Connecting
+session.status_working:
+  en: Working
+session.status_waiting:
+  en: Waiting
+session.status_background:
+  en: In background
+session.status_failed:
+  en: Failed
 
 sidebar.today:
   en: Today
@@ -512,6 +524,10 @@ sidebar.more:
   en: More
 sidebar.working:
   en: Working for %{elapsed}
+sidebar.delegates:
+  en: "%{count} subagents"
+sidebar.delegates_running:
+  en: "%{count} subagents · %{running} running"
 sidebar.just_now:
   en: just now
 sidebar.minutes_ago:
@@ -1519,6 +1535,20 @@ right_panel.terminal_unavailable:
   en: Terminal unavailable
 right_panel.terminal_unavailable_description:
   en: Open the Terminal surface again to start a shell
+right_panel.delegate:
+  en: Subagent
+right_panel.delegate_unavailable:
+  en: Subagent unavailable
+right_panel.delegate_unavailable_description:
+  en: This conversation no longer exists
+right_panel.delegate_default_model:
+  en: default model
+right_panel.delegate_prompt:
+  en: Task
+right_panel.delegate_reply:
+  en: Reply
+right_panel.delegate_note:
+  en: Note
 right_panel.resize:
   en: Resize right panel
 right_panel.tabs:
@@ -1953,6 +1983,8 @@ transcript.you_stopped_after:
   en: You stopped after %{duration}
 transcript.working_for:
   en: Working for %{duration}
+transcript.delegates_heading:
+  en: Subagents
 transcript.thinking:
   en: Thinking
 transcript.thought_for:

@@ -1029,6 +1029,20 @@ pub struct AgentSession {
     /// Read-only compatibility field for v1 state files. New saves omit it.
     #[serde(default, skip_serializing)]
     pub provider_session_id: Option<String>,
+    /// The conversation that started this one as a delegate, if any.
+    ///
+    /// A delegate is an ordinary task — the user can open it and read it — but
+    /// it is not an independent piece of work: the lead that spawned it owns it,
+    /// and the only way to reach it is through that lead. This field is what
+    /// makes that relationship durable. Without it the sidebar cannot tell a
+    /// delegate from a conversation the user started, so a group run leaves a
+    /// trail of parentless-looking tasks mixed into the user's own history.
+    ///
+    /// Persisted rather than derived from live daemon state, because the daemon
+    /// knows it only while the delegate's runtime is alive: a restart would
+    /// otherwise silently promote every delegate to a top-level task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<Uuid>,
     /// Not stored in the session JSON — these are rows in the `messages`
     /// table, reattached when the session is hydrated.
     #[serde(default)]
@@ -1084,6 +1098,7 @@ impl AgentSession {
             context_usage: None,
             runtime_event_cursor: None,
             provider_session_id: None,
+            parent_session_id: None,
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
             turns: Vec::new(),
@@ -1120,6 +1135,7 @@ impl AgentSession {
             context_usage: None,
             runtime_event_cursor: None,
             provider_session_id: None,
+            parent_session_id: self.parent_session_id,
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
             turns: Vec::new(),
@@ -1130,6 +1146,32 @@ impl AgentSession {
 
     pub fn is_busy(&self) -> bool {
         self.status.is_busy()
+    }
+
+    /// Whether this session is a delegate created by another conversation.
+    ///
+    /// A delegate is still a session — it has its own transcript, and the user
+    /// can open it and read what it did — but it is not a piece of work the user
+    /// chose to start. Every caller that decides between "a task of its own" and
+    /// "part of another task" asks this rather than reading the field itself, so
+    /// the rule stays in one place.
+    pub fn is_delegate(&self) -> bool {
+        self.parent_session_id.is_some()
+    }
+
+    /// The translation key for this session's state, as a one-word label.
+    ///
+    /// One key per status, so callers show the same wording everywhere rather
+    /// than each writing its own match and drifting apart.
+    pub fn label_for_status(&self) -> &'static str {
+        match self.status {
+            SessionStatus::Idle => "session.status_idle",
+            SessionStatus::Connecting => "session.status_connecting",
+            SessionStatus::Working => "session.status_working",
+            SessionStatus::Waiting => "session.status_waiting",
+            SessionStatus::Background => "session.status_background",
+            SessionStatus::Failed => "session.status_failed",
+        }
     }
 
     /// Derives [`Self::last_reply_at`] from the turn history when it is not

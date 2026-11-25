@@ -320,6 +320,21 @@ fn persisted_sidebar_branch_label(workspace: &SessionWorkspace) -> Option<&str> 
     .filter(|branch| !branch.is_empty())
 }
 
+/// How many delegates a conversation spawned, and how many are still working.
+///
+/// Delegates are hidden from the row list, so this is the only count the user
+/// gets from the sidebar — and the working half is the part that decides
+/// whether the conversation is genuinely still busy, which a finished
+/// delegate should not imply.
+fn delegate_tally(sessions: &[AgentSession], lead_session: Uuid) -> (usize, usize) {
+    sessions
+        .iter()
+        .filter(|session| session.parent_session_id == Some(lead_session))
+        .fold((0, 0), |(total, running), session| {
+            (total + 1, if session.is_busy() { running + 1 } else { running })
+        })
+}
+
 /// Compact "how long ago" for the sidebar: "just now", then one coarse unit —
 /// "5m", "3h", "420d". Days are the largest unit so a glance still reads as a
 /// count rather than a date.
@@ -1189,6 +1204,14 @@ impl Waku {
             }
             fingerprint = mix_uuid(fingerprint, session.id);
             fingerprint = mix_uuid(fingerprint, session.project_id);
+            // Delegates are not rows, but they still decide the lead's own row
+            // (its delegate count and whether any of them is running), so a
+            // change in the delegate set has to invalidate this snapshot too.
+            fingerprint = mix(fingerprint, u64::from(session.is_delegate()));
+            if let Some(parent) = session.parent_session_id {
+                fingerprint = mix_uuid(fingerprint, parent);
+                fingerprint = mix(fingerprint, u64::from(session.is_busy()));
+            }
             fingerprint = mix(fingerprint, sidebar_session_timestamp(session));
             if self.state.sidebar_grouping == SidebarGrouping::Project {
                 fingerprint = mix(
@@ -1241,7 +1264,11 @@ impl Waku {
             .state
             .sessions
             .iter()
-            .filter(|session| session.has_started())
+            // A delegate belongs to the conversation that spawned it, so it is
+            // reached from there rather than listed beside the work the user
+            // started. Leaving it here made a group run look like the user had
+            // opened two tasks per delegate.
+            .filter(|session| session.has_started() && !session.is_delegate())
             .collect::<Vec<_>>();
         sort_sidebar_sessions(&mut sorted_sessions, self.state.sidebar_ordering);
 
@@ -1791,8 +1818,7 @@ impl Waku {
         cx.notify();
     }
 
-    fn render_sidebar_session_item(&self, session_id: Uuid, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::current(cx);
+    fn render_sidebar_session_item(&self, session_id: Uuid, cx: &mut Context<Self>) -> AnyElement {        let theme = Theme::current(cx);
         let Some(session) = self
             .state
             .sessions
@@ -1817,6 +1843,22 @@ impl Waku {
             .iter()
             .find(|project| project.id == session.project_id);
         let grouped_by_project = self.state.sidebar_grouping == SidebarGrouping::Project;
+        // A lead row carries its group the way a folder carries its contents:
+        // the delegates are not rows of their own, so this is the only place the
+        // user can see that the conversation spawned any, and whether any of
+        // them is still working.
+        let (delegate_count, delegates_running) = delegate_tally(&self.state.sessions, session_id);
+        let delegate_badge = (delegate_count > 0).then(|| {
+            if delegates_running > 0 {
+                tr!(
+                    "sidebar.delegates_running",
+                    count = delegate_count,
+                    running = delegates_running
+                )
+            } else {
+                tr!("sidebar.delegates", count = delegate_count)
+            }
+        });
         let left_padding = if grouped_by_project {
             SIDEBAR_GROUP_CHILD_PADDING
         } else {
@@ -1971,6 +2013,22 @@ impl Waku {
                             )
                     })
                     .when(!has_detail_label, |element| element.child(div().flex_1()))
+                    .when_some(delegate_badge, |element, label| {
+                        element.child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap(px(3.0))
+                                .child(icon("icons/bot.svg", 10.5, theme.text_tertiary))
+                                .child(
+                                    div()
+                                        .text_size(sp(11.5))
+                                        .text_color(theme.text_tertiary)
+                                        .child(SharedString::from(label)),
+                                ),
+                        )
+                    })
                     .when_some(
                         session_time_label(session, unix_time()),
                         |element, label| {
@@ -2379,6 +2437,55 @@ fn sidebar_session_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A delegate is hidden from the row list but still counted on its lead.
+    ///
+    /// These two halves are the whole design: the task must not look like
+    /// something the user started, and the lead must not look idle while its
+    /// subagents are still working.
+    #[test]
+    fn a_delegate_is_hidden_from_the_list_but_counted_on_its_lead() {
+        let project_id = Uuid::new_v4();
+        let mut lead = AgentSession::new(project_id, ProviderKind::Claude);
+        lead.begin_turn("start the group");
+        let lead_id = lead.id;
+
+        let mut finished = AgentSession::new(project_id, ProviderKind::Claude);
+        finished.parent_session_id = Some(lead_id);
+        finished.begin_turn("one");
+        finished.status = SessionStatus::Idle;
+
+        let mut running = AgentSession::new(project_id, ProviderKind::Claude);
+        running.parent_session_id = Some(lead_id);
+        running.begin_turn("two");
+        running.status = SessionStatus::Working;
+
+        let mut stray = AgentSession::new(project_id, ProviderKind::Claude);
+        // A conversation with nothing in it is not listed either, so this one
+        // needs a turn for the count below to say anything.
+        stray.begin_turn("unrelated");
+
+        let sessions = vec![lead, finished, running, stray];
+        let listed = sessions
+            .iter()
+            .filter(|session| session.has_started() && !session.is_delegate())
+            .count();
+        assert_eq!(
+            listed, 2,
+            "only the user's own conversations belong in the list"
+        );
+
+        let (total, active) = delegate_tally(&sessions, lead_id);
+        assert_eq!(total, 2, "both delegates belong to this lead");
+        assert_eq!(
+            active, 1,
+            "a settled delegate must not make its lead look busy"
+        );
+
+        // Another conversation's tally says nothing about these.
+        let (other_total, _) = delegate_tally(&sessions, Uuid::new_v4());
+        assert_eq!(other_total, 0);
+    }
 
     #[test]
     fn groups_sessions_by_calendar_period() {

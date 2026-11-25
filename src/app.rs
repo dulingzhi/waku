@@ -567,6 +567,16 @@ enum RightPanelSurface {
         key: BackgroundWorkKey,
         title: String,
     },
+    /// One subagent conversation, opened from the lead that spawned it.
+    ///
+    /// A delegate has no sidebar row, so this surface is how its full
+    /// transcript is read: the card in the lead's own conversation is a summary
+    /// and cannot hold a whole turn. The title travels with the surface because
+    /// the tab label is drawn without reaching into task state.
+    Delegate {
+        id: Uuid,
+        title: String,
+    },
     Files,
     Diff,
     File(String),

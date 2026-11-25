@@ -1307,6 +1307,7 @@ impl Waku {
             | TranscriptRowKind::TurnCollapsed(_)
             | TranscriptRowKind::ResponseFooter(_, _)
             | TranscriptRowKind::ChangedFiles(_)
+            | TranscriptRowKind::Delegates
             | TranscriptRowKind::WorkingIndicator => false,
         };
         let inner = match kind {
@@ -1447,6 +1448,7 @@ impl Waku {
                 .render_changed_files_row(turn_id, &theme, cx)
                 .unwrap_or_else(|| div().into_any_element()),
             TranscriptRowKind::WorkingIndicator => self.render_working_indicator_row(&theme),
+            TranscriptRowKind::Delegates => self.render_delegates_row(&theme, cx),
         };
         let mut row = div()
             .id(("transcript-row", index))
@@ -2058,8 +2060,133 @@ impl Waku {
     /// on screen from the moment the prompt lands — before the provider has
     /// produced a single chunk — and stays below whatever streams in until
     /// the turn settles into its "Worked for N" fold.
-    fn render_working_indicator_row(&self, theme: &Theme) -> AnyElement {
-        let session = self.selected_session();
+    /// The subagents this conversation spawned, as one row of cards.
+    ///
+    /// A delegate has no row in the sidebar: it belongs to this conversation,
+    /// and this is where the user reaches it. Each card states what it is doing
+    /// and carries the last thing it said, so a group run reads as part of the
+    /// answer rather than as a set of tasks the user never asked for. Clicking
+    /// one opens it in the right panel, which is where its full transcript
+    /// lives.
+    fn render_delegates_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let Some(session) = self.selected_session() else {
+            return div().into_any_element();
+        };
+        let delegates = self
+            .state
+            .sessions
+            .iter()
+            .filter(|candidate| candidate.parent_session_id == Some(session.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if delegates.is_empty() {
+            return div().into_any_element();
+        }
+        let mut cards = Vec::with_capacity(delegates.len());
+        for delegate in delegates {
+            let status = delegate.label_for_status();
+            let running = delegate.is_busy();
+            let preview = delegate
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == MessageRole::Assistant)
+                .map(|message| message.content.trim().to_owned())
+                .filter(|text| !text.is_empty());
+            let title = delegate
+                .auto_title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| delegate.title.clone());
+            let delegate_id = delegate.id;
+            let weak = cx.entity().downgrade();
+            cards.push(
+                div()
+                    .id(SharedString::from(format!("delegate-card-{delegate_id}")))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .min_w_0()
+                    .flex_1()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.surface)
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .cursor_default()
+                    .hover(|style| style.border_color(theme.border_strong))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(icon(
+                                "icons/bot.svg",
+                                12.0,
+                                if running {
+                                    theme.accent
+                                } else {
+                                    theme.text_tertiary
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_size(sp(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(title)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(sp(11.5))
+                                    .text_color(if running {
+                                        theme.accent
+                                    } else {
+                                        theme.text_tertiary
+                                    })
+                                    .child(tr!(status)),
+                            ),
+                    )
+                    .when_some(preview, |card, preview| {
+                        card.child(
+                            div()
+                                .text_size(sp(11.5))
+                                .line_height(sp(16.0))
+                                .text_color(theme.text_tertiary)
+                                .line_clamp(2)
+                                .child(SharedString::from(preview)),
+                        )
+                    })
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.open_delegate_surface(delegate_id, cx);
+                        });
+                    })
+                    .into_any_element(),
+            );
+        }
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(sp(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_tertiary)
+                    .child(tr!("transcript.delegates_heading")),
+            )
+            .child(div().flex().flex_wrap().gap(px(8.0)).children(cards))
+            .into_any_element()
+    }
+
+    fn render_working_indicator_row(&self, theme: &Theme) -> AnyElement {        let session = self.selected_session();
         let elapsed = session
             .and_then(|session| session.turns.last())
             .filter(|turn| turn.status == TurnStatus::Running)

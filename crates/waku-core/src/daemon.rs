@@ -2291,6 +2291,12 @@ fn delegated_session(lead: &AgentSession, title: Option<String>) -> AgentSession
     delegate.service_tier = lead.service_tier.clone();
     delegate.context_window = lead.context_window.clone();
     delegate.agent_preset = lead.agent_preset.clone();
+    // The relationship is part of the delegate, not a side table: the sidebar
+    // reads this field to decide whether a task is something the user opened or
+    // something the lead created, and the user has to reach the delegate from
+    // the lead. Recording it here — where the session is built — keeps a delegate
+    // a delegate after the daemon that created it is gone.
+    delegate.parent_session_id = Some(lead.id);
     delegate
 }
 
@@ -2724,6 +2730,21 @@ mod tests {
         assert_eq!(delegate.model.as_deref(), Some("opus"));
         assert_eq!(delegate.runtime_mode, lead.runtime_mode);
         assert_eq!(delegate.title, "Survey the tests");
+        // The relationship is what lets the sidebar hide it and the lead reach
+        // it; a delegate built without this is just an unrelated task.
+        assert_eq!(delegate.parent_session_id, Some(lead.id));
+        assert!(delegate.is_delegate());
+    }
+
+    /// A conversation the user starts is not a delegate of anything.
+    ///
+    /// The sidebar's filter reads this, so a false positive would hide a task
+    /// the user opened — the opposite failure, and the more damaging one.
+    #[test]
+    fn an_ordinary_conversation_is_not_a_delegate() {
+        let session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        assert_eq!(session.parent_session_id, None);
+        assert!(!session.is_delegate());
     }
 
     /// A delegate starts empty. Copying the lead's transcript would make the

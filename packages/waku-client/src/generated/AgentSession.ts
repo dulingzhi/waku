@@ -70,6 +70,21 @@ context_usage?: ContextUsage | null, runtime_event_cursor?: RuntimeEventCursor |
  */
 provider_session_id?: string | null,
 /**
+ * The conversation that started this one as a delegate, if any.
+ *
+ * A delegate is an ordinary task — the user can open it and read it — but
+ * it is not an independent piece of work: the lead that spawned it owns it,
+ * and the only way to reach it is through that lead. This field is what
+ * makes that relationship durable. Without it the sidebar cannot tell a
+ * delegate from a conversation the user started, so a group run leaves a
+ * trail of parentless-looking tasks mixed into the user's own history.
+ *
+ * Persisted rather than derived from live daemon state, because the daemon
+ * knows it only while the delegate's runtime is alive: a restart would
+ * otherwise silently promote every delegate to a top-level task.
+ */
+parent_session_id?: string | null,
+/**
  * Not stored in the session JSON — these are rows in the `messages`
  * table, reattached when the session is hydrated.
  */
