@@ -15,6 +15,7 @@ use crate::persistence::{ComposerDraftChange, ComposerDrafts, SessionMessageMatc
 use crate::provider_session::{ProviderSessionFork, ProviderSessionForkRequest};
 use crate::settings::DaemonSettings;
 use crate::skills::SkillsCatalog;
+use crate::agents::{AgentDefinition, AgentDefinitionScope, AgentsCatalog, AgentTeam};
 use crate::usage::PlanUsage;
 use crate::usage_history::{UsageHistory, UsageWindow};
 use crate::workspace::{WorkspaceOperation, WorkspaceResult};
@@ -27,6 +28,11 @@ use crate::claude::{
 /// Bumped because the new delegate commands below change the command surface:
 /// a client that sends them to an older daemon would get an error it cannot
 /// distinguish from a real failure.
+///
+/// 15 adds the agent-identity and team commands, plus the `persona` a spawn may
+/// name. A client built before this cannot describe which identity a delegate
+/// should run as, and one built after it expects a `persona` field an older
+/// daemon never sends back.
 ///
 /// 14 relays a delegate's own stream to its lead's conversation under a new
 /// event kind. A client built before this cannot decode that kind, so it would
@@ -41,7 +47,7 @@ use crate::claude::{
 ///
 /// 10 adds the marketplace, available-plugin, plugin-detail, install and
 /// update commands, which extend the same surface for the same reason.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 pub const MAX_WIRE_MESSAGE_BYTES: usize = 48 * 1024 * 1024;
 pub const DAEMON_TOKEN_ENV: &str = "WAKU_DAEMON_TOKEN";
 pub const DAEMON_ADDRESS_ENV: &str = "WAKU_DAEMON_ADDRESS";
@@ -238,6 +244,37 @@ pub enum Command {
     },
     LoadSkills {
         projects: Vec<(String, PathBuf)>,
+    },
+    /// Every agent identity and team template this daemon can see, with the
+    /// problems it found reading them.
+    LoadAgents {
+        /// The project whose `.waku/agents` root to include. `None` lists the
+        /// built-ins and the user's own identities only.
+        #[ts(type = "string | null")]
+        project: Option<PathBuf>,
+    },
+    /// Write one identity, creating its directory.
+    SaveAgentDefinition {
+        definition: AgentDefinition,
+        #[ts(type = "string | null")]
+        project: Option<PathBuf>,
+    },
+    DeleteAgentDefinition {
+        scope: AgentDefinitionScope,
+        id: String,
+        #[ts(type = "string | null")]
+        project: Option<PathBuf>,
+    },
+    SaveAgentTeam {
+        team: AgentTeam,
+        #[ts(type = "string | null")]
+        project: Option<PathBuf>,
+    },
+    DeleteAgentTeam {
+        scope: AgentDefinitionScope,
+        id: String,
+        #[ts(type = "string | null")]
+        project: Option<PathBuf>,
     },
     SetSkillsEnabled {
         dirs: Vec<PathBuf>,
@@ -465,6 +502,16 @@ pub enum Command {
         task: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// The identity to start this delegate as, by id from the catalog the
+        /// lead was given. `None` starts an anonymous delegate that inherits
+        /// the lead's provider and model, which is what an install with no
+        /// identities defined has.
+        ///
+        /// The id travels rather than resolved instructions so the daemon
+        /// stays the authority on which identities exist: a bridge cannot
+        /// invent one by writing its own prompt into a spawn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        persona: Option<String>,
     },
     /// What one delegate the calling lead started is doing, and what it has
     /// said in its current turn.
@@ -505,6 +552,11 @@ pub struct WireDriverStartOptions {
     pub agent_preset: Option<String>,
     pub computer_use_enabled: bool,
     pub provider_cursor: Option<Value>,
+    /// Text this session starts as, resolved by the daemon from an identity the
+    /// client named. Sent as the resolved prompt rather than an id so a client
+    /// starting a task cannot make the daemon read a catalog it chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
@@ -662,6 +714,9 @@ pub enum ResponsePayload {
     },
     SkillsCatalog {
         catalog: SkillsCatalog,
+    },
+    AgentsCatalog {
+        catalog: AgentsCatalog,
     },
     ClaudeMcpCatalog {
         catalog: McpCatalog,
@@ -841,7 +896,7 @@ mod tests {
 
         assert_eq!(json["type"], "forkSessionFromResponse");
         assert_eq!(json["turnCount"], 7);
-        assert_eq!(PROTOCOL_VERSION, 14);
+        assert_eq!(PROTOCOL_VERSION, 15);
     }
 
     #[test]
@@ -850,7 +905,7 @@ mod tests {
 
         assert_eq!(json["type"], "rewindSessionToMessage");
         assert_eq!(json["turnCount"], 4);
-        assert_eq!(PROTOCOL_VERSION, 14);
+        assert_eq!(PROTOCOL_VERSION, 15);
     }
 
     #[test]

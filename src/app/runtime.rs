@@ -2740,6 +2740,10 @@ impl Waku {
                 agent_preset,
                 computer_use_enabled: self.state.computer_use_enabled,
                 provider_cursor: session.provider_cursor.clone(),
+                // An ordinary task starts as itself. Identities belong to the
+                // delegates a lead starts, which the daemon resolves from the
+                // catalog it owns.
+                system_prompt: None,
             },
             event_wake: self.event_wake_tx.clone(),
             daemon: self.daemon.clone(),

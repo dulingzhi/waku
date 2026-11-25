@@ -1043,6 +1043,14 @@ pub struct AgentSession {
     /// otherwise silently promote every delegate to a top-level task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<Uuid>,
+    /// The agent identity this session was started as, by catalog id.
+    ///
+    /// Only a delegate has one, and only when its lead named an identity when
+    /// spawning it. Kept on the session rather than looked up from the catalog
+    /// at render time: the identity may be edited or deleted later, and what a
+    /// finished task ran as is a fact about that task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_identity: Option<String>,
     /// Not stored in the session JSON — these are rows in the `messages`
     /// table, reattached when the session is hydrated.
     #[serde(default)]
@@ -1099,6 +1107,7 @@ impl AgentSession {
             runtime_event_cursor: None,
             provider_session_id: None,
             parent_session_id: None,
+            agent_identity: None,
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
             turns: Vec::new(),
@@ -1136,6 +1145,7 @@ impl AgentSession {
             runtime_event_cursor: None,
             provider_session_id: None,
             parent_session_id: self.parent_session_id,
+            agent_identity: self.agent_identity.clone(),
             messages: Vec::new(),
             transcript_blocks: Vec::new(),
             turns: Vec::new(),

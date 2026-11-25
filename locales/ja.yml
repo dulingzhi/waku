@@ -552,6 +552,26 @@ skills.scanning: スキルフォルダをスキャン中…
 skills.no_match: 検索に一致するスキルはありません
 skills.section_user: ユーザー
 skills.source_shared: 共有
+agents.scope_builtin: 内蔵
+agents.scope_user: 自分
+agents.scope_project: プロジェクト
+settings.agents: エージェント
+settings.agents_keywords: エージェント アイデンティティ チーム 委譲 役割 agents identities teams delegates
+agents.loading: エージェントを読み込み中…
+agents.identities: アイデンティティ
+agents.teams: チーム
+agents.none: エージェントがまだありません
+agents.none_description: リードはこれを見て、誰に仕事を任せるか決めます。一つも無くても、素の並列エージェントは起動できます。
+agents.no_teams: 保存されたチームはまだありません。
+agents.member_count: "%{count} 名"
+agents.instructions: 進め方
+agents.boundaries: 境界
+agents.model: モデル
+agents.effort: 思考レベル
+agents.tools: ツール
+agents.brief: 共有ブリーフ
+agents.members: メンバー
+agents.problems: 読み込めないファイルがあります
 skills.scope_user_detail: すべてのプロジェクトで利用可能
 skills.scope_in_project: "%{project} 内"
 skills.filter_all: すべてのスキル
@@ -794,6 +814,9 @@ right_panel.delegate_unavailable_description: このセッションは既に存�
 right_panel.delegate_default_model: 既定のモデル
 right_panel.delegate_prompt: タスク
 right_panel.delegate_reply: 返信
+right_panel.delegate_writing: 書き込み中
+right_panel.delegate_starting: この並列エージェントは起動中です。書いた最初の文がここに表示されます。
+right_panel.delegate_no_reply: この並列エージェントは終了しましたが、何も書きませんでした。
 right_panel.delegate_note: メモ
 right_panel.resize: 右パネルの幅を変更
 right_panel.tabs: 右パネルのタブ

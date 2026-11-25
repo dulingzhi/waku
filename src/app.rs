@@ -227,6 +227,10 @@ enum SettingsPage {
     General,
     Providers,
     Skills,
+    /// The identities a delegate can be started as, and the teams that group
+    /// them. Sits beside Skills because both are catalogs the user curates
+    /// rather than switches that configure the app.
+    Agents,
     /// Claude Code's MCP servers and plugins. Named for the provider because
     /// these are its own config surfaces, not Waku's.
     Claude,
@@ -1546,6 +1550,18 @@ pub struct Waku {
     right_panel_diff_tree_scrollbar: Rc<ScrollbarState>,
     right_panel_editor_scroll_handle: ScrollHandle,
     right_panel_editor_scrollbar: Rc<ScrollbarState>,
+    /// Follow-the-tail scroll for each open delegate panel.
+    ///
+    /// Kept separate from every other right-panel scroll because the panel
+    /// stays open while the agent writes: one handle lets the surface follow
+    /// new text, and per-delegate keys keep two open delegates from sharing an
+    /// offset. `RefCell` because the render path holds `&self` and must still
+    /// be able to take a handle for a delegate it is opening for the first time.
+    right_panel_delegate_scroll: RefCell<HashMap<Uuid, ScrollHandle>>,
+    /// The delegate whose tail was last followed, and the length seen then, so
+    /// the scroll only follows when text actually grew. One cell rather than a
+    /// map because a single surface renders per frame.
+    right_panel_delegate_tail: Cell<Option<(Uuid, usize)>>,
     /// Rendered-markdown preview of the visible file editor, cached per path
     /// the way `skills_detail_markdown` caches the skill document.
     file_preview_markdown: RefCell<Option<(String, MarkdownView)>>,
@@ -1625,6 +1641,19 @@ pub struct Waku {
     /// The skill directory the detail pane shows. `None` falls back to the
     /// first visible row, so the pane never opens empty.
     skills_selected: Option<PathBuf>,
+    /// The Agents page's identity and team catalog, in memory because it is
+    /// files: re-reading it is a directory walk, not a database query.
+    agents_catalog: Option<Rc<crate::agents::AgentsCatalog>>,
+    agents_scan_pending: bool,
+    /// Bumped per read, so a result superseded by an edit is discarded.
+    agents_scan_generation: u64,
+    /// Which identity the page is editing, by catalog id. `None` opens the
+    /// first one, so the detail pane never starts blank.
+    agents_selected: Option<String>,
+    /// Which team the page shows when identities are not being edited.
+    agents_selected_team: Option<String>,
+    /// Whether the page's detail pane is showing identities or teams.
+    agents_view: agents_page::AgentsView,
     /// Parsed markdown for the selected skill's document, keyed by the skill
     /// directory it was built from. One entry: only one detail shows at once.
     skills_detail_markdown: RefCell<Option<(PathBuf, MarkdownView)>>,
@@ -1868,6 +1897,7 @@ pub struct Waku {
 }
 
 mod activity_diff;
+mod agents_page;
 mod autocomplete;
 mod background_work;
 mod branches;
@@ -3245,6 +3275,8 @@ impl Waku {
                 right_panel_diff_tree_scrollbar: ScrollbarState::new(),
                 right_panel_editor_scroll_handle: ScrollHandle::new(),
                 right_panel_editor_scrollbar: ScrollbarState::new(),
+                right_panel_delegate_scroll: RefCell::new(HashMap::new()),
+                right_panel_delegate_tail: Cell::new(None),
                 file_preview_markdown: RefCell::new(None),
                 file_previews: RefCell::new(HashMap::new()),
                 file_preview_selection: TranscriptSelection::default(),
@@ -3307,6 +3339,12 @@ impl Waku {
                 skills_scrollbar: ScrollbarState::new(),
                 skills_rows: RefCell::new(Vec::new()),
                 skills_selected: None,
+                agents_catalog: None,
+                agents_scan_pending: false,
+                agents_scan_generation: 0,
+                agents_selected: None,
+                agents_selected_team: None,
+                agents_view: agents_page::AgentsView::Identities,
                 skills_detail_markdown: RefCell::new(None),
                 skills_selection: TranscriptSelection::default(),
                 skills_detail_scroll: ScrollHandle::new(),

@@ -1071,6 +1071,46 @@ skills.section_user:
   en: User
 skills.source_shared:
   en: Shared
+agents.scope_builtin:
+  en: Built in
+agents.scope_user:
+  en: Yours
+agents.scope_project:
+  en: Project
+settings.agents:
+  en: Agents
+settings.agents_keywords:
+  en: agents identities teams delegates personas roles dispatch 代理 身份 团队
+agents.loading:
+  en: Reading your agents…
+agents.identities:
+  en: Identities
+agents.teams:
+  en: Teams
+agents.none:
+  en: No agents yet
+agents.none_description:
+  en: A lead reads these to decide whom to send work to. Without any, it can still start a plain delegate.
+agents.no_teams:
+  en: No teams saved yet.
+agents.member_count:
+  en: "%{count} members"
+agents.instructions:
+  en: How it works
+agents.boundaries:
+  en: Boundaries
+agents.model:
+  en: Model
+agents.effort:
+  en: Thinking
+agents.tools:
+  en: Tools
+agents.brief:
+  en: Shared brief
+agents.members:
+  en: Members
+agents.problems:
+  en: Some files could not be read
 skills.scope_user_detail:
   en: available in every project
 skills.scope_in_project:
@@ -1547,6 +1587,12 @@ right_panel.delegate_prompt:
   en: Task
 right_panel.delegate_reply:
   en: Reply
+right_panel.delegate_writing:
+  en: writing
+right_panel.delegate_starting:
+  en: This agent is starting. Its first words appear here as they are written.
+right_panel.delegate_no_reply:
+  en: This agent finished without writing anything.
 right_panel.delegate_note:
   en: Note
 right_panel.resize:

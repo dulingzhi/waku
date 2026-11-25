@@ -1193,7 +1193,8 @@ impl StateStore {
         let mut sessions = connection
             .prepare(
                 "SELECT id, project_id, title, auto_title, provider, model, status,
-                        created_at, updated_at, last_reply_at, parent_session_id
+                        created_at, updated_at, last_reply_at, parent_session_id,
+                        agent_identity
                  FROM sessions ORDER BY updated_at",
             )
             .map_err(to_io_error)?;
@@ -1212,6 +1213,7 @@ impl StateStore {
                     row.get::<_, i64>(8)?,
                     row.get::<_, Option<i64>>(9)?,
                     row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             })
             .map_err(to_io_error)?
@@ -1562,6 +1564,7 @@ type SessionColumns = (
     i64,
     Option<i64>,
     Option<String>,
+    Option<String>,
 );
 
 /// Builds a list-only session from its columns. `messages`,
@@ -1582,6 +1585,7 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         updated_at,
         last_reply_at,
         parent_session_id,
+        agent_identity,
     ) = row;
     Some(AgentSession {
         id: Uuid::parse_str(&id).ok()?,
@@ -1610,6 +1614,9 @@ fn session_skeleton(row: SessionColumns) -> Option<AgentSession> {
         // The list row carries the relationship, so listing a session never
         // needs its transcript to know whether it is a delegate.
         parent_session_id: parent_session_id.and_then(|id| Uuid::parse_str(&id).ok()),
+        // Which agent a delegate runs as is a list-row fact too: its card and
+        // tab name it without loading a transcript.
+        agent_identity,
         messages: Vec::new(),
         transcript_blocks: Vec::new(),
         turns: Vec::new(),
@@ -1809,8 +1816,8 @@ fn message_fingerprint(message: &Message, position: usize) -> u64 {
 /// listing sessions never has to deserialize a transcript.
 const UPSERT_SESSION: &str = "INSERT INTO sessions(
          id, project_id, title, auto_title, provider, model, status,
-         created_at, updated_at, last_reply_at, parent_session_id
-     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         created_at, updated_at, last_reply_at, parent_session_id, agent_identity
+     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
      ON CONFLICT(id) DO UPDATE SET
          project_id    = excluded.project_id,
          title         = excluded.title,
@@ -1821,7 +1828,8 @@ const UPSERT_SESSION: &str = "INSERT INTO sessions(
          created_at    = excluded.created_at,
          updated_at    = excluded.updated_at,
          last_reply_at = excluded.last_reply_at,
-         parent_session_id = excluded.parent_session_id";
+         parent_session_id = excluded.parent_session_id,
+         agent_identity = excluded.agent_identity";
 
 const INSERT_PROJECT: &str = "INSERT INTO projects(id, name, path, position, created_at)
      VALUES(?1, ?2, ?3, ?4, ?5)
@@ -1863,6 +1871,10 @@ fn session_params(session: &AgentSession) -> Vec<rusqlite::types::Value> {
         session
             .parent_session_id
             .map_or(Value::Null, |id| Value::Text(id.to_string())),
+        session
+            .agent_identity
+            .clone()
+            .map_or(Value::Null, Value::Text),
     ]
 }
 

@@ -26,6 +26,7 @@ macro_rules! tr {
     };
 }
 
+pub mod agents;
 pub mod attachments;
 pub mod blob;
 pub mod checkpoint;
@@ -62,5 +63,6 @@ pub use protocol::{
     ResponseOutcome, ResponsePayload, RpcError, SequencedEvent, ServerMessage,
     WireComputerToolRequest, WireDriverEvent, WireDriverStartOptions, WireSessionOptions,
 };
+pub use agents::{AgentCatalogProblem, AgentDefinition, AgentDefinitionScope, AgentsCatalog, AgentTeam};
 pub use settings::DaemonSettings;
 pub use workspace::{WorkspaceOperation, WorkspaceResult};

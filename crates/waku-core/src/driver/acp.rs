@@ -120,6 +120,10 @@ impl AcpDriver {
             context_window,
             agent_preset: _,
             agent_bridge: _,
+            // This provider has no system-prompt gate of its own, so an identity
+            // cannot be injected here. Accepted and ignored rather than silently
+            // prepended to the first user message, which a model can talk itself out of.
+            system_prompt: _,
             computer_use_enabled,
             provider_cursor,
         } = options;
@@ -2636,6 +2640,7 @@ mod tests {
                 computer_use_enabled: false,
                 provider_cursor: None,
                 agent_bridge: None,
+                system_prompt: None,
             },
             events,
         )
@@ -2690,6 +2695,7 @@ mod tests {
                 computer_use_enabled: false,
                 provider_cursor: None,
                 agent_bridge: None,
+                system_prompt: None,
             },
             events,
         )
@@ -2749,6 +2755,7 @@ mod tests {
                 computer_use_enabled: false,
                 provider_cursor: None,
                 agent_bridge: None,
+                system_prompt: None,
             },
             events,
         )

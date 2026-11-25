@@ -228,6 +228,15 @@ pub struct DriverStartOptions {
     /// provider that should be able to delegate, which is what keeps a provider
     /// from holding anything it was not given.
     pub agent_bridge: Option<AgentBridgeAccess>,
+    /// Text appended to the provider's own system prompt, so a session can
+    /// start as a named identity rather than as a bare assistant.
+    ///
+    /// `None` for an ordinary task, which starts with the provider's default
+    /// prompt alone. A provider with no system-prompt gate of its own ignores
+    /// this rather than prepending the text to the first user message: a
+    /// boundary stated as a user turn can be talked out of, and one stated as
+    /// a system rule cannot.
+    pub system_prompt: Option<String>,
 }
 
 /// What a provider needs to launch the agent-bridge MCP server.

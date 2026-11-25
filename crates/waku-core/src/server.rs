@@ -1797,6 +1797,7 @@ mod tests {
         let spawn = Command::SpawnDelegate {
             task: "survey the tests".into(),
             title: None,
+persona: None,
         };
 
         assert!(
@@ -2301,6 +2302,7 @@ mod tests {
                         agent_preset: None,
                         computer_use_enabled: false,
                         provider_cursor: None,
+                        system_prompt: None,
                     },
                 },
             )
@@ -2364,6 +2366,7 @@ mod tests {
                 Command::SpawnDelegate {
                     task: "survey the tests".into(),
                     title: None,
+persona: None,
                 },
             )
             .expect("a lead must be able to start its delegate");
@@ -2437,6 +2440,7 @@ mod tests {
                         agent_preset: None,
                         computer_use_enabled: false,
                         provider_cursor: None,
+                        system_prompt: None,
                     },
                 },
             )
@@ -2555,6 +2559,7 @@ mod tests {
                         agent_preset: None,
                         computer_use_enabled: false,
                         provider_cursor: None,
+                        system_prompt: None,
                     },
                 },
             )
@@ -3216,6 +3221,7 @@ mod tests {
             agent_preset: None,
             computer_use_enabled: false,
             provider_cursor: None,
+            system_prompt: None,
         }
     }
 

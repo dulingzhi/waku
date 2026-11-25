@@ -199,6 +199,7 @@ impl WakuBackend {
         lead_session: Uuid,
         task: String,
         title: Option<String>,
+        persona: Option<String>,
         events: EventSink,
     ) -> anyhow::Result<ResponsePayload> {
         let (lead, project_cwd) = {
@@ -242,6 +243,33 @@ impl WakuBackend {
         let session_id = delegate.id;
         let runtime_id = Uuid::new_v4();
 
+        // The identity is resolved here rather than by the caller, so a spawn
+        // can only run as an identity the catalog actually defines. A named
+        // identity that no longer exists is an error rather than a silent
+        // fallback: a reviewer that quietly started as a plain assistant would
+        // edit files it was told not to.
+        let identity = match persona.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) => {
+                let catalog = crate::agents::load_catalog(Some(&cwd));
+                Some(catalog.find(id).cloned().ok_or_else(|| {
+                    anyhow!("no agent identity named {id} is defined for this project")
+                })?)
+            }
+            None => None,
+        };
+        if let Some(identity) = identity.as_ref() {
+            // The identity's own overrides win over what the lead runs with,
+            // which is what lets a cheap reviewer sit beside an expensive
+            // implementer.
+            if identity.model.is_some() {
+                delegate.model = identity.model.clone();
+            }
+            if identity.effort.is_some() {
+                delegate.reasoning_effort = identity.effort.clone();
+            }
+            delegate.agent_identity = Some(identity.id.clone());
+        }
+
         let (wake, _wake_events) = smol::channel::bounded(1);
         let (event_sender, event_receiver) = driver::event_channel(wake);
         let options = DriverStartOptions {
@@ -257,6 +285,7 @@ impl WakuBackend {
             provider_cursor: None,
             // A delegate does not delegate: this is what bounds the fan-out.
             agent_bridge: None,
+            system_prompt: identity.as_ref().map(|identity| identity.system_prompt()),
         };
         let handle = driver::start_local(lead.provider, options, event_sender)?;
 
@@ -677,6 +706,37 @@ impl Backend for WakuBackend {
             Command::TrashSkills { dirs } => {
                 crate::skills::trash_skills(&dirs).map_err(|error| anyhow!(error))?;
                 Ok(ResponsePayload::Ack)
+            }
+            Command::LoadAgents { project } => Ok(ResponsePayload::AgentsCatalog {
+                catalog: crate::agents::load_catalog(project.as_deref()),
+            }),
+            Command::SaveAgentDefinition { definition, project } => {
+                crate::agents::save_definition(project.as_deref(), &definition)
+                    .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::AgentsCatalog {
+                    catalog: crate::agents::load_catalog(project.as_deref()),
+                })
+            }
+            Command::DeleteAgentDefinition { scope, id, project } => {
+                crate::agents::delete_definition(project.as_deref(), scope, &id)
+                    .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::AgentsCatalog {
+                    catalog: crate::agents::load_catalog(project.as_deref()),
+                })
+            }
+            Command::SaveAgentTeam { team, project } => {
+                crate::agents::save_team(project.as_deref(), &team)
+                    .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::AgentsCatalog {
+                    catalog: crate::agents::load_catalog(project.as_deref()),
+                })
+            }
+            Command::DeleteAgentTeam { scope, id, project } => {
+                crate::agents::delete_team(project.as_deref(), scope, &id)
+                    .map_err(|error| anyhow!(error))?;
+                Ok(ResponsePayload::AgentsCatalog {
+                    catalog: crate::agents::load_catalog(project.as_deref()),
+                })
             }
             Command::LoadClaudeMcpServers { cwd } => {
                 let override_spec = self.claude_binary_override();
@@ -1302,6 +1362,11 @@ impl Backend for WakuBackend {
                         .transpose()
                         .context("daemon received an invalid provider cursor")?,
                     agent_bridge: self.agent_bridge_access(session_id, runtime_id),
+                    // The identity a client starts a task as. The daemon has
+                    // already resolved it to text through `LoadAgents`, so the
+                    // wire carries the prompt rather than an id the daemon
+                    // would have to re-read the catalog to interpret.
+                    system_prompt: options.system_prompt,
                 };
                 let (wake, _wake_events) = smol::channel::bounded(1);
                 let (event_sender, event_receiver) = driver::event_channel(wake);
@@ -1330,9 +1395,11 @@ impl Backend for WakuBackend {
                     .insert(session_id, (runtime_id, handle));
                 Ok(ResponsePayload::Started { supports_steer })
             }
-            Command::SpawnDelegate { task, title } => {
-                self.spawn_delegate(session_id, task, title, events)
-            }
+            Command::SpawnDelegate {
+                task,
+                title,
+                persona,
+            } => self.spawn_delegate(session_id, task, title, persona, events),
             Command::ReadDelegate {
                 session_id: delegate,
             } => self.delegate_report(session_id, delegate),
@@ -1881,6 +1948,10 @@ impl WakuBackend {
                 computer_use_enabled: false,
                 provider_cursor: source.provider_cursor.clone(),
                 agent_bridge: None,
+                // A fork reproduces an existing conversation, so the identity
+                // it ran under is already stated in its transcript.
+                // Re-injecting the prompt would state it twice.
+                system_prompt: None,
             },
             event_sender,
         )?;
@@ -2042,6 +2113,9 @@ impl WakuBackend {
                 computer_use_enabled: false,
                 provider_cursor: source.provider_cursor.clone(),
                 agent_bridge: None,
+                // A rewind restores a conversation that already ran; its
+                // identity is part of what was said, not of the restart.
+                system_prompt: None,
             },
             event_sender,
         )?;
@@ -2420,6 +2494,11 @@ fn handle_driver_command(
         | Command::LoadSkills { .. }
         | Command::SetSkillsEnabled { .. }
         | Command::TrashSkills { .. }
+        | Command::LoadAgents { .. }
+        | Command::SaveAgentDefinition { .. }
+        | Command::DeleteAgentDefinition { .. }
+        | Command::SaveAgentTeam { .. }
+        | Command::DeleteAgentTeam { .. }
         | Command::LoadClaudeMcpServers { .. }
         | Command::RemoveClaudeMcpServer { .. }
         | Command::LoadClaudePlugins
@@ -2890,6 +2969,7 @@ mod tests {
                 command: Command::SpawnDelegate {
                     task: "go".into(),
                     title: None,
+persona: None,
                 },
             },
             // A sink for the runtime this would have created; the spawn must be
@@ -3269,6 +3349,42 @@ mod tests {
             event_from_wire(wire).unwrap(),
             DriverEvent::PromptSubmitted { message, turn_id: decoded_turn, message_id: decoded_message }
                 if message == "ship it" && decoded_turn == turn_id && decoded_message == message_id
+        ));
+    }
+
+    /// A delegate spawn without an identity has to stay valid: it is what every
+    /// install with no identities defined does, and what a lead does when it
+    /// decides a task needs no particular agent.
+    #[test]
+    fn a_spawn_without_an_identity_deserializes() {
+        let command: Command =
+            serde_json::from_value(serde_json::json!({"type": "spawnDelegate", "task": "go"}))
+                .expect("an anonymous spawn has to decode");
+        assert!(matches!(
+            command,
+            Command::SpawnDelegate {
+                persona: None,
+                ..
+            }
+        ));
+    }
+
+    /// The identity travels as an id, and an older client that never sends the
+    /// field must not produce a malformed command.
+    #[test]
+    fn a_spawn_naming_an_identity_carries_its_id() {
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "type": "spawnDelegate",
+            "task": "review the diff",
+            "persona": "reviewer",
+        }))
+        .expect("a named spawn has to decode");
+        assert!(matches!(
+            command,
+            Command::SpawnDelegate {
+                persona: Some(ref id),
+                ..
+            } if id == "reviewer"
         ));
     }
 }

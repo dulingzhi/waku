@@ -150,6 +150,9 @@ pub struct DriverStartOptions {
     pub agent_preset: Option<String>,
     pub computer_use_enabled: bool,
     pub provider_cursor: Option<ProviderResumeCursor>,
+    /// Text this session starts as, resolved by the daemon from an identity the
+    /// client named. `None` starts with the provider's own prompt alone.
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

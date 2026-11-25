@@ -468,6 +468,10 @@ impl OpenCodeDriver {
             computer_use_enabled,
             provider_cursor,
             agent_bridge: _,
+            // This provider has no system-prompt gate of its own, so an identity
+            // cannot be injected here. Accepted and ignored rather than silently
+            // prepended to the first user message, which a model can talk itself out of.
+            system_prompt: _,
         } = options;
 
         let resumed = match provider_cursor {
@@ -3577,6 +3581,7 @@ mod tests {
                 computer_use_enabled: false,
                 provider_cursor: None,
                 agent_bridge: None,
+                system_prompt: None,
             },
             events,
         )
@@ -3667,6 +3672,7 @@ mod tests {
             computer_use_enabled: false,
             provider_cursor,
             agent_bridge: None,
+            system_prompt: None,
         };
         let (events, event_rx) = crate::driver::test_event_channel();
         let driver = OpenCodeDriver::start(options(None), events).unwrap();
@@ -3836,6 +3842,7 @@ mod tests {
                 computer_use_enabled: false,
                 provider_cursor: None,
                 agent_bridge: None,
+                system_prompt: None,
             },
             events,
         )
@@ -3957,6 +3964,7 @@ mod tests {
                     computer_use_enabled: true,
                     provider_cursor: None,
                     agent_bridge: None,
+                    system_prompt: None,
                 },
                 events,
             )

@@ -40,6 +40,7 @@ pub(crate) fn start_remote(
                 .provider_cursor
                 .map(serde_json::to_value)
                 .transpose()?,
+            system_prompt: options.system_prompt,
         },
     };
     let supports_steer = match client.request(session_id, runtime_id, command) {

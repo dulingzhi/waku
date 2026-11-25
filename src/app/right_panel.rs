@@ -1069,6 +1069,86 @@ fn read_right_panel_file(
     }
 }
 
+/// One line of a delegate's transcript as the right panel shows it.
+///
+/// A delegate's panel is not the task transcript UI: it is a short read of what
+/// one agent said, so the row keeps only the three things that answer that.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct DelegatePanelRow {
+    role: MessageRole,
+    content: String,
+    /// The agent is still writing this row, so the panel can say so instead of
+    /// presenting a half sentence as a finished answer.
+    streaming: bool,
+}
+
+/// Whether the live relay already appears in the stored answer.
+///
+/// Two independent paths carry a delegate's text: the daemon relays it to the
+/// lead (`delegate_streams`), and the desktop's own runtime attachment folds it
+/// into the delegate's transcript. Whichever lands first is shown, so the panel
+/// must treat the second copy as already covered or it prints the answer twice.
+fn live_tail_is_covered(stored: &str, live: &str) -> bool {
+    let stored = stored.trim_end();
+    let live = live.trim_end();
+    if live.is_empty() {
+        return true;
+    }
+    !stored.is_empty() && (stored == live || stored.ends_with(live))
+}
+
+/// The rows a delegate's panel draws, stored text first and live text last.
+///
+/// Reading `session.messages` alone is what made this panel blank while a
+/// delegate was working: the transcript only holds text the synced path has
+/// already written, and the live relay arrives before that. Taking both, in
+/// that order, means the panel opens on the prompt and fills as the answer is
+/// written instead of waiting for the transcript to catch up.
+pub(super) fn delegate_panel_rows(
+    session: &AgentSession,
+    live: Option<&str>,
+) -> Vec<DelegatePanelRow> {
+    let mut rows = session
+        .messages
+        .iter()
+        .filter_map(|message| {
+            let content = message.content.trim();
+            (!content.is_empty()).then(|| DelegatePanelRow {
+                role: message.role,
+                content: content.to_owned(),
+                streaming: false,
+            })
+        })
+        .collect::<Vec<_>>();
+    let live = live.map(str::trim).filter(|live| !live.is_empty());
+    let covered = live.is_some_and(|live| {
+        let stored = rows
+            .iter()
+            .rev()
+            .find(|row| row.role == MessageRole::Assistant)
+            .map(|row| row.content.as_str())
+            .unwrap_or_default();
+        live_tail_is_covered(stored, live)
+    });
+    if let Some(live) = live
+        && !covered
+    {
+        rows.push(DelegatePanelRow {
+            role: MessageRole::Assistant,
+            content: live.to_owned(),
+            streaming: session.is_busy(),
+        });
+    }
+    // A busy delegate is writing its last row, whichever path delivered it.
+    if session.is_busy()
+        && let Some(last) = rows.last_mut()
+        && last.role == MessageRole::Assistant
+    {
+        last.streaming = true;
+    }
+    rows
+}
+
 impl RightPanelSurface {
     fn new_browser() -> Self {
         Self::Browser(Uuid::new_v4())
@@ -2378,11 +2458,18 @@ impl Waku {
     /// turn is read. Nothing here selects the delegate as the app's active
     /// session — doing that would put the delegate's own composer in the main
     /// pane, which is the top-level-task behaviour this design removes.
+    ///
+    /// Startup loads only list columns, and a delegate never reaches the
+    /// sidebar row that would otherwise hydrate it on selection, so the panel
+    /// has to ask for the transcript itself. Without this the surface opens on
+    /// a session whose `messages` are still empty and draws "no reply" for an
+    /// agent that answered.
     pub(super) fn open_delegate_surface(
         &mut self,
         delegate_id: Uuid,
         cx: &mut Context<Self>,
     ) {
+        self.ensure_session_loaded(delegate_id, cx);
         let title = self
             .state
             .sessions
@@ -5333,38 +5420,93 @@ impl Waku {
                 .clone()
                 .unwrap_or_else(|| tr!("right_panel.delegate_default_model"))
         );
-        let mut message_rows = Vec::new();
-        for message in &delegate.messages {
-            let content = message.content.trim();
-            if content.is_empty() {
-                continue;
-            }
-            let (speaker, color) = match message.role {
+        // The live relay is what makes this panel usable while the agent is
+        // still working; the transcript behind it lags by however long the
+        // synced turn takes to settle.
+        let live = self.delegate_streams.get(&delegate_id).cloned();
+        let rows = delegate_panel_rows(delegate, live.as_deref());
+        let streaming = rows.iter().any(|row| row.streaming);
+        let mut message_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let (speaker, color) = match row.role {
                 MessageRole::User => (tr!("right_panel.delegate_prompt"), theme.text_secondary),
                 MessageRole::Assistant => (tr!("right_panel.delegate_reply"), theme.text),
                 _ => (tr!("right_panel.delegate_note"), theme.text_tertiary),
             };
+            let speaker_line = div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_size(sp(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_tertiary)
+                        .child(SharedString::from(speaker)),
+                )
+                .when(row.streaming, |line| {
+                    line.child(
+                        div()
+                            .text_size(sp(11.0))
+                            .text_color(theme.accent)
+                            .child(tr!("right_panel.delegate_writing")),
+                    )
+                });
             message_rows.push(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
-                    .child(
-                        div()
-                            .text_size(sp(11.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_tertiary)
-                            .child(SharedString::from(speaker)),
-                    )
+                    .child(speaker_line)
                     .child(
                         div()
                             .text_size(sp(12.5))
                             .line_height(sp(19.0))
                             .text_color(color)
-                            .child(SharedString::from(content.to_owned())),
+                            .child(SharedString::from(row.content.clone())),
                     )
                     .into_any_element(),
             );
+        }
+        // An empty body is a state a reader has to be able to tell apart from a
+        // panel that failed to load: an agent that has not written yet is
+        // normal, and saying nothing about it reads as broken.
+        let body = if message_rows.is_empty() {
+            div()
+                .w_full()
+                .py(px(10.0))
+                .text_size(sp(12.5))
+                .text_color(theme.text_tertiary)
+                .child(if delegate.is_busy() {
+                    tr!("right_panel.delegate_starting")
+                } else {
+                    tr!("right_panel.delegate_no_reply")
+                })
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .max_w(px(width - 40.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .children(message_rows)
+                .into_any_element()
+        };
+        // Follow the tail while the agent writes, but only when new text has
+        // actually arrived: re-sending the scroll command on every frame would
+        // undo a reader who scrolled up to reread something.
+        let scroll = self
+            .right_panel_delegate_scroll
+            .borrow_mut()
+            .entry(delegate_id)
+            .or_default()
+            .clone();
+        let tail = rows.last().map(|row| row.content.len()).unwrap_or(0);
+        let followed = (delegate_id, tail);
+        if streaming && self.right_panel_delegate_tail.get() != Some(followed) {
+            self.right_panel_delegate_tail.set(Some(followed));
+            scroll.scroll_to_bottom();
         }
         div()
             .id("delegate-surface")
@@ -5430,16 +5572,9 @@ impl Waku {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&scroll)
                     .p(px(14.0))
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(width - 40.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.0))
-                            .children(message_rows),
-                    ),
+                    .child(body),
             )
             .into_any_element()
     }
@@ -5903,5 +6038,89 @@ impl Waku {
             cx.notify();
         }
         cx.stop_propagation();
+    }
+}
+
+#[allow(clippy::items_after_test_module)]
+#[cfg(test)]
+mod delegate_panel_tests {
+    use super::*;
+
+    /// The panel is opened from a card, so its delegate never goes through the
+    /// sidebar selection that hydrates a session. Reading `messages` alone
+    /// therefore drew an empty body for an agent that had already answered —
+    /// the same failure shape as the subagent surface, one layer up.
+    #[test]
+    fn a_delegate_panel_shows_an_answer_its_transcript_has_not_caught_up_to() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        session.status = SessionStatus::Working;
+        session.push_message(MessageRole::User, "summarise the change");
+        // The transcript is still empty for the answer: the delegate is mid
+        // turn, and only the relay has the text.
+        let rows = delegate_panel_rows(&session, Some("It renames the field."));
+        assert_eq!(
+            rows.last().map(|row| row.content.as_str()),
+            Some("It renames the field."),
+            "the live relay has to reach the panel while the turn is open"
+        );
+        assert!(rows.last().is_some_and(|row| row.streaming));
+    }
+
+    /// Both paths can carry the same text: the daemon relays it, and this
+    /// client's own runtime attachment folds it into the transcript. Once the
+    /// turn settles, showing both copies would print the answer twice.
+    #[test]
+    fn a_settled_answer_the_transcript_already_holds_is_not_shown_twice() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        session.push_message(MessageRole::User, "summarise the change");
+        session.push_message(MessageRole::Assistant, "It renames the field.");
+        let rows = delegate_panel_rows(&session, Some("It renames the field."));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.role == MessageRole::Assistant)
+                .count(),
+            1,
+            "the relayed copy duplicates the stored answer: {rows:?}"
+        );
+        assert!(!rows.last().is_some_and(|row| row.streaming));
+    }
+
+    /// A stored answer the relay has moved past still has to be readable: the
+    /// new turn's text belongs after it, not in place of it.
+    #[test]
+    fn a_new_turn_lands_after_the_answer_the_transcript_still_holds() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        session.push_message(MessageRole::User, "first");
+        session.push_message(MessageRole::Assistant, "first answer");
+        let rows = delegate_panel_rows(&session, Some("second answer"));
+        let contents = rows
+            .iter()
+            .map(|row| row.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            ["first", "first answer", "second answer"],
+            "the earlier turn must survive the live one"
+        );
+    }
+
+    #[test]
+    fn delegate_tab_is_reused_instead_of_stacked() {
+        let id = Uuid::new_v4();
+        let surfaces = vec![RightPanelSurface::Delegate {
+            id,
+            title: "Auditor".into(),
+        }];
+        assert_eq!(
+            reusable_surface_index(
+                &surfaces,
+                &RightPanelSurface::Delegate {
+                    id,
+                    title: "Renamed".into(),
+                }
+            ),
+            Some(0),
+            "opening the same agent twice must raise its tab, not add one"
+        );
     }
 }

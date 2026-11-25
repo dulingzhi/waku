@@ -51,6 +51,16 @@ export const sessions = sqliteTable(
      * for is made while listing.
      */
     parentSessionId: text("parent_session_id"),
+    /**
+     * The agent identity this task was started as, by catalog id.
+     *
+     * Only a delegate has one, and only when its lead named an identity when
+     * spawning it. On the list row for the same reason as `parentSessionId`:
+     * a card showing which agent is speaking reads it while listing, without
+     * loading a transcript. Null when the identity was edited away or the task
+     * was never started as one.
+     */
+    agentIdentity: text("agent_identity"),
   },
   (table) => [
     index("sessions_by_project").on(table.projectId, table.updatedAt),

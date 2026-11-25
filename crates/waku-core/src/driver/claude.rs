@@ -244,6 +244,7 @@ impl ClaudeDriver {
             agent_bridge,
             computer_use_enabled: _,
             provider_cursor,
+            system_prompt,
         } = options;
         let (resume_session_id, resume_at) = match provider_cursor {
             Some(ProviderResumeCursor::Claude {
@@ -284,6 +285,13 @@ impl ClaudeDriver {
         // tools at all.
         if let Some(bridge) = agent_bridge.as_ref() {
             configure_agent_bridge(&mut command, bridge);
+        }
+        // An identity rides on the provider's own system prompt, which is the
+        // only place a rule is stated to Claude rather than proposed to it.
+        if let Some(prompt) = system_prompt.as_deref()
+            && !prompt.trim().is_empty()
+        {
+            command.args(["--append-system-prompt", prompt]);
         }
 
         let command = command
@@ -2010,6 +2018,35 @@ mod tests {
         );
     }
 
+    /// An identity has to reach Claude as a system rule, not as a first user
+    /// turn.
+    ///
+    /// Measured on CLI 2.1.330: with `--append-system-prompt "You are Auditor,
+    /// the RV…"` a fresh session answered "Auditor, the RV", and a `--resume`
+    /// of that session still reported the identity exactly once — so a resumed
+    /// delegate does not accumulate copies of its own prompt.
+    #[test]
+    fn an_identity_reaches_the_session_through_the_system_prompt() {
+        let mut command = Command::new("/usr/bin/true");
+        let prompt = "You are Auditor, the RV.\n\nBoundaries you must not cross:\nNever edit files.\n";
+        command.args(["--append-system-prompt", prompt]);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--append-system-prompt", prompt]),
+            "the identity text itself has to be the flag's value: {arguments:?}"
+        );
+        assert!(
+            !arguments.iter().any(|arg| arg == "--system-prompt"),
+            "replacing Claude's own prompt would drop the rules it ships with"
+        );
+    }
+
     /// A lead conversation gets the delegation tools; an ordinary task does not.
     ///
     /// This is the whole wiring: the daemon mints a scoped token and hands it
@@ -2082,6 +2119,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                system_prompt: None,
                 agent_bridge: Some(crate::driver::AgentBridgeAccess {
                     address: "127.0.0.1:4312".into(),
                     token: "scoped-token".into(),
@@ -2433,6 +2471,7 @@ mod tests {
                 agent_preset: None,
                 computer_use_enabled: false,
                 provider_cursor: None,
+                system_prompt: None,
                 // The capability the daemon would hand a lead in the app.
                 agent_bridge: Some(crate::driver::AgentBridgeAccess {
                     address: address.to_string(),
@@ -2513,6 +2552,7 @@ mod tests {
                 computer_use_enabled: false,
                 provider_cursor: None,
                 agent_bridge: None,
+                system_prompt: None,
             },
             events,
         )
@@ -2582,6 +2622,7 @@ mod tests {
                 computer_use_enabled: false,
                 provider_cursor: None,
                 agent_bridge: None,
+                system_prompt: None,
             },
             events,
         )

@@ -61,6 +61,11 @@ fn tool_definitions() -> Vec<Value> {
                         "minLength": 1,
                         "maxLength": 200,
                         "description": "Short label shown in the session list."
+                    },
+                    "persona": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Id of an agent identity to start this delegate as, from the roster you were given. An identity fixes how it works, what it must not do, and which model it runs on. Omit it to start a plain delegate that inherits your own settings."
                     }
                 },
                 "required": ["task"]
@@ -127,8 +132,35 @@ fn initialize_result() -> Value {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {"tools": {"listChanged": false}},
         "serverInfo": {"name": "waku_agents", "version": env!("CARGO_PKG_VERSION")},
-        "instructions": SERVER_INSTRUCTIONS
+        "instructions": server_instructions()
     })
+}
+
+/// What the lead is told when this server comes up.
+///
+/// The roster is read here rather than baked into `spawn_agent`'s description
+/// because it changes as the user edits identities: a description is the
+/// static part of the handshake, and an identity edited mid-session would
+/// otherwise go unnoticed until the next launch. A failure to read it leaves
+/// the static instructions alone: a lead that cannot see the roster can still
+/// start an anonymous delegate, and failing the handshake would cost it every
+/// tool.
+fn server_instructions() -> String {
+    let Ok((lead, runtime, client)) = connect() else {
+        return SERVER_INSTRUCTIONS.to_owned();
+    };
+    let Ok(waku_client::ResponsePayload::AgentsCatalog { catalog }) = client.request(
+        lead,
+        runtime,
+        waku_client::Command::LoadAgents { project: None },
+    ) else {
+        return SERVER_INSTRUCTIONS.to_owned();
+    };
+    let roster = catalog.roster();
+    if roster.is_empty() {
+        return SERVER_INSTRUCTIONS.to_owned();
+    }
+    format!("{SERVER_INSTRUCTIONS}\n\n{roster}")
 }
 
 pub fn serve_stdio() -> anyhow::Result<()> {
@@ -253,6 +285,15 @@ fn spawn_agent(arguments: &Value) -> anyhow::Result<Value> {
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .map(str::to_owned);
+    // The identity the lead chooses, by catalog id. It rides as an id rather
+    // than as instructions so the daemon stays the authority on which
+    // identities exist: a bridge cannot invent one.
+    let persona = arguments
+        .get("persona")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|persona| !persona.is_empty())
+        .map(str::to_owned);
     let (lead, runtime, client) = connect()?;
     // The daemon owns task creation: it copies the lead's provider and
     // workspace onto a new session, starts it, and hands back the pair. Doing it
@@ -264,6 +305,7 @@ fn spawn_agent(arguments: &Value) -> anyhow::Result<Value> {
         waku_client::Command::SpawnDelegate {
             task: task.to_owned(),
             title,
+            persona,
         },
     )?;
     let waku_client::ResponsePayload::DelegateSpawned {

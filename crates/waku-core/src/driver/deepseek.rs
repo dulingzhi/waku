@@ -110,6 +110,10 @@ impl DeepSeekDriver {
             computer_use_enabled: _,
             provider_cursor,
             agent_bridge: _,
+            // This provider has no system-prompt gate of its own, so an identity
+            // cannot be injected here. Accepted and ignored rather than silently
+            // prepended to the first user message, which a model can talk itself out of.
+            system_prompt: _,
         } = options;
         let (requested_session_id, resuming) = match provider_cursor {
             Some(ProviderResumeCursor::DeepSeek { session_id }) if !session_id.is_empty() => {

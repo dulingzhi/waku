@@ -19,7 +19,7 @@ const SETTINGS_SEARCH_CONTEXT: &str = "SettingsSidebar > TextInput";
 
 /// The sidebar's rows in display order, each with the keyword haystack the
 /// search field filters against.
-const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 9] = [
+const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 10] = [
     (
         SettingsPage::General,
         "settings.general",
@@ -43,6 +43,12 @@ const SETTINGS_PAGES: [(SettingsPage, &str, &str, &str); 9] = [
         "settings.skills",
         "icons/package.svg",
         "settings.skills_keywords",
+    ),
+    (
+        SettingsPage::Agents,
+        "settings.agents",
+        "icons/users.svg",
+        "settings.agents_keywords",
     ),
     (
         SettingsPage::Claude,
@@ -370,6 +376,7 @@ impl Waku {
                         SettingsPage::General => tr!("settings.general"),
                         SettingsPage::Providers => tr!("settings.providers"),
                         SettingsPage::Skills => tr!("settings.skills"),
+                        SettingsPage::Agents => tr!("settings.agents"),
                         SettingsPage::Claude => tr!("settings.claude"),
                         SettingsPage::Usage => tr!("settings.usage"),
                         SettingsPage::Daemon => tr!("settings.daemon"),
@@ -382,6 +389,7 @@ impl Waku {
                 SettingsPage::General => self.render_general_settings(cx),
                 SettingsPage::Providers => self.render_providers_settings(cx),
                 SettingsPage::Skills => self.render_skills_settings(cx),
+                SettingsPage::Agents => self.render_agents_settings(cx),
                 SettingsPage::Claude => self.render_claude_settings(cx),
                 SettingsPage::Usage => self.render_usage_settings(cx),
                 SettingsPage::Daemon => self.render_daemon_settings(cx),
