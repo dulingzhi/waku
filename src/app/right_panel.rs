@@ -194,6 +194,29 @@ fn workspace_relative_file_path(workspace: &Path, target: &Path) -> Option<Strin
     relative(&workspace, &target)
 }
 
+/// Which reader can open a preview, decided from the path's shape.
+///
+/// Three cases, and the first is the one that used to be wrong:
+///
+/// * a **relative** path is already inside the workspace — the file tree and
+///   the editor both name files that way — so it is a confined read whose
+///   relative name is the path itself. Routing it to the absolute reader
+///   rejected every image the file tree could show.
+/// * an **absolute** path under the root is the same file under a full name, so
+///   it uses the same confined reader.
+/// * any other absolute path may be anything the model read, including a file
+///   on another drive, and only the absolute reader reaches it.
+///
+/// `None` means the absolute reader, which is the only one that can serve a
+/// path known to be outside.
+fn preview_read_plan(root: &Path, path: &Path) -> Option<String> {
+    if path.is_absolute() {
+        workspace_relative_file_path(root, path)
+    } else {
+        Some(path.to_string_lossy().into_owned())
+    }
+}
+
 /// Whether a path outside the workspace should open as a preview rather than in
 /// the file manager.
 ///
@@ -1087,6 +1110,15 @@ impl RightPanelSurface {
             Self::Files => tr!("right_panel.files"),
             Self::Diff => tr!("right_panel.diff"),
             Self::File(path) => path.rsplit('/').next().unwrap_or(path).to_owned(),
+            // The tab names the delegate's own title, falling back to the
+            // generic label when it has none yet.
+            Self::Delegate { title, .. } => {
+                if title.trim().is_empty() {
+                    tr!("right_panel.delegate")
+                } else {
+                    title.clone()
+                }
+            }
         }
     }
 
@@ -1098,6 +1130,7 @@ impl RightPanelSurface {
             Self::Files => "icons/folder.svg",
             Self::Diff => "icons/file-diff.svg",
             Self::File(path) => file_icon_for_path(path),
+            Self::Delegate { .. } => "icons/bot.svg",
         }
     }
 }
@@ -1139,6 +1172,11 @@ fn reusable_surface_index(
         RightPanelSurface::Files | RightPanelSurface::Diff | RightPanelSurface::File(_) => {
             surfaces.iter().position(|surface| surface == requested)
         }
+        // One tab per delegate: opening the same agent twice should raise the
+        // tab already showing it rather than stack a second copy.
+        RightPanelSurface::Delegate { id, .. } => surfaces.iter().position(|surface| {
+            matches!(surface, RightPanelSurface::Delegate { id: candidate, .. } if candidate == id)
+        }),
     }
 }
 
@@ -1371,13 +1409,56 @@ mod tests {
         );
     }
 
+    /// A preview the file tree opens names a path *inside* the workspace.
+    ///
+    /// Those names arrive relative — `Client\Resources\Skins\…\shot.png` is what
+    /// the tree holds — and the confined reader is the one that resolves them
+    /// against the root. Asking the absolute-path reader first is what turned
+    /// every in-workspace image into "a preview path must be absolute", so this
+    /// pins the relative case to the confined reader and leaves the absolute
+    /// reader for the paths that really are outside.
+    #[test]
+    fn a_relative_preview_is_read_through_the_workspace_root() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let relative = Path::new("assets").join("up_hover.png");
+
+        assert_eq!(
+            preview_read_plan(workspace, &relative),
+            Some(relative.to_string_lossy().into_owned()),
+            "a workspace-relative name is the confined read, not an absolute one"
+        );
+    }
+
+    /// An absolute path is classified by where it lands: inside the workspace it
+    /// is the same confined read, outside it only the absolute reader can help.
+    #[test]
+    fn an_absolute_preview_is_routed_by_whether_it_is_inside_the_workspace() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let inside = workspace.join("assets").join("up_hover.png");
+        assert_eq!(
+            preview_read_plan(workspace, &inside),
+            Some(
+                Path::new("assets")
+                    .join("up_hover.png")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+
+        let outside = workspace.join("..").join("elsewhere").join("shot.png");
+        assert_eq!(
+            preview_read_plan(workspace, &outside),
+            None,
+            "a path outside the root needs the reader that accepts any absolute path"
+        );
+    }
+
     /// A relative link that climbs out of the workspace is not a project file.
     /// Resolving it lexically keeps it out of the confined reader, which would
     /// reject it anyway, and hands it to the file manager like any other path
     /// the panel cannot address.
     #[test]
-    fn a_relative_link_escaping_the_workspace_is_not_a_project_file() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fn a_relative_link_escaping_the_workspace_is_not_a_project_file() {        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert_eq!(
             transcript_link_route("../elsewhere/shot.png", Some(workspace)),
             TranscriptLinkRoute::Finder(normalized_path(&workspace.join("../elsewhere/shot.png")))
@@ -2291,8 +2372,40 @@ impl Waku {
         }
     }
 
-    pub(super) fn open_right_panel_surface(
+    /// Opens one subagent conversation in the right panel.
+    ///
+    /// The card in the lead's transcript is a summary; this is where the whole
+    /// turn is read. Nothing here selects the delegate as the app's active
+    /// session — doing that would put the delegate's own composer in the main
+    /// pane, which is the top-level-task behaviour this design removes.
+    pub(super) fn open_delegate_surface(
         &mut self,
+        delegate_id: Uuid,
+        cx: &mut Context<Self>,
+    ) {
+        let title = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == delegate_id)
+            .map(|session| {
+                session
+                    .auto_title
+                    .clone()
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| session.title.clone())
+            })
+            .unwrap_or_default();
+        self.open_right_panel_surface(
+            RightPanelSurface::Delegate {
+                id: delegate_id,
+                title,
+            },
+            cx,
+        );
+    }
+
+    pub(super) fn open_right_panel_surface(        &mut self,
         surface: RightPanelSurface,
         cx: &mut Context<Self>,
     ) {
@@ -2511,6 +2624,9 @@ impl Waku {
             None => self.render_right_panel_chooser(cx).into_any_element(),
             Some(RightPanelSurface::BackgroundWork { key, .. }) => self
                 .render_background_work_surface(&key, cx)
+                .into_any_element(),
+            Some(RightPanelSurface::Delegate { id, .. }) => self
+                .render_delegate_surface(id, width, window, cx)
                 .into_any_element(),
             Some(RightPanelSurface::Files) => self
                 .render_right_panel_files(width, window, cx)
@@ -3814,17 +3930,19 @@ impl Waku {
 
         let workspace = waku_client::WorkspaceClient::new(self.daemon.client());
         let relative = relative_path.to_owned();
-        // A preview opened from the file tree names a path inside the workspace
-        // and goes through the confined reader. One opened from the transcript
-        // may name anything the model read, including a file on another drive,
-        // and only the absolute-path reader can reach it. The path decides,
-        // before any read: a file that is not under the root would be rejected
-        // there anyway, so asking that reader first would turn a working preview
-        // into an error for the very case this exists for.
-        let inside_workspace = Path::new(&relative)
-            .is_absolute()
-            .then(|| workspace_relative_file_path(&project_path, Path::new(&relative)))
-            .flatten();
+        // A preview names its file one of two ways, and the shape decides which
+        // reader can reach it.
+        //
+        // A relative path is already a path *inside* the workspace — that is
+        // what the file tree and the editor keep — so it belongs to the confined
+        // reader, which resolves it against the root. Asking for an absolute path
+        // first rejected exactly the case this preview was opened for.
+        //
+        // An absolute path may point anywhere the model read, including a file on
+        // another drive, so it is classified by where it lands: under the root it
+        // is the same confined read under a full name, and anywhere else only the
+        // absolute reader can open it.
+        let inside_workspace = preview_read_plan(&project_path, Path::new(&relative));
         cx.spawn(async move |waku, cx| {
             let read = cx
                 .background_executor()
@@ -5178,13 +5296,160 @@ impl Waku {
         }
     }
 
+    /// One subagent's transcript, read without leaving the lead.
+    ///
+    /// The messages are shown as plain text with their role, which is all a
+    /// delegate needs: the delegate does no work the lead cannot see in its own
+    /// conversation, and this panel exists to answer "what did that agent
+    /// actually say" without a trip through the task list.
+    fn render_delegate_surface(
+        &self,
+        delegate_id: Uuid,
+        width: f32,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::current(cx);
+        let Some(delegate) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == delegate_id)
+        else {
+            return self
+                .render_right_panel_empty_message(
+                    tr!("right_panel.delegate_unavailable"),
+                    tr!("right_panel.delegate_unavailable_description"),
+                    cx,
+                )
+                .into_any_element();
+        };
+        let status = tr!(delegate.label_for_status());
+        let runtime_line = format!(
+            "{} · {}",
+            delegate.provider.display_name(),
+            delegate
+                .model
+                .clone()
+                .unwrap_or_else(|| tr!("right_panel.delegate_default_model"))
+        );
+        let mut message_rows = Vec::new();
+        for message in &delegate.messages {
+            let content = message.content.trim();
+            if content.is_empty() {
+                continue;
+            }
+            let (speaker, color) = match message.role {
+                MessageRole::User => (tr!("right_panel.delegate_prompt"), theme.text_secondary),
+                MessageRole::Assistant => (tr!("right_panel.delegate_reply"), theme.text),
+                _ => (tr!("right_panel.delegate_note"), theme.text_tertiary),
+            };
+            message_rows.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(
+                        div()
+                            .text_size(sp(11.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_tertiary)
+                            .child(SharedString::from(speaker)),
+                    )
+                    .child(
+                        div()
+                            .text_size(sp(12.5))
+                            .line_height(sp(19.0))
+                            .text_color(color)
+                            .child(SharedString::from(content.to_owned())),
+                    )
+                    .into_any_element(),
+            );
+        }
+        div()
+            .id("delegate-surface")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(14.0))
+                    .py(px(10.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(icon("icons/bot.svg", 13.0, theme.accent))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_size(sp(13.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(
+                                        delegate
+                                            .auto_title
+                                            .clone()
+                                            .filter(|title| !title.trim().is_empty())
+                                            .unwrap_or_else(|| delegate.title.clone()),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(sp(11.5))
+                                    .text_color(if delegate.is_busy() {
+                                        theme.accent
+                                    } else {
+                                        theme.text_tertiary
+                                    })
+                                    .child(SharedString::from(status)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(sp(11.0))
+                            .text_color(theme.text_ghost)
+                            .child(SharedString::from(runtime_line)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("delegate-surface-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(14.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(width - 40.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.0))
+                            .children(message_rows),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_right_panel_empty_message(
         &self,
         title: String,
         description: String,
         cx: &mut Context<Self>,
-    ) -> Div {
-        let theme = Theme::current(cx);
+    ) -> Div {        let theme = Theme::current(cx);
         div()
             .flex_1()
             .min_h_0()
