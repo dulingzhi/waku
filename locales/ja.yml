@@ -823,13 +823,7 @@ right_panel.terminal: ターミナル
 right_panel.files: ファイル
 right_panel.diff: レビュー
 right_panel.task_list: タスク一覧
-right_panel.task_list_description: エージェントが取り組んでいるタスク一覧を表示
-right_panel.task_list_empty: タスク一覧はまだありません
-right_panel.task_list_empty_description: エージェントが計画を立てたり Todo を書き込むと、ここにタスク一覧が表示されます。
 right_panel.task_list_progress: "%{done} / %{total} 完了"
-right_panel.task_done: 完了
-right_panel.task_in_progress: 進行中
-right_panel.task_pending: 未着手
 right_panel.history: 履歴
 right_panel.history_description: プロバイダーネイティブの会話を続ける
 right_panel.history_loading: 会話を読み込み中…

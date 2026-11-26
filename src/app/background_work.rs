@@ -1,4 +1,6 @@
+use super::right_panel::latest_task_list;
 use super::*;
+use crate::model::{TaskList, TaskListItemStatus};
 
 const MAX_BACKGROUND_OUTPUT_BYTES: usize = 512 * 1024;
 const MAX_SETTLED_BACKGROUND_ITEMS: usize = 24;
@@ -1017,6 +1019,10 @@ impl Waku {
         let delegates = session_id
             .map(|session_id| self.delegate_summary_entries(session_id))
             .unwrap_or_default();
+        // The task list the agent generated in this conversation. It belongs
+        // with the environment and background work of the conversation, not as
+        // a row pinned above the composer, so the popover is its home.
+        let task_list = session.and_then(latest_task_list);
         let has_live_work = processes > 0 || agents > 0 || delegates.iter().any(|entry| entry.busy);
         let summary = background_work_count_summary(processes, agents);
         let theme = Theme::current(cx);
@@ -1130,6 +1136,7 @@ impl Waku {
                     environment.clone(),
                     entries.clone(),
                     delegates.clone(),
+                    task_list.clone(),
                     weak.clone(),
                     cx,
                 )
@@ -1768,6 +1775,7 @@ fn render_background_summary_card(
     environment: Option<EnvironmentSummary>,
     entries: Rc<Vec<BackgroundSummaryEntry>>,
     delegates: Vec<DelegateSummaryEntry>,
+    task_list: Option<TaskList>,
     weak: WeakEntity<Waku>,
     cx: &mut App,
 ) -> AnyElement {
@@ -1836,7 +1844,14 @@ fn render_background_summary_card(
             &theme,
         ));
     }
-    if has_identifiers && (has_environment || has_background || has_delegates) {
+    let has_task_list = task_list.is_some();
+    if has_task_list && (has_environment || has_background || has_delegates) {
+        content = content.child(div().mx(px(8.0)).h(px(1.0)).bg(theme.border));
+    }
+    if let Some(task_list) = task_list {
+        content = content.child(render_task_list_section(&task_list, &theme));
+    }
+    if has_identifiers && (has_environment || has_background || has_delegates || has_task_list) {
         content = content.child(div().mx(px(8.0)).h(px(1.0)).bg(theme.border));
     }
     if let Some(identifiers) = identifiers {
@@ -1854,6 +1869,87 @@ fn render_background_summary_card(
         .shadow_lg()
         .child(content)
         .into_any_element()
+}
+
+/// The agent-generated task list, as a section of the environment popover.
+///
+/// It is compact: a heading with the done/total count, then one row per item
+/// with its status. A list that is long still scrolls with the rest of the
+/// card, and the raw plan activity stays the source of truth.
+fn render_task_list_section(task_list: &TaskList, theme: &Theme) -> Stateful<Div> {
+    let total = task_list.items.len();
+    let done = task_list.completed();
+    let mut rows = div().flex().flex_col().gap(px(2.0));
+    for item in &task_list.items {
+        let (icon_path, color) = match item.status {
+            TaskListItemStatus::Completed => ("icons/check.svg", theme.success),
+            TaskListItemStatus::InProgress => ("icons/loader-circle.svg", theme.accent),
+            TaskListItemStatus::Pending => ("icons/hourglass.svg", theme.text_ghost),
+        };
+        let text = if item.status == TaskListItemStatus::Completed {
+            &item.content
+        } else {
+            item.active_form.as_ref().unwrap_or(&item.content)
+        };
+        rows = rows.child(
+            div()
+                .min_h(px(24.0))
+                .px(px(8.0))
+                .flex()
+                .items_start()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .pt(px(2.0))
+                        .flex_none()
+                        .child(icon(icon_path, 12.0, color)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .text_size(sp(12.5))
+                        .line_height(sp(15.0))
+                        .text_color(if item.status == TaskListItemStatus::Completed {
+                            theme.text_ghost
+                        } else {
+                            theme.text
+                        })
+                        .child(text.clone()),
+                ),
+        );
+    }
+    div()
+        .id("environment-task-list-section")
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(26.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(sp(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_tertiary)
+                        .child(tr!("right_panel.task_list")),
+                )
+                .child(
+                    div()
+                        .text_size(sp(11.0))
+                        .text_color(theme.text_ghost)
+                        .child(tr!(
+                            "right_panel.task_list_progress",
+                            done = done,
+                            total = total
+                        )),
+                ),
+        )
+        .child(rows)
 }
 
 fn render_task_identifiers_section(

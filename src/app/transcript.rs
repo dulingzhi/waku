@@ -18,12 +18,7 @@ impl Waku {
         let fingerprint = self
             .selected_session()
             .map_or(EMPTY_TRANSCRIPT_FINGERPRINT, |session| {
-                let has_delegates = self
-                    .state
-                    .sessions
-                    .iter()
-                    .any(|candidate| candidate.parent_session_id == Some(session.id));
-                transcript_rows_fingerprint(session, &self.collapsed_turns, has_delegates)
+                transcript_rows_fingerprint(session, &self.collapsed_turns)
             });
         if self.transcript_row_kinds_fingerprint.get() != Some(fingerprint) {
             let next_kinds = self.selected_transcript_row_kinds();
@@ -35,20 +30,10 @@ impl Waku {
 
     pub(super) fn selected_transcript_row_kinds(&self) -> Vec<TranscriptRowKind> {
         self.selected_session().map_or_else(Vec::new, |session| {
-            let mut rows = folded_transcript_row_kinds(session, &self.collapsed_turns);
-            // The subagents hang at the tail: they belong to the conversation
-            // as a whole rather than to whichever turn happened to be on screen
-            // when the lead spawned them, and a row that moved with each new
-            // turn would be unreachable while the group is still working.
-            if self
-                .state
-                .sessions
-                .iter()
-                .any(|candidate| candidate.parent_session_id == Some(session.id))
-            {
-                rows.push(TranscriptRowKind::Delegates);
-            }
-            rows
+            // Subagents are reached from the "environment and background work"
+            // popover, not as a row pinned above the composer: a group run must
+            // not push its delegates into the conversation the user is reading.
+            folded_transcript_row_kinds(session, &self.collapsed_turns)
         })
     }
 
@@ -449,15 +434,6 @@ pub(super) enum TranscriptRowKind {
     /// that has not produced a chunk yet still shows visible progress, and a
     /// streaming one shows it below whatever content has arrived.
     WorkingIndicator,
-    /// The subagents this conversation spawned, grouped where their creator
-    /// is.
-    ///
-    /// One row rather than one per delegate, because they share a place in the
-    /// conversation: those tasks belong to this one and are read from here.
-    /// It sits at the tail, after the turn that started them, so a delegate
-    /// started mid-conversation still appears under the work it belongs to
-    /// instead of scrolling away with the message that mentioned it.
-    Delegates,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -667,7 +643,6 @@ pub(super) fn assistant_response_footer(
                 | TranscriptRowKind::TurnCollapsed(_)
                 | TranscriptRowKind::ResponseFooter(_, _)
                 | TranscriptRowKind::ChangedFiles(_)
-                | TranscriptRowKind::Delegates
                 | TranscriptRowKind::WorkingIndicator => None,
             })
             .filter(|part| !part.content.trim().is_empty())
@@ -861,13 +836,8 @@ pub(super) fn transcript_row_kinds(
 pub(super) fn transcript_rows_fingerprint(
     session: &AgentSession,
     collapsed_turns: &HashSet<Uuid>,
-    has_delegates: bool,
 ) -> u64 {
     let mut hash = mix_uuid(EMPTY_TRANSCRIPT_FINGERPRINT, session.id);
-    // The delegates row exists only while the conversation has any, and the
-    // delegates themselves live in other sessions: without this bit, spawning
-    // the first one would add a row the cached list never learns about.
-    hash = mix(hash, has_delegates as u64);
 
     // The working indicator row exists only while the session is busy, and a
     // driver error can drop the busy status without touching any turn — the
@@ -1154,7 +1124,6 @@ fn response_footer_message_index_from_rows(
         | TranscriptRowKind::TurnCollapsed(_)
         | TranscriptRowKind::ResponseFooter(_, _)
         | TranscriptRowKind::ChangedFiles(_)
-        | TranscriptRowKind::Delegates
         | TranscriptRowKind::WorkingIndicator => None,
     })?;
     let message = session.messages.get(message_index)?;
@@ -1169,7 +1138,6 @@ fn response_footer_message_index_from_rows(
             | TranscriptRowKind::TurnCollapsed(_)
             | TranscriptRowKind::ResponseFooter(_, _)
             | TranscriptRowKind::ChangedFiles(_)
-            | TranscriptRowKind::Delegates
             | TranscriptRowKind::WorkingIndicator => None,
         })
         .any(|message| !message.content.trim().is_empty())
@@ -1198,7 +1166,6 @@ fn turn_answer_start(session: &AgentSession, turn_rows: &[TranscriptRowKind]) ->
         | TranscriptRowKind::TurnCollapsed(_)
         | TranscriptRowKind::ResponseFooter(_, _)
         | TranscriptRowKind::ChangedFiles(_)
-        | TranscriptRowKind::Delegates
         | TranscriptRowKind::WorkingIndicator => false,
     };
     let Some(last_text) = turn_rows.iter().rposition(is_answer_text) else {
@@ -1217,7 +1184,7 @@ fn row_turn_id(session: &AgentSession, row: TranscriptRowKind) -> Option<Uuid> {
         TranscriptRowKind::TurnCollapsed(turn_id) => Some(turn_id),
         TranscriptRowKind::ResponseFooter(turn_id, _) => Some(turn_id),
         TranscriptRowKind::ChangedFiles(turn_id) => Some(turn_id),
-        TranscriptRowKind::Delegates | TranscriptRowKind::WorkingIndicator => None,
+        TranscriptRowKind::WorkingIndicator => None,
     }
 }
 
@@ -1234,7 +1201,6 @@ pub(super) fn response_row_turn_id(session: &AgentSession, row: TranscriptRowKin
                 .turn_id
         }
         TranscriptRowKind::WorkingIndicator => None,
-        TranscriptRowKind::Delegates => None,
         TranscriptRowKind::TurnBlock(_)
         | TranscriptRowKind::TurnCollapsed(_)
         | TranscriptRowKind::ResponseFooter(_, _)

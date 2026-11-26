@@ -37,9 +37,8 @@ use crate::model::{
     ContextUsage, DriverEvent, FavoriteModel, Message, MessageAttachment, MessageRole,
     PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
     ProviderSessionHistory, ProviderSessionSummary, ProviderSessionUnavailable, QueuedMessage,
-    ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TaskList, TaskListItemStatus,
-    TranscriptBlock, TurnStatus, UserInputAnswer, UserInputQuestion, compact_path, unix_time,
-    unix_time_millis,
+    ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock, TurnStatus,
+    UserInputAnswer, UserInputQuestion, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -585,9 +584,6 @@ enum RightPanelSurface {
     Files,
     Diff,
     File(String),
-    /// The task list an agent generated in the current conversation, shown as
-    /// structured items with their status instead of a raw plan-activity blob.
-    TaskList,
     /// The provider-native conversations on this machine, so a task Waku did
     /// not start can be picked up and continued here.
     History,
