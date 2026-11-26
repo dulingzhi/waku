@@ -20,6 +20,20 @@ use crate::model::{
 const TRANSCRIPT_TYPES: [&str; 5] = ["user", "assistant", "attachment", "system", "progress"];
 const SUMMARY_EDGE_BYTES: u64 = 256 * 1024;
 
+/// The head of a transcript that Claude's own `/resume` listing reads.
+///
+/// The CLI enriches a session from a fixed buffer at the start of the file, so
+/// every record that decides whether the conversation is offered lives here.
+const ENTRYPOINT_HEAD_BYTES: usize = 64 * 1024;
+
+/// How Claude records the entry point Waku launches it with.
+const SDK_ENTRYPOINT_RECORD: &[u8] = b"\"entrypoint\":\"sdk-cli\"";
+
+/// The same record under the interactive entry point, padded to the same length
+/// with the whitespace JSON allows after a colon. Keeping the byte length is
+/// what makes this safe to write while the CLI may still be appending.
+const CLI_ENTRYPOINT_RECORD: &[u8] = b"\"entrypoint\":    \"cli\"";
+
 pub struct ForkedClaudeSession {
     pub session_id: String,
     pub message_ids: HashMap<String, String>,
@@ -100,6 +114,74 @@ pub fn provider_session_history(
     turn_limit: usize,
 ) -> anyhow::Result<ProviderSessionHistory> {
     provider_session_history_in(&projects_directory()?, session_id, turn_limit)
+}
+
+/// Rewrites a transcript's entry point so Claude's own `/resume` lists it.
+///
+/// Claude records the entry point that launched it on every transcript record,
+/// and its `/resume` picker drops sessions whose entry point belongs to an SDK
+/// run — exactly how Waku launches Claude (`-p --input-format stream-json`
+/// records `sdk-cli`). The conversation is a normal transcript in the project
+/// directory, so the only thing hiding it from its own terminal is that label.
+///
+/// The record is rewritten to the interactive entry point in place. The CLI
+/// keeps running as an SDK session — nothing about the live process changes,
+/// and the interactive label is what an interactive resume of this file would
+/// have written. The edit is length-preserving and confined to complete lines
+/// in the head, so it never moves or truncates the tail the CLI appends to.
+///
+/// Returns how many records were rewritten, so a caller can tell a first pass
+/// from a no-op. A session that is not on disk yet (a fresh conversation) and
+/// a transcript another process holds open both surface as errors: the caller
+/// retries on the next turn instead of failing the turn.
+pub fn normalize_session_entrypoint(session_id: &str) -> anyhow::Result<usize> {
+    normalize_session_entrypoint_in(&projects_directory()?, session_id)
+}
+
+fn normalize_session_entrypoint_in(
+    projects_directory: &Path,
+    session_id: &str,
+) -> anyhow::Result<usize> {
+    normalize_entrypoint_at(&find_session_file(projects_directory, session_id)?)
+}
+
+fn normalize_entrypoint_at(path: &Path) -> anyhow::Result<usize> {
+    assert_eq!(
+        SDK_ENTRYPOINT_RECORD.len(),
+        CLI_ENTRYPOINT_RECORD.len(),
+        "the entry point rewrite has to keep the file's length"
+    );
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let mut head = vec![0_u8; ENTRYPOINT_HEAD_BYTES];
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..])? {
+            0 => break,
+            read => filled += read,
+        }
+    }
+    head.truncate(filled);
+
+    let mut patched = 0;
+    let mut line_start = 0;
+    // Only a line that ended is a line the CLI finished appending; the trailing
+    // partial one is rewritten on the next pass rather than raced with.
+    while let Some(newline) = head[line_start..].iter().position(|byte| *byte == b'\n') {
+        let line_end = line_start + newline;
+        let mut at = line_start;
+        while let Some(found) = head[at..line_end]
+            .windows(SDK_ENTRYPOINT_RECORD.len())
+            .position(|window| window == SDK_ENTRYPOINT_RECORD)
+        {
+            let offset = at + found;
+            file.seek(SeekFrom::Start(offset as u64))?;
+            file.write_all(CLI_ENTRYPOINT_RECORD)?;
+            patched += 1;
+            at = offset + CLI_ENTRYPOINT_RECORD.len();
+        }
+        line_start = line_end + 1;
+    }
+    Ok(patched)
 }
 
 fn projects_directory() -> anyhow::Result<PathBuf> {
@@ -1028,6 +1110,10 @@ fn fork_session_at_in(
         file.write_all(b"\n")?;
     }
     file.flush()?;
+    // A rewind copies the source's records, entry point included, so a fork of
+    // a session Waku created would otherwise carry the SDK label too — and an
+    // invisible fork is exactly the conversation the user rewound *to*.
+    normalize_entrypoint_at(&fork_path)?;
 
     Ok(ForkedClaudeSession {
         session_id: forked_session_id,
@@ -1504,6 +1590,110 @@ mod tests {
             }),
         ]);
         assert_eq!(session_goal_in(&projects, SESSION), ClaudeGoalState::None);
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn entrypoint_fixture() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("waku-claude-entrypoint-{}", Uuid::new_v4()));
+        let project = root.join("projects").join("-tmp-project");
+        fs::create_dir_all(&project).unwrap();
+        (root, project)
+    }
+
+    /// Claude's `/resume` hides sessions whose records carry the SDK entry point
+    /// Waku launches Claude with. The rewrite has to turn every record's label into
+    /// the interactive one, and it has to do it without changing the file's length:
+    /// the CLI is appending to that file while Waku edits its head.
+    #[test]
+    fn an_sdk_session_becomes_visible_to_claudes_own_resume() {
+        let (root, project) = entrypoint_fixture();
+        let path = project.join(format!("{SESSION}.jsonl"));
+        let mut file = fs::File::create(&path).unwrap();
+        for entry in [
+            json!({"type":"user","sessionId":SESSION,"entrypoint":"sdk-cli","message":{"role":"user","content":"hello"}}),
+            json!({"type":"assistant","sessionId":SESSION,"entrypoint":"sdk-cli","message":{"role":"assistant","content":[]}}),
+        ] {
+            serde_json::to_writer(&mut file, &entry).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        drop(file);
+        let before = fs::read(&path).unwrap();
+
+        assert_eq!(
+            normalize_session_entrypoint_in(&root.join("projects"), SESSION).unwrap(),
+            2
+        );
+
+        let after = fs::read(&path).unwrap();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "the rewrite has to keep the file's length so an append cannot be raced"
+        );
+        let text = String::from_utf8(after).unwrap();
+        assert!(!text.contains("sdk-cli"), "{text}");
+        for line in text.lines() {
+            let entry: Value = serde_json::from_str(line).expect("every record still parses");
+            assert_eq!(entry["entrypoint"], "cli", "{line}");
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A conversation the user started in a terminal is already listed, and
+    /// rewriting it would touch a file Waku did not create.
+    #[test]
+    fn a_terminal_session_is_left_alone() {
+        let (root, project) = entrypoint_fixture();
+        let path = project.join(format!("{SESSION}.jsonl"));
+        let record = json!({"type":"user","sessionId":SESSION,"entrypoint":"cli"}).to_string();
+        fs::write(&path, format!("{record}\n")).unwrap();
+        let before = fs::read(&path).unwrap();
+
+        assert_eq!(
+            normalize_session_entrypoint_in(&root.join("projects"), SESSION).unwrap(),
+            0
+        );
+
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A record the CLI has not finished writing yet is not a record to rewrite:
+    /// the next pass sees its newline and takes it then.
+    #[test]
+    fn a_record_the_cli_is_still_appending_is_left_for_the_next_pass() {
+        let (root, project) = entrypoint_fixture();
+        let path = project.join(format!("{SESSION}.jsonl"));
+        let complete =
+            json!({"type":"user","sessionId":SESSION,"entrypoint":"sdk-cli"}).to_string();
+        let partial =
+            json!({"type":"assistant","sessionId":SESSION,"entrypoint":"sdk-cli"}).to_string();
+        fs::write(&path, format!("{complete}\n{partial}")).unwrap();
+
+        assert_eq!(
+            normalize_session_entrypoint_in(&root.join("projects"), SESSION).unwrap(),
+            1
+        );
+
+        let text = fs::read_to_string(&path).unwrap();
+        let mut lines = text.split('\n');
+        assert!(lines.next().unwrap().contains(r#""entrypoint":    "cli""#));
+        assert_eq!(
+            lines.next().unwrap(),
+            partial,
+            "the record without its newline is untouched"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A brand-new conversation has no transcript until its first record is
+    /// written, so the caller gets an error to retry rather than a panic.
+    #[test]
+    fn a_session_that_is_not_on_disk_yet_reports_an_error() {
+        let (root, _project) = entrypoint_fixture();
+
+        assert!(normalize_session_entrypoint_in(&root.join("projects"), SESSION).is_err());
+
         fs::remove_dir_all(root).ok();
     }
 }

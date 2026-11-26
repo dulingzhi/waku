@@ -29,7 +29,7 @@ actions!(
 const SEARCH_CONTEXT: &str = "CommandPalette > TextInput";
 const MAX_TASK_RESULTS: usize = 12;
 const MAX_RESUME_RESULTS: usize = 30;
-const PROVIDER_SESSION_CATALOG_LIMIT: usize = 250;
+pub(super) const PROVIDER_SESSION_CATALOG_LIMIT: usize = 250;
 const MESSAGE_SEARCH_LIMIT: usize = 50;
 const MESSAGE_SEARCH_CACHE_CAPACITY: usize = 24;
 const PAGE_STEP: isize = 7;
@@ -320,7 +320,10 @@ fn should_keep_previous_command_palette_results(
     next_result_count == 0 && search_pending && previous_result_count > 0
 }
 
-fn same_provider_session(left: &ProviderResumeCursor, right: &ProviderResumeCursor) -> bool {
+pub(super) fn same_provider_session(
+    left: &ProviderResumeCursor,
+    right: &ProviderResumeCursor,
+) -> bool {
     left.provider() == right.provider() && left.native_id() == right.native_id()
 }
 
@@ -1333,7 +1336,7 @@ impl Waku {
         }
     }
 
-    fn default_resume_provider(&self) -> ProviderKind {
+    pub(super) fn default_resume_provider(&self) -> ProviderKind {
         self.selected_session()
             .map(|session| session.provider)
             .or_else(|| {
@@ -1411,7 +1414,7 @@ impl Waku {
         .detach();
     }
 
-    fn import_provider_session(
+    pub(super) fn import_provider_session(
         &mut self,
         summary: ProviderSessionSummary,
         history: ProviderSessionHistory,

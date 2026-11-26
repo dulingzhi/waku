@@ -36,9 +36,9 @@ use crate::model::{
     BackgroundWorkKey, BackgroundWorkKind, BackgroundWorkStatus, Checkpoint, CheckpointStatus,
     ContextUsage, DriverEvent, FavoriteModel, Message, MessageAttachment, MessageRole,
     PendingPermission, Project, ProviderKind, ProviderModel, ProviderProbe, ProviderResumeCursor,
-    ProviderSessionHistory, ProviderSessionSummary, QueuedMessage, ReasoningBlock, RuntimeMode,
-    SessionStatus, SessionWorkspace, TranscriptBlock, TurnStatus, UserInputAnswer,
-    UserInputQuestion, compact_path, unix_time, unix_time_millis,
+    ProviderSessionHistory, ProviderSessionSummary, ProviderSessionUnavailable, QueuedMessage,
+    ReasoningBlock, RuntimeMode, SessionStatus, SessionWorkspace, TranscriptBlock, TurnStatus,
+    UserInputAnswer, UserInputQuestion, compact_path, unix_time, unix_time_millis,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -584,6 +584,9 @@ enum RightPanelSurface {
     Files,
     Diff,
     File(String),
+    /// The provider-native conversations on this machine, so a task Waku did
+    /// not start can be picked up and continued here.
+    History,
 }
 
 /// A turn whose checkpoint still has to be captured.
@@ -1537,6 +1540,20 @@ pub struct Waku {
     right_panel_tabs_scroll_handle: ScrollHandle,
     right_panel_files_scroll_handle: ScrollHandle,
     right_panel_files_scrollbar: Rc<ScrollbarState>,
+    /// The native conversations the History surface lists, the provider they
+    /// belong to, and the pass that filled them. One generation counter guards
+    /// a slow read from overwriting a newer one, the same shape the command
+    /// palette's resume view uses.
+    right_panel_history: Vec<ProviderSessionSummary>,
+    right_panel_history_pending: bool,
+    right_panel_history_error: Option<String>,
+    right_panel_history_generation: u64,
+    right_panel_history_scope: right_panel::RightPanelHistoryScope,
+    /// The conversation being opened, if any, so a second click cannot start
+    /// the same import twice and the row can say it is working.
+    right_panel_history_importing: Option<ProviderResumeCursor>,
+    right_panel_history_scroll_handle: ScrollHandle,
+    right_panel_history_scrollbar: Rc<ScrollbarState>,
     right_panel_diff_filter: Entity<TextInput>,
     /// Unified diff rows and changed-file tree rows are independently
     /// virtualized. Large generated patches stay proportional to what is on
@@ -3273,6 +3290,14 @@ impl Waku {
                 right_panel_tabs_scroll_handle: ScrollHandle::new(),
                 right_panel_files_scroll_handle: ScrollHandle::new(),
                 right_panel_files_scrollbar: ScrollbarState::new(),
+                right_panel_history: Vec::new(),
+                right_panel_history_pending: false,
+                right_panel_history_error: None,
+                right_panel_history_generation: 0,
+                right_panel_history_scope: right_panel::RightPanelHistoryScope::Project,
+                right_panel_history_importing: None,
+                right_panel_history_scroll_handle: ScrollHandle::new(),
+                right_panel_history_scrollbar: ScrollbarState::new(),
                 right_panel_diff_filter,
                 right_panel_diff_list_state: ListState::new(0, ListAlignment::Top, px(512.0)),
                 right_panel_diff_scrollbar: ScrollbarState::new(),

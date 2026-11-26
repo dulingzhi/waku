@@ -785,6 +785,16 @@ right_panel.browser: 浏览器
 right_panel.terminal: 终端
 right_panel.files: 文件
 right_panel.diff: 审阅
+right_panel.history: 历史会话
+right_panel.history_description: 继续一个服务商原生会话
+right_panel.history_loading: 正在加载会话…
+right_panel.history_empty: 没有找到会话
+right_panel.history_empty_description: 你在 Claude 或其它终端代理中开始的会话会出现在这里。
+right_panel.history_error: "无法加载会话：%{error}"
+right_panel.history_retry: 重试
+right_panel.history_opening: 正在打开…
+right_panel.history_missing_workspace: 工作目录已不存在
+right_panel.history_unreadable: 无法读取
 sidebar.hide_sidebar: 隐藏侧边栏
 right_panel.toggle: 显示或隐藏右侧面板
 right_panel.open_surface: 打开一个面板

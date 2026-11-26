@@ -5,6 +5,7 @@ use gpui::{BorderStyle, Hsla, MouseButton, Pixels, ScrollHandle, SharedString};
 use gpui::{quad, transparent_black};
 
 use super::*;
+use crate::app::command_palette::{PROVIDER_SESSION_CATALOG_LIMIT, same_provider_session};
 use crate::app::winc_backup;
 
 const TAB_SCROLL_FADE_WIDTH: f32 = 24.0;
@@ -27,6 +28,43 @@ pub(super) struct WorkingTreeEntry {
     file_icon: Option<&'static str>,
     expanded: bool,
     depth: usize,
+}
+
+/// Which native conversations the History surface lists.
+///
+/// The default is the current project, because a conversation is normally
+/// continued where it happened; "all projects" is the escape hatch for one
+/// started somewhere else.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RightPanelHistoryScope {
+    Project,
+    All,
+}
+
+/// The rows the History surface shows, as a pure function of what was read, so
+/// the project filter is testable without a window.
+fn history_rows<'a>(
+    sessions: &'a [ProviderSessionSummary],
+    scope: RightPanelHistoryScope,
+    project: Option<&Path>,
+) -> Vec<&'a ProviderSessionSummary> {
+    sessions
+        .iter()
+        .filter(|summary| match (scope, project) {
+            (RightPanelHistoryScope::All, _) | (RightPanelHistoryScope::Project, None) => true,
+            (RightPanelHistoryScope::Project, Some(project)) => summary.cwd == project,
+        })
+        .collect()
+}
+
+/// Why a listed conversation cannot be continued, in the user's language.
+fn history_unavailable_reason(reason: ProviderSessionUnavailable) -> String {
+    match reason {
+        ProviderSessionUnavailable::MissingWorkspace => {
+            tr!("right_panel.history_missing_workspace")
+        }
+        ProviderSessionUnavailable::Unreadable => tr!("right_panel.history_unreadable"),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1220,6 +1258,7 @@ impl RightPanelSurface {
             }
             Self::Files => tr!("right_panel.files"),
             Self::Diff => tr!("right_panel.diff"),
+            Self::History => tr!("right_panel.history"),
             Self::File(path) => path.rsplit('/').next().unwrap_or(path).to_owned(),
             // The tab names the delegate's own title, falling back to the
             // generic label when it has none yet.
@@ -1240,6 +1279,7 @@ impl RightPanelSurface {
             Self::BackgroundWork { key, .. } => work_kind_icon(key.kind),
             Self::Files => "icons/folder.svg",
             Self::Diff => "icons/file-diff.svg",
+            Self::History => "icons/list.svg",
             Self::File(path) => file_icon_for_path(path),
             Self::Delegate { .. } => "icons/bot.svg",
         }
@@ -1280,9 +1320,10 @@ fn reusable_surface_index(
         RightPanelSurface::BackgroundWork { key, .. } => surfaces.iter().position(|surface| {
             matches!(surface, RightPanelSurface::BackgroundWork { key: candidate, .. } if candidate == key)
         }),
-        RightPanelSurface::Files | RightPanelSurface::Diff | RightPanelSurface::File(_) => {
-            surfaces.iter().position(|surface| surface == requested)
-        }
+        RightPanelSurface::Files
+        | RightPanelSurface::Diff
+        | RightPanelSurface::File(_)
+        | RightPanelSurface::History => surfaces.iter().position(|surface| surface == requested),
         // One tab per delegate: opening the same agent twice should raise the
         // tab already showing it rather than stack a second copy.
         RightPanelSurface::Delegate { id, .. } => surfaces.iter().position(|surface| {
@@ -2188,6 +2229,47 @@ mod tests {
         );
     }
 
+    fn history_session(id: &str, cwd: &str) -> ProviderSessionSummary {
+        ProviderSessionSummary {
+            cursor: ProviderResumeCursor::Claude {
+                session_id: id.to_owned(),
+                resume_at: None,
+            },
+            title: id.to_owned(),
+            cwd: PathBuf::from(cwd),
+            created_at: 0,
+            updated_at: 0,
+            unavailable: None,
+        }
+    }
+
+    #[test]
+    fn history_lists_the_current_project_by_default() {
+        let sessions = vec![
+            history_session("here", "/work/project"),
+            history_session("elsewhere", "/work/other"),
+        ];
+        let project = Path::new("/work/project");
+
+        let project_rows = history_rows(&sessions, RightPanelHistoryScope::Project, Some(project));
+        assert_eq!(project_rows.len(), 1);
+        assert_eq!(project_rows[0].title, "here");
+
+        let all_rows = history_rows(&sessions, RightPanelHistoryScope::All, Some(project));
+        assert_eq!(all_rows.len(), 2);
+    }
+
+    #[test]
+    fn history_shows_every_project_when_there_is_no_open_project() {
+        let sessions = vec![
+            history_session("here", "/work/project"),
+            history_session("elsewhere", "/work/other"),
+        ];
+
+        let rows = history_rows(&sessions, RightPanelHistoryScope::Project, None);
+        assert_eq!(rows.len(), 2);
+    }
+
     #[test]
     fn right_panel_state_isolated_by_session() {
         let session_with_terminal = Uuid::new_v4();
@@ -2345,6 +2427,9 @@ impl Waku {
             Some(RightPanelSurface::Files | RightPanelSurface::File(_))
         ) {
             self.refresh_right_panel_working_tree(cx);
+        }
+        if self.active_right_panel_surface() == Some(&RightPanelSurface::History) {
+            self.refresh_right_panel_history(cx);
         }
         self.ensure_right_panel_terminals(cx);
         self.retain_right_panel_browsers();
@@ -2542,6 +2627,9 @@ impl Waku {
             RightPanelSurface::Files | RightPanelSurface::File(_)
         ) {
             self.refresh_right_panel_working_tree(cx);
+        }
+        if surface == RightPanelSurface::History {
+            self.refresh_right_panel_history(cx);
         }
         if let Some(terminal_id) = surface.terminal_id() {
             self.ensure_right_panel_terminal(terminal_id, cx);
@@ -2752,6 +2840,9 @@ impl Waku {
             Some(RightPanelSurface::Diff) => self
                 .render_right_panel_diff(width, window, cx)
                 .into_any_element(),
+            Some(RightPanelSurface::History) => {
+                self.render_right_panel_history(cx).into_any_element()
+            }
             Some(RightPanelSurface::Terminal(terminal_id)) => self
                 .right_panel_terminals
                 .get(&terminal_id)
@@ -3224,7 +3315,14 @@ impl Waku {
                                 tr!("right_panel.diff_description"),
                                 cx,
                             )),
-                    ),
+                    )
+                    .child(div().mt(px(8.0)).w_full().flex().gap(px(8.0)).child(
+                        self.render_right_panel_card(
+                            RightPanelSurface::History,
+                            tr!("right_panel.history_description"),
+                            cx,
+                        ),
+                    )),
             )
     }
 
@@ -3279,6 +3377,360 @@ impl Waku {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_right_panel_surface(surface.clone(), cx);
             }))
+    }
+
+    /// Read the native conversations the History surface lists.
+    ///
+    /// The listing is I/O — Waku scans the provider's own history on disk — so
+    /// it runs on the background executor and lands under a generation counter:
+    /// a slow pass must not overwrite a newer one, and the provider being
+    /// read for can change between the request and its answer.
+    pub(super) fn refresh_right_panel_history(&mut self, cx: &mut Context<Self>) {
+        let provider = self.right_panel_history_provider();
+        self.right_panel_history_generation = self.right_panel_history_generation.wrapping_add(1);
+        let generation = self.right_panel_history_generation;
+        self.right_panel_history_pending = true;
+        self.right_panel_history_error = None;
+        let fetch = self
+            .store
+            .provider_sessions(provider, PROVIDER_SESSION_CATALOG_LIMIT);
+        cx.notify();
+        cx.spawn(async move |waku, cx| {
+            let result = cx.background_executor().spawn(async move { fetch() }).await;
+            let _ = waku.update(cx, |waku, cx| {
+                if waku.right_panel_history_generation != generation {
+                    return;
+                }
+                waku.right_panel_history_pending = false;
+                match result {
+                    Ok(sessions) => {
+                        waku.right_panel_history = sessions;
+                        waku.right_panel_history_error = None;
+                    }
+                    Err(error) => {
+                        waku.right_panel_history.clear();
+                        waku.right_panel_history_error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The provider whose conversations are listed: the one the active task
+    /// uses, so a resumed conversation continues on the agent it had, and the
+    /// first available provider when no task is open.
+    fn right_panel_history_provider(&self) -> ProviderKind {
+        self.selected_session()
+            .map(|session| session.provider)
+            .unwrap_or_else(|| self.default_resume_provider())
+    }
+
+    /// The rows to show: the active project's conversations, or every project's.
+    fn right_panel_history_rows(&self) -> Vec<ProviderSessionSummary> {
+        history_rows(
+            &self.right_panel_history,
+            self.right_panel_history_scope,
+            self.selected_project()
+                .map(|project| project.path.as_path()),
+        )
+        .into_iter()
+        .cloned()
+        .collect()
+    }
+
+    /// Picks a native conversation up and continues it as a Waku task.
+    ///
+    /// The transcript stays the provider's own: Waku keeps a cursor to it and
+    /// the next prompt resumes that exact conversation. A conversation already
+    /// open as a task is simply selected rather than imported twice.
+    fn resume_history_session(
+        &mut self,
+        summary: ProviderSessionSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session_id) = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| {
+                session
+                    .provider_cursor
+                    .as_ref()
+                    .is_some_and(|cursor| same_provider_session(cursor, &summary.cursor))
+            })
+            .map(|session| session.id)
+        {
+            self.select_session(session_id, cx);
+            return;
+        }
+        if self.right_panel_history_importing.is_some() {
+            return;
+        }
+        let cursor = summary.cursor.clone();
+        self.right_panel_history_importing = Some(cursor.clone());
+        self.right_panel_history_error = None;
+        let fetch = self
+            .store
+            .provider_session_history(cursor, summary.cwd.clone());
+        let window_handle = window.window_handle();
+        cx.notify();
+
+        cx.spawn(async move |waku, cx| {
+            let result = cx.background_executor().spawn(async move { fetch() }).await;
+            let prepared = waku.update(cx, |waku, cx| {
+                waku.right_panel_history_importing = None;
+                match result {
+                    Ok(history) => Some((summary, history)),
+                    Err(error) => {
+                        let error = error.to_string();
+                        waku.right_panel_history_error = Some(error.clone());
+                        waku.show_toast(tr!("command_palette.resume_failed", error = error));
+                        cx.notify();
+                        None
+                    }
+                }
+            });
+            let Ok(Some((summary, history))) = prepared else {
+                return;
+            };
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = waku.update(cx, |waku, cx| {
+                    waku.import_provider_session(summary, history, window, cx);
+                });
+            });
+        })
+        .detach();
+    }
+
+    fn render_right_panel_history(&mut self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let provider = self.right_panel_history_provider();
+        let scope = self.right_panel_history_scope;
+        let importing = self.right_panel_history_importing.clone();
+        let rows = self.right_panel_history_rows();
+        let pending = self.right_panel_history_pending;
+        let error = self.right_panel_history_error.clone();
+
+        let scope_button = |label: &str, selected: bool, action| {
+            div()
+                .id(SharedString::from(format!(
+                    "right-panel-history-scope-{label}"
+                )))
+                .px(px(8.0))
+                .py(px(3.0))
+                .rounded(px(4.0))
+                .text_size(sp(11.5))
+                .text_color(if selected {
+                    theme.text
+                } else {
+                    theme.text_secondary
+                })
+                .bg(if selected {
+                    theme.overlay_strong
+                } else {
+                    transparent_black()
+                })
+                .cursor_default()
+                .hover(|element| element.bg(theme.overlay))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.right_panel_history_scope = action;
+                    cx.notify();
+                }))
+        };
+
+        let toolbar = div()
+            .h(px(40.0))
+            .flex_none()
+            .px(px(12.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(icon("icons/list.svg", 13.0, theme.text_tertiary))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(sp(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_secondary)
+                    .child(provider.display_name()),
+            )
+            .child(scope_button(
+                "project",
+                matches!(scope, RightPanelHistoryScope::Project),
+                RightPanelHistoryScope::Project,
+            ))
+            .child(scope_button(
+                "all",
+                matches!(scope, RightPanelHistoryScope::All),
+                RightPanelHistoryScope::All,
+            ))
+            .child(
+                div()
+                    .id("right-panel-history-refresh")
+                    .p(px(3.0))
+                    .rounded(px(4.0))
+                    .cursor_default()
+                    .hover(|element| element.bg(theme.overlay))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.refresh_right_panel_history(cx);
+                    }))
+                    .child(icon("icons/rotate-cw.svg", 13.0, theme.text_secondary)),
+            );
+
+        let now = unix_time();
+        let mut list = div().flex().flex_col().py(px(6.0));
+        let mut list_empty = true;
+        for summary in rows {
+            list_empty = false;
+            let title = summary.title.clone();
+            let provider = summary.cursor.provider();
+            let age = super::sidebar::format_time_ago(now.saturating_sub(summary.updated_at));
+            let busy = importing
+                .as_ref()
+                .is_some_and(|cursor| same_provider_session(cursor, &summary.cursor));
+            let unavailable = summary.unavailable.map(history_unavailable_reason);
+            let can_open = unavailable.is_none() && !busy;
+            let row = div()
+                .id(SharedString::from(format!(
+                    "right-panel-history-{}",
+                    summary.cursor.native_id()
+                )))
+                .h(px(30.0))
+                .mx(px(8.0))
+                .px(px(10.0))
+                .rounded(px(6.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .cursor_default()
+                .when(can_open, |element| {
+                    element.active(|element| element.bg(theme.overlay_strong))
+                })
+                .hover(|element| element.bg(theme.overlay))
+                .child(
+                    div()
+                        .w(px(64.0))
+                        .flex_none()
+                        .truncate()
+                        .text_size(sp(11.0))
+                        .text_color(theme.text_ghost)
+                        .child(provider.short_name()),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_size(sp(12.5))
+                        .text_color(if busy {
+                            theme.text
+                        } else {
+                            theme.text_secondary
+                        })
+                        .child(if busy {
+                            tr!("right_panel.history_opening")
+                        } else {
+                            title
+                        }),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_none()
+                        .truncate()
+                        .text_size(sp(11.0))
+                        .text_color(if unavailable.is_some() {
+                            theme.warning
+                        } else {
+                            theme.text_tertiary
+                        })
+                        .child(unavailable.clone().unwrap_or_else(|| {
+                            format!("{} · {age}", summary.cwd.to_string_lossy())
+                        })),
+                );
+            let row = if can_open {
+                let summary = summary.clone();
+                row.on_click(cx.listener(move |this, _, window, cx| {
+                    this.resume_history_session(summary.clone(), window, cx);
+                }))
+            } else {
+                row
+            };
+            list = list.child(row);
+        }
+
+        let body = if !list_empty {
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .child(
+                    div()
+                        .id("right-panel-history-scroll")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.right_panel_history_scroll_handle)
+                        .child(list),
+                )
+                .child(scrollbar::vertical(
+                    &self.right_panel_history_scroll_handle,
+                    &self.right_panel_history_scrollbar,
+                ))
+        } else if let Some(error) = error {
+            div().flex_1().min_h_0().child(
+                div()
+                    .m(px(16.0))
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.warning)
+                    .bg(theme.surface)
+                    .p(px(12.0))
+                    .child(
+                        div()
+                            .text_size(sp(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.warning)
+                            .child(tr!("right_panel.history_error", error = error)),
+                    )
+                    .child(
+                        div()
+                            .id("right-panel-history-retry")
+                            .mt(px(12.0))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.refresh_right_panel_history(cx);
+                            }))
+                            .cursor_default()
+                            .text_size(sp(12.0))
+                            .text_color(theme.text_secondary)
+                            .child(tr!("right_panel.history_retry")),
+                    ),
+            )
+        } else {
+            self.render_right_panel_empty_message(
+                if pending {
+                    tr!("right_panel.history_loading")
+                } else {
+                    tr!("right_panel.history_empty")
+                },
+                tr!("right_panel.history_empty_description"),
+                cx,
+            )
+        };
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(toolbar)
+            .child(body)
     }
 
     fn render_right_panel_files(

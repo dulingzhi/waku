@@ -1603,6 +1603,26 @@ right_panel.files:
   en: Files
 right_panel.diff:
   en: Review
+right_panel.history:
+  en: History
+right_panel.history_description:
+  en: Continue a provider-native conversation
+right_panel.history_loading:
+  en: Loading conversations…
+right_panel.history_empty:
+  en: No conversations found
+right_panel.history_empty_description:
+  en: Conversations you start in Claude or another terminal agent appear here.
+right_panel.history_error:
+  en: "Could not load conversations: %{error}"
+right_panel.history_retry:
+  en: Retry
+right_panel.history_opening:
+  en: Opening…
+right_panel.history_missing_workspace:
+  en: Workspace is gone
+right_panel.history_unreadable:
+  en: Unreadable
 sidebar.hide_sidebar:
   en: Hide the sidebar
 right_panel.toggle:

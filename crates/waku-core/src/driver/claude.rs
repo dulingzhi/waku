@@ -428,6 +428,13 @@ impl ClaudeDriver {
                 resume_at,
             }),
         });
+        // Claude's `/resume` drops sessions whose records carry the SDK entry
+        // point Waku launches Claude with, so a conversation Waku created is
+        // invisible in its own terminal. A resumed session already has a
+        // transcript, and launch is the one moment Waku knows the process that
+        // owns it has not appended anything yet — normalize it here so the
+        // history is there before the first turn.
+        let _ = crate::claude_session::normalize_session_entrypoint(&session_id);
         // A resumed conversation may already hold a goal, and Claude keeps it
         // in the transcript rather than behind a request. Read it once at
         // launch so the chip is there the moment the task opens instead of
@@ -1956,6 +1963,12 @@ fn handle_message(
             // The CLI appends its goal judgement to the same transcript as the
             // turn settles, so re-read it here — the host's chip and dialog
             // would otherwise never learn that a goal was met or halted.
+            //
+            // The turn also settles the entry-point label the CLI wrote into
+            // the transcript, and its own `/resume` hides SDK runs: normalize
+            // it before anything re-reads the file, so the conversation shows
+            // up in the terminal after the first turn rather than never.
+            let _ = crate::claude_session::normalize_session_entrypoint(session_id);
             let goal = claude_goal(session_id);
             if state.last_goal != goal {
                 state.last_goal = goal.clone();
