@@ -141,6 +141,16 @@ pub enum GoalCommand {
     Set(String),
 }
 
+/// Whether this provider exposes a thread goal Waku can read and set.
+///
+/// One answer for both surfaces that offer goals: the `/goal` command and the
+/// command palette entry that opens the same dialog. They were written apart
+/// and had to agree; asking one function keeps a provider added later from
+/// growing an entry that cannot work.
+pub fn provider_supports_goals(provider: ProviderKind) -> bool {
+    provider == ProviderKind::Codex
+}
+
 /// Parse the submitted text as Codex's native `/goal` command, which Waku
 /// bridges to `thread/goal/*`. `None` when it is not one — wrong provider,
 /// other text, or a project/user command that deliberately owns `/goal`
@@ -150,7 +160,7 @@ pub fn parse_goal_submission(
     prompt: &str,
     commands: &[SlashCommand],
 ) -> Option<GoalCommand> {
-    if provider != ProviderKind::Codex {
+    if !provider_supports_goals(provider) {
         return None;
     }
     let invocation = prompt.trim().strip_prefix('/')?;
@@ -562,6 +572,60 @@ mod tests {
         assert_eq!(
             parse_goal_submission(ProviderKind::Codex, "/goal", std::slice::from_ref(&project)),
             None
+        );
+    }
+
+    /// The command palette's entry and the `/goal` command read the same
+    /// answer, so a provider cannot offer one surface and refuse the other.
+    ///
+    /// It has to be the same one the parser checks: the palette entry opens
+    /// the very dialog a `/goal` submission acts through, and an entry shown
+    /// on a provider with no goal RPC would open a dialog whose Save could
+    /// never land.
+    #[test]
+    fn the_goal_capability_answer_matches_what_the_parser_accepts() {
+        let builtin = command("goal", CommandScope::Builtin);
+        let commands = std::slice::from_ref(&builtin);
+        for provider in [
+            ProviderKind::Codex,
+            ProviderKind::Claude,
+            ProviderKind::OpenCode,
+        ] {
+            let parses = parse_goal_submission(provider, "/goal", commands).is_some();
+            assert_eq!(
+                provider_supports_goals(provider),
+                parses,
+                "{provider:?} must answer the same in the palette and in /goal"
+            );
+        }
+    }
+
+    /// Codex is the only provider whose transport exposes a thread goal, so
+    /// the answer is not "whatever the parser happens to say".
+    ///
+    /// The agreement test above cannot catch a widening that moves both
+    /// surfaces together — make the capability say yes to everything and the
+    /// parser follows it — and a palette entry on Claude would then open a
+    /// dialog whose Save reaches `thread/goal/set` on a driver that has no such
+    /// RPC. This pins the set itself.
+    #[test]
+    fn only_codex_reports_goal_support() {
+        // `ALL` rather than a hand-written list, so a provider added later is
+        // covered without anyone remembering to extend this.
+        for provider in ProviderKind::ALL {
+            assert_eq!(
+                provider_supports_goals(provider),
+                provider == ProviderKind::Codex,
+                "{provider:?}"
+            );
+        }
+        assert_eq!(
+            ProviderKind::ALL
+                .iter()
+                .filter(|provider| provider_supports_goals(**provider))
+                .count(),
+            1,
+            "exactly one provider exposes a thread goal"
         );
     }
 }

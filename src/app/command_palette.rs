@@ -156,6 +156,7 @@ enum PaletteAction {
     CopyIdentifier(PaletteIdentifier),
     ChooseModel,
     ToggleUsage,
+    SetGoal(Uuid),
     CollapseSidebarGroups,
     ToggleSidebar,
     ToggleRightPanel,
@@ -746,6 +747,26 @@ impl Waku {
             "focus composer prompt input message",
             next(),
         ));
+        // A goal belongs to the provider thread, and only Codex exposes one to
+        // set. The composer chip shows it once it exists, but a session with no
+        // goal had no way in at all: `/goal <text>` was the only route, which
+        // requires already knowing the command. This is the same dialog, with
+        // an empty objective to fill in.
+        if let Some(session) = self
+            .selected_session()
+            .filter(|session| crate::composer_complete::provider_supports_goals(session.provider))
+        {
+            let session_id = session.id;
+            commands.push(CommandPaletteItem::command(
+                PaletteSection::Commands,
+                tr!("command_palette.set_goal"),
+                "icons/target.svg",
+                None,
+                PaletteAction::SetGoal(session_id),
+                "goal objective target pursue set edit pause resume clear",
+                next(),
+            ));
+        }
         for identifier in PaletteIdentifier::ALL {
             if identifier.value(self.selected_session()).is_some() {
                 commands.push(CommandPaletteItem::command(
@@ -1614,6 +1635,20 @@ impl Waku {
                         }
                     });
                 });
+            }
+            PaletteAction::SetGoal(session_id) => {
+                // Only the session that offered the command can take it; the
+                // palette closes first, and the selection may have moved on in
+                // the same frame.
+                if self
+                    .selected_session()
+                    .is_some_and(|session| session.id == session_id)
+                {
+                    self.settings_page = None;
+                    self.request_goal_dialog(session_id, None, false, cx);
+                    let focus = self.composer_focus(cx);
+                    window.focus(&focus, cx);
+                }
             }
             PaletteAction::Resume
             | PaletteAction::ChooseResumeProvider
