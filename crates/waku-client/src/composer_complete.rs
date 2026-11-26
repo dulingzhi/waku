@@ -148,13 +148,56 @@ pub enum GoalCommand {
 /// and had to agree; asking one function keeps a provider added later from
 /// growing an entry that cannot work.
 pub fn provider_supports_goals(provider: ProviderKind) -> bool {
-    provider == ProviderKind::Codex
+    matches!(provider, ProviderKind::Codex | ProviderKind::Claude)
 }
 
-/// Parse the submitted text as Codex's native `/goal` command, which Waku
-/// bridges to `thread/goal/*`. `None` when it is not one — wrong provider,
-/// other text, or a project/user command that deliberately owns `/goal`
-/// (resolution precedence stands).
+/// What a provider can do with a goal, beyond setting and clearing it.
+///
+/// Codex persists a goal with a status the host can flip between active and
+/// paused, and reports token and time accounting. Claude's `/goal` is a
+/// session Stop hook over a single condition instead: there is nothing to
+/// pause, resume or budget, and asking its CLI to would set a new goal (every
+/// argument is taken as a condition — `/goal pause` sets a goal named
+/// "pause"). Both surfaces that show goal controls ask this, so the same
+/// provider cannot offer a Pause button in one place and refuse it in another.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GoalCapabilities {
+    /// The goal can be held and released without touching a turn.
+    pub can_pause_and_resume: bool,
+    /// The goal reports a token budget and its consumption.
+    pub has_token_budget: bool,
+}
+
+pub fn goal_capabilities(provider: ProviderKind) -> GoalCapabilities {
+    match provider {
+        ProviderKind::Codex => GoalCapabilities {
+            can_pause_and_resume: true,
+            has_token_budget: true,
+        },
+        // Claude holds a goal as a live Stop hook: it either is set or it is
+        // cleared, and the CLI owns the only accounting it produces.
+        ProviderKind::Claude => GoalCapabilities {
+            can_pause_and_resume: false,
+            has_token_budget: false,
+        },
+        _ => GoalCapabilities {
+            can_pause_and_resume: false,
+            has_token_budget: false,
+        },
+    }
+}
+
+/// Parse the submitted text as a native `/goal` command, which Waku bridges
+/// to the provider's goal surface. `None` when it is not one — wrong
+/// provider, other text, or a project/user command that deliberately owns
+/// `/goal` (resolution precedence stands).
+///
+/// The subcommands are Codex's. Claude's `/goal` takes a condition and
+/// `clear` and nothing else, so on Claude only those two are read as such;
+/// every other argument is the condition itself, which is what the CLI would
+/// do with it anyway (`/goal pause` there sets a goal named "pause" rather
+/// than pausing one). Parsing it as a subcommand would make Waku claim a
+/// pause the provider cannot perform.
 pub fn parse_goal_submission(
     provider: ProviderKind,
     prompt: &str,
@@ -172,19 +215,20 @@ pub fn parse_goal_submission(
     if name != "goal" {
         return None;
     }
-    let goal_is_codex_builtin = commands.iter().any(|command| {
+    let goal_is_native_builtin = commands.iter().any(|command| {
         command.name == "goal"
             && command.scope == CommandScope::Builtin
             && command.template.is_none()
     });
-    if !goal_is_codex_builtin {
+    if !goal_is_native_builtin {
         return None;
     }
+    let subcommands = goal_capabilities(provider).can_pause_and_resume;
     Some(match arguments {
         "" => GoalCommand::Show,
-        "edit" => GoalCommand::Edit,
-        "pause" => GoalCommand::Pause,
-        "resume" => GoalCommand::Resume,
+        "edit" if subcommands => GoalCommand::Edit,
+        "pause" if subcommands => GoalCommand::Pause,
+        "resume" if subcommands => GoalCommand::Resume,
         "clear" => GoalCommand::Clear,
         objective => GoalCommand::Set(objective.to_owned()),
     })
@@ -556,15 +600,25 @@ mod tests {
     }
 
     #[test]
-    fn goal_command_is_codex_only_and_respects_overrides() {
+    fn goal_command_respects_what_each_provider_offers_and_overrides() {
         let builtin = command("goal", CommandScope::Builtin);
+        // Neither provider is excluded any more, but the subcommands are not
+        // shared: Claude has no pause, so there `pause` is a condition.
         assert_eq!(
             parse_goal_submission(
                 ProviderKind::Claude,
-                "/goal",
+                "/goal pause",
                 std::slice::from_ref(&builtin)
             ),
-            None
+            Some(GoalCommand::Set("pause".into()))
+        );
+        assert_eq!(
+            parse_goal_submission(
+                ProviderKind::Codex,
+                "/goal pause",
+                std::slice::from_ref(&builtin)
+            ),
+            Some(GoalCommand::Pause)
         );
         // A project command deliberately owning /goal wins the collision.
         let mut project = command("goal", CommandScope::Project);
@@ -575,12 +629,30 @@ mod tests {
         );
     }
 
+    /// A provider with no goal surface at all parses nothing, whichever
+    /// command table it happens to carry.
+    #[test]
+    fn a_provider_without_goals_parses_none() {
+        let builtin = command("goal", CommandScope::Builtin);
+        let commands = std::slice::from_ref(&builtin);
+        for provider in ProviderKind::ALL {
+            if provider_supports_goals(provider) {
+                continue;
+            }
+            assert_eq!(
+                parse_goal_submission(provider, "/goal", commands),
+                None,
+                "{provider:?}"
+            );
+        }
+    }
+
     /// The command palette's entry and the `/goal` command read the same
     /// answer, so a provider cannot offer one surface and refuse the other.
     ///
     /// It has to be the same one the parser checks: the palette entry opens
     /// the very dialog a `/goal` submission acts through, and an entry shown
-    /// on a provider with no goal RPC would open a dialog whose Save could
+    /// on a provider with no goal surface would open a dialog whose Save could
     /// never land.
     #[test]
     fn the_goal_capability_answer_matches_what_the_parser_accepts() {
@@ -600,22 +672,20 @@ mod tests {
         }
     }
 
-    /// Codex is the only provider whose transport exposes a thread goal, so
-    /// the answer is not "whatever the parser happens to say".
+    /// The set of providers offering goals is not "whatever the parser
+    /// happens to say".
     ///
     /// The agreement test above cannot catch a widening that moves both
     /// surfaces together — make the capability say yes to everything and the
-    /// parser follows it — and a palette entry on Claude would then open a
-    /// dialog whose Save reaches `thread/goal/set` on a driver that has no such
-    /// RPC. This pins the set itself.
+    /// parser follows it. This pins the set itself.
     #[test]
-    fn only_codex_reports_goal_support() {
+    fn exactly_codex_and_claude_report_goal_support() {
         // `ALL` rather than a hand-written list, so a provider added later is
         // covered without anyone remembering to extend this.
         for provider in ProviderKind::ALL {
             assert_eq!(
                 provider_supports_goals(provider),
-                provider == ProviderKind::Codex,
+                matches!(provider, ProviderKind::Codex | ProviderKind::Claude),
                 "{provider:?}"
             );
         }
@@ -624,8 +694,45 @@ mod tests {
                 .iter()
                 .filter(|provider| provider_supports_goals(**provider))
                 .count(),
-            1,
-            "exactly one provider exposes a thread goal"
+            2,
+            "exactly two providers expose a goal surface"
         );
+    }
+
+    /// Pause and resume are Codex's alone, and that has to be asked of the
+    /// capability rather than assumed from goal support.
+    ///
+    /// Claude's `/goal pause` sets a goal *named* pause, so a Pause button
+    /// there would look like it worked while quietly replacing the user's
+    /// objective. One function answers this so both goal surfaces agree.
+    #[test]
+    fn only_codex_can_pause_and_resume_a_goal() {
+        for provider in ProviderKind::ALL {
+            let capabilities = goal_capabilities(provider);
+            let pausable = provider == ProviderKind::Codex;
+            assert_eq!(capabilities.can_pause_and_resume, pausable, "{provider:?}");
+            assert_eq!(capabilities.has_token_budget, pausable, "{provider:?}");
+        }
+        // The capability must not contradict the parse: anywhere a pause is
+        // refused as a capability, the parser must read it as a condition
+        // instead of an action Waku cannot perform.
+        let builtin = command("goal", CommandScope::Builtin);
+        let commands = std::slice::from_ref(&builtin);
+        for provider in ProviderKind::ALL
+            .iter()
+            .copied()
+            .filter(|p| provider_supports_goals(*p))
+        {
+            let parsed = parse_goal_submission(provider, "/goal pause", commands);
+            if goal_capabilities(provider).can_pause_and_resume {
+                assert_eq!(parsed, Some(GoalCommand::Pause), "{provider:?}");
+            } else {
+                assert_eq!(
+                    parsed,
+                    Some(GoalCommand::Set("pause".into())),
+                    "{provider:?}"
+                );
+            }
+        }
     }
 }

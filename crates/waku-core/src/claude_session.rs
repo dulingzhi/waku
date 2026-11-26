@@ -30,12 +30,49 @@ pub struct ClaudeSessionMetadata {
     pub title: Option<String>,
 }
 
+/// A session goal as Claude Code itself records it.
+///
+/// `/goal <condition>` is a CLI-side construct, not an RPC: the CLI installs a
+/// session-scoped Stop hook and appends a `goal_status` attachment to the
+/// native transcript each time it judges the condition. Reading that
+/// attachment is the only way the host can learn the condition or whether it
+/// holds — there is no get-goal request to ask.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClaudeGoalState {
+    /// No goal is in force. A cleared goal and one that never existed look the
+    /// same here, which matches the CLI's own `/goal` reply.
+    None,
+    /// A goal is in force, with the CLI's most recent judgement about it.
+    Active {
+        objective: String,
+        met: bool,
+        /// Why the CLI judged it met or impossible, when it explained.
+        reason: Option<String>,
+        /// Wall clock the CLI spent judging, from the met/failed record.
+        elapsed_seconds: Option<i64>,
+        tokens: Option<i64>,
+    },
+}
+
 pub fn session_metadata(session_id: &str) -> anyhow::Result<ClaudeSessionMetadata> {
     session_metadata_in(&projects_directory()?, session_id)
 }
 
 pub fn message_id_for_turn(session_id: &str, provider_turn_count: usize) -> anyhow::Result<String> {
     message_id_for_turn_in(&projects_directory()?, session_id, provider_turn_count)
+}
+
+/// The goal Claude Code currently holds for one session, read from its own
+/// transcript.
+///
+/// Returns [`ClaudeGoalState::None`] for a session with no goal and for a
+/// session whose transcript cannot be read: the caller's goal surface is
+/// decorative, so a missing transcript must not turn into a phantom goal.
+pub fn session_goal(session_id: &str) -> ClaudeGoalState {
+    let Ok(directory) = projects_directory() else {
+        return ClaudeGoalState::None;
+    };
+    session_goal_in(&directory, session_id)
 }
 
 pub fn fork_session_at(
@@ -684,6 +721,101 @@ fn claude_title(entry: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Read a session's goal from its native transcript.
+///
+/// Two record kinds matter, and they mean different things:
+///
+/// - `local_command` with `commandRun.command == "goal"` is the CLI's own
+///   `/goal` handler. A non-empty `args` that is not `clear` sets that
+///   condition; `clear` leaves none; an empty `args` is a bare `/goal`, which
+///   only reports and changes nothing.
+/// - a `goal_status` attachment is the CLI's judgement of the condition it
+///   currently holds. It is *not* a statement that the goal still exists: the
+///   CLI appends one per turn while a goal is live, and the records stay in
+///   the transcript after `/goal clear`. So the latest state-changing
+///   `local_command` decides whether a goal exists, and only then does the
+///   latest judgement describe it.
+///
+/// A judgement carries `met`, and on a settled one `failed` with a `reason`.
+/// An unmet, still-running goal has the sentinel flag instead.
+fn session_goal_in(projects_directory: &Path, session_id: &str) -> ClaudeGoalState {
+    let Ok(path) = find_session_file(projects_directory, session_id) else {
+        return ClaudeGoalState::None;
+    };
+    let Ok(entries) = read_entries(&path) else {
+        return ClaudeGoalState::None;
+    };
+    // The chain, not the file: a rewound conversation keeps its abandoned
+    // branch on disk, and a goal set on a branch the user undid must not
+    // reappear.
+    let chain = active_chain(&entries);
+
+    let mut objective: Option<String> = None;
+    let mut judgement: Option<&Map<String, Value>> = None;
+    for entry in &chain {
+        if let Some(args) = claude_goal_invocation(entry) {
+            let args = args.trim();
+            // `clear` removes the goal. A bare `/goal` *reports* it and
+            // changes nothing, so it must leave the condition standing.
+            if args.eq_ignore_ascii_case("clear") {
+                objective = None;
+                judgement = None;
+            } else if !args.is_empty() {
+                objective = Some(args.to_owned());
+                // A new invocation starts a new ledger; the old judgement
+                // described the goal it replaced.
+                judgement = None;
+            }
+            continue;
+        }
+        if let Some(status) = claude_goal_status(entry) {
+            judgement = Some(status);
+        }
+    }
+    let Some(objective) = objective else {
+        return ClaudeGoalState::None;
+    };
+    let Some(status) = judgement else {
+        // Set but not yet judged: freshly `/goal`'d, before the first turn.
+        return ClaudeGoalState::Active {
+            objective,
+            met: false,
+            reason: None,
+            elapsed_seconds: None,
+            tokens: None,
+        };
+    };
+    let number = |key: &str| status.get(key).and_then(Value::as_i64);
+    ClaudeGoalState::Active {
+        objective,
+        met: status.get("met").and_then(Value::as_bool) == Some(true),
+        reason: status
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .map(str::to_owned),
+        elapsed_seconds: number("durationMs").map(|millis| millis / 1_000),
+        tokens: number("tokens"),
+    }
+}
+
+/// The argument the CLI's own `/goal` handler ran, when this entry is one.
+fn claude_goal_invocation(entry: &Map<String, Value>) -> Option<&str> {
+    if entry.get("subtype").and_then(Value::as_str) != Some("local_command") {
+        return None;
+    }
+    let run = entry.get("commandRun")?;
+    (run.get("command").and_then(Value::as_str) == Some("goal"))
+        .then(|| run.get("args").and_then(Value::as_str).unwrap_or_default())
+}
+
+/// The `goal_status` attachment object, when this entry carries one.
+fn claude_goal_status(entry: &Map<String, Value>) -> Option<&Map<String, Value>> {
+    let attachment = entry.get("attachment")?.as_object()?;
+    (attachment.get("type").and_then(Value::as_str) == Some("goal_status")).then_some(attachment)
+}
+
 fn message_id_for_turn_in(
     projects_directory: &Path,
     session_id: &str,
@@ -1179,6 +1311,199 @@ mod tests {
                 .unwrap()
                 .contains(&fork.session_id)
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A goal transcript is written the way the real CLI writes one: a
+    /// `goal_status` attachment before the turn, a `local_command` record for
+    /// the `/goal` itself, then another attachment per judgement.
+    fn goal_fixture(records: &[Value]) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("waku-claude-goal-{}", Uuid::new_v4()));
+        let project = root.join("projects").join("-tmp-project");
+        fs::create_dir_all(&project).unwrap();
+        let projects = root.join("projects");
+        let source = project.join(format!("{SESSION}.jsonl"));
+        let mut file = fs::File::create(&source).unwrap();
+        for record in records {
+            serde_json::to_writer(&mut file, record).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+        // The lookup walks one directory level: callers pass the projects
+        // root, not the per-project directory holding the transcript.
+        (root, projects)
+    }
+
+    fn goal_command(args: &str, uuid: &str, parent: &str) -> Value {
+        json!({
+            "type": "system",
+            "subtype": "local_command",
+            "uuid": uuid,
+            "parentUuid": parent,
+            "content": "<local-command-stdout>Goal set</local-command-stdout>",
+            "commandRun": {"command": "goal", "args": args},
+            "sessionId": SESSION
+        })
+    }
+
+    fn goal_attachment(uuid: &str, parent: &str, status: Value) -> Value {
+        json!({
+            "type": "attachment",
+            "uuid": uuid,
+            "parentUuid": parent,
+            "attachment": status,
+            "sessionId": SESSION
+        })
+    }
+
+    #[test]
+    fn a_set_goal_is_read_with_the_condition_it_was_given() {
+        let (root, projects) = goal_fixture(&[
+            goal_command("all tests pass", "11111111-1111-4111-8111-111111111111", ""),
+            goal_attachment(
+                "22222222-2222-4222-8222-222222222222",
+                "11111111-1111-4111-8111-111111111111",
+                json!({"type": "goal_status", "met": false, "sentinel": true, "condition": "all tests pass"}),
+            ),
+        ]);
+        assert_eq!(
+            session_goal_in(&projects, SESSION),
+            ClaudeGoalState::Active {
+                objective: "all tests pass".into(),
+                met: false,
+                reason: None,
+                elapsed_seconds: None,
+                tokens: None,
+            }
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The CLI appends a judgement for every turn while a goal is live, and
+    /// those records stay on disk after the goal is gone. A cleared goal must
+    /// therefore be decided by the last `/goal` invocation, not by the last
+    /// judgement — otherwise clearing would look like it changed nothing.
+    #[test]
+    fn a_cleared_goal_is_gone_even_though_its_judgements_remain() {
+        let (root, projects) = goal_fixture(&[
+            goal_command("ship it", "11111111-1111-4111-8111-111111111111", ""),
+            goal_attachment(
+                "22222222-2222-4222-8222-222222222222",
+                "11111111-1111-4111-8111-111111111111",
+                json!({"type": "goal_status", "met": true, "condition": "ship it", "reason": "done"}),
+            ),
+            goal_command(
+                "clear",
+                "33333333-3333-4333-8333-333333333333",
+                "22222222-2222-4222-8222-222222222222",
+            ),
+        ]);
+        assert_eq!(session_goal_in(&projects, SESSION), ClaudeGoalState::None);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A bare `/goal` asks the CLI to report and changes nothing, so it must
+    /// not be read as clearing the goal the way `/goal clear` does.
+    #[test]
+    fn a_bare_goal_does_not_clear_the_goal_it_reports() {
+        let (root, projects) = goal_fixture(&[
+            goal_command(
+                "keep the build green",
+                "11111111-1111-4111-8111-111111111111",
+                "",
+            ),
+            goal_command(
+                "",
+                "22222222-2222-4222-8222-222222222222",
+                "11111111-1111-4111-8111-111111111111",
+            ),
+        ]);
+        assert_eq!(
+            session_goal_in(&projects, SESSION),
+            ClaudeGoalState::Active {
+                objective: "keep the build green".into(),
+                met: false,
+                reason: None,
+                elapsed_seconds: None,
+                tokens: None,
+            }
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The met judgement carries the CLI's accounting, which is the only
+    /// consumption figure Claude produces.
+    #[test]
+    fn a_judgement_carries_its_reason_elapsed_time_and_tokens() {
+        let (root, projects) = goal_fixture(&[
+            goal_command("reply done", "11111111-1111-4111-8111-111111111111", ""),
+            goal_attachment(
+                "22222222-2222-4222-8222-222222222222",
+                "11111111-1111-4111-8111-111111111111",
+                json!({
+                    "type": "goal_status",
+                    "met": true,
+                    "condition": "reply done",
+                    "reason": "The reply was exactly \"done\"",
+                    "iterations": 1,
+                    "durationMs": 44_202,
+                    "tokens": 277
+                }),
+            ),
+        ]);
+        assert_eq!(
+            session_goal_in(&projects, SESSION),
+            ClaudeGoalState::Active {
+                objective: "reply done".into(),
+                met: true,
+                reason: Some("The reply was exactly \"done\"".into()),
+                elapsed_seconds: Some(44),
+                tokens: Some(277),
+            }
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A session with no goal and a session whose transcript cannot be read
+    /// both report none: a goal surface must never invent one.
+    #[test]
+    fn an_unknown_session_or_a_goal_free_one_reports_no_goal() {
+        let (root, projects) = goal_fixture(&[json!({
+            "type": "user",
+            "uuid": USER_ONE,
+            "parentUuid": null,
+            "sessionId": SESSION,
+            "message": {"role": "user", "content": "hello"}
+        })]);
+        assert_eq!(session_goal_in(&projects, SESSION), ClaudeGoalState::None);
+        assert_eq!(
+            session_goal_in(&projects, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            ClaudeGoalState::None
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A goal set on a branch the user rewound away must not come back: the
+    /// active chain is the conversation, and the abandoned branch is not.
+    #[test]
+    fn a_goal_on_an_abandoned_branch_is_not_reported() {
+        let (root, projects) = goal_fixture(&[
+            goal_command("abandoned goal", "11111111-1111-4111-8111-111111111111", ""),
+            json!({
+                "type": "user",
+                "uuid": USER_ONE,
+                "parentUuid": null,
+                "sessionId": SESSION,
+                "message": {"role": "user", "content": "hello"}
+            }),
+            json!({
+                "type": "assistant",
+                "uuid": ASSISTANT_ONE,
+                "parentUuid": USER_ONE,
+                "sessionId": SESSION,
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}
+            }),
+        ]);
+        assert_eq!(session_goal_in(&projects, SESSION), ClaudeGoalState::None);
         fs::remove_dir_all(root).ok();
     }
 }

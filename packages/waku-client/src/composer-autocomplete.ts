@@ -89,33 +89,67 @@ export type GoalCommand =
   | { kind: 'clear' }
   | { kind: 'set'; objective: string }
 
+/** What a provider can do with a goal beyond setting and clearing it.
+ *
+ * Codex persists a goal with a status it can flip between active and paused
+ * and reports token accounting. Claude's `/goal` is a session Stop hook over
+ * one condition: there is nothing to pause or budget, and asking its CLI to
+ * would set a goal named "pause". Every surface that shows goal controls asks
+ * this, so one provider cannot offer a Pause button in two different places
+ * and refuse it in a third.
+ */
+export function goalCapabilities(provider: ProviderKind): {
+  canPauseAndResume: boolean
+  hasTokenBudget: boolean
+} {
+  const codex = provider === 'codex'
+  return { canPauseAndResume: codex, hasTokenBudget: codex }
+}
+
 /**
- * Parse the submitted text as Codex's native `/goal` command, which Waku
- * bridges to `thread/goal/*`. `null` when it is not one — wrong provider,
+ * Whether this provider exposes a goal Waku can read and set.
+ *
+ * Kept beside the parser because the command palette and `/goal` must answer
+ * the same thing: an entry shown on a provider with no goal surface would open
+ * a dialog whose Save could never land.
+ */
+export function providerSupportsGoals(provider: ProviderKind): boolean {
+  return provider === 'codex' || provider === 'claude'
+}
+
+/**
+ * Parse the submitted text as a native `/goal` command, which Waku bridges to
+ * the provider's goal surface. `null` when it is not one — wrong provider,
  * other text, or a project/user command that deliberately owns `/goal`
  * (resolution precedence stands).
+ *
+ * The subcommands are Codex's. Claude's `/goal` takes a condition and `clear`
+ * and nothing else, so there only those two are read as such; every other
+ * argument is the condition itself, which is what the CLI would do with it
+ * anyway (`/goal pause` sets a goal named "pause" rather than pausing one).
  */
 export function parseGoalSubmission(
   provider: ProviderKind,
   prompt: string,
   commands: SlashCommand[],
 ): GoalCommand | null {
-  if (provider !== 'codex') return null
+  if (!providerSupportsGoals(provider)) return null
   const invocation = prompt.trim()
   if (!invocation.startsWith('/')) return null
   const body = invocation.slice(1)
   const split = body.match(/^(\S+)(?:\s+([\s\S]*))?$/u)
   if (!split || split[1] !== 'goal') return null
-  const goalIsCodexBuiltin = commands.some((command) => command.name === 'goal'
+  const goalIsNativeBuiltin = commands.some((command) => command.name === 'goal'
     && command.scope === 'Builtin'
     && command.template === null)
-  if (!goalIsCodexBuiltin) return null
+  if (!goalIsNativeBuiltin) return null
   const argument = (split[2] ?? '').trim()
+  const { canPauseAndResume } = goalCapabilities(provider)
   switch (argument) {
     case '': return { kind: 'show' }
-    case 'edit': return { kind: 'edit' }
-    case 'pause': return { kind: 'pause' }
-    case 'resume': return { kind: 'resume' }
+    case 'edit': return canPauseAndResume ? { kind: 'edit' } : { kind: 'set', objective: argument }
+    case 'pause': return canPauseAndResume ? { kind: 'pause' } : { kind: 'set', objective: argument }
+    case 'resume': return canPauseAndResume ? { kind: 'resume' } : { kind: 'set', objective: argument }
     case 'clear': return { kind: 'clear' }
     default: return { kind: 'set', objective: argument }
   }

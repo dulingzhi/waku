@@ -1,4 +1,5 @@
 import type { AgentSession, ThreadGoal, ThreadGoalStatus } from '@waku/client'
+import { goalCapabilities } from '@waku/client/composer-autocomplete'
 import { useEffect, useState, type RefObject } from 'react'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
@@ -62,9 +63,16 @@ export function formatGoalTokens(tokens: number): string {
 }
 
 /** The parenthetical consumption readout: budget-bounded goals report tokens,
- * unbudgeted ones elapsed pursuit time — the Codex CLI's own treatment. */
-export function goalUsageReadout(goal: ThreadGoal, liveElapsedSeconds = 0): string | null {
-  if (typeof goal.tokenBudget === 'number') {
+ * unbudgeted ones elapsed pursuit time — the Codex CLI's own treatment.
+ *
+ * A provider with no budget of its own reports elapsed time only: a token
+ * counter where nothing bounds the goal would read like a limit. */
+export function goalUsageReadout(
+  goal: ThreadGoal,
+  liveElapsedSeconds = 0,
+  capabilities: { hasTokenBudget: boolean } = { hasTokenBudget: true },
+): string | null {
+  if (capabilities.hasTokenBudget && typeof goal.tokenBudget === 'number') {
     return `${formatGoalTokens(goal.tokensUsed)} / ${formatGoalTokens(goal.tokenBudget)}`
   }
   const seconds = goal.timeUsedSeconds + liveElapsedSeconds
@@ -111,18 +119,26 @@ export function GoalDialog({
   const saveLabel = goal
     ? t(replace ? 'goal.replace' : 'goal.save')
     : t('goal.set')
-  const statusAction = goal && !replace
+  // What this provider can do with a goal, not what Codex can: Claude holds a
+  // single condition and has no pause verb, and its CLI would read "pause" as
+  // a new objective.
+  const capabilities = goalCapabilities(session?.provider ?? 'claude')
+  const statusAction = goal && !replace && capabilities.canPauseAndResume
     ? goal.status === 'active'
       ? { status: 'paused' as const, label: t('goal.pause'), icon: 'stop' as WakuIconName }
       : goal.status === 'paused' || goal.status === 'blocked' || goal.status === 'usageLimited'
         ? { status: 'active' as const, label: t('goal.resume'), icon: 'arrowUp' as WakuIconName }
         : null
     : null
-  const usage = goal ? goalUsageReadout(goal) : null
+  const usage = goal ? goalUsageReadout(goal, 0, capabilities) : null
 
   function save() {
     if (!trimmed) return
-    const status = goal && !replace ? editedGoalStatus(goal.status) : 'active'
+    // A provider without pause has no other status to inherit, so saving there
+    // always means "pursue this now".
+    const status = goal && !replace && capabilities.canPauseAndResume
+      ? editedGoalStatus(goal.status)
+      : 'active'
     onSubmit(trimmed, status, replace && Boolean(goal))
     onOpenChange(false)
   }

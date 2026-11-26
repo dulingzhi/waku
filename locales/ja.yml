@@ -790,6 +790,7 @@ errors.initialize_codex_app_server: Codex app-server を初期化できません
 errors.register_computer_use_skill: Waku のコンピュータ操作スキルを Codex に登録できませんでした
 errors.codex_thread_open_incomplete: Codex はスレッドを開く処理を完了しませんでした
 errors.codex_goals_unsupported: このバージョンの Codex はスレッドゴールに対応していません
+errors.claude_goal_status_unsupported: Claude のゴールは単一の条件で、一時停止や再開には対応していません
 errors.provider_receive_prompt: "%{provider} はプロンプトを受信できませんでした"
 errors.provider_start_turn: "%{provider} はターンを開始できませんでした"
 errors.provider_rejected_steer: "%{provider} が追加の指示を拒否しました：%{error}"
@@ -1248,7 +1249,6 @@ daemon.encrypted_browser: 暗号化された接続です。トークンはこの
 daemon.encrypted_device: 暗号化された接続です。トークンはこのデバイスのキーチェーンに保存されます。
 session_unavailable: このタスクはデーモン上に存在しません
 session.project_gone: このタスクのプロジェクトはデーモン上で利用できません
-session.goals_need_codex: ゴールには Codex が必要です
 session.codex_not_installed: デーモンホストに Codex がインストールされていません
 session.codex_start_failed: デーモンが Codex を起動できませんでした
 session.steer_queued: エージェントが途中で受け取れなかったため、次のターンにキューされました。

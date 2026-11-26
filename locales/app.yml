@@ -1541,6 +1541,8 @@ errors.codex_thread_open_incomplete:
   en: Codex did not finish opening its thread
 errors.codex_goals_unsupported:
   en: This Codex version does not support thread goals
+errors.claude_goal_status_unsupported:
+  en: Claude goals are a single condition with no pause or resume
 errors.provider_receive_prompt:
   en: "%{provider} could not receive the prompt"
 errors.provider_start_turn:
@@ -2447,8 +2449,6 @@ session_unavailable:
   en: This task no longer exists on the daemon
 session.project_gone:
   en: This task’s project is no longer available on the daemon
-session.goals_need_codex:
-  en: Goals require Codex
 session.codex_not_installed:
   en: Codex is not installed on the daemon host
 session.codex_start_failed:

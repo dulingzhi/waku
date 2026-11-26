@@ -75,6 +75,19 @@ impl Waku {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Claude keeps its goal in its own transcript rather than behind a
+        // request, so the cached copy can be stale — after a restart, or for a
+        // goal the CLI cleared itself. Ask for a refresh as the dialog opens;
+        // Codex answers with its current goal, Claude re-reads the transcript.
+        let refreshing = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == request.session_id)
+            .is_some_and(|session| session.provider == ProviderKind::Claude);
+        if refreshing {
+            self.dispatch_goal_operation(request.session_id, GoalOperation::Refresh, cx);
+        }
         let content = request.prefill.or_else(|| {
             self.state
                 .sessions
@@ -275,13 +288,18 @@ impl Waku {
         if objective.is_empty() {
             return;
         }
-        let current_status = self
+        let session = self
             .state
             .sessions
             .iter()
-            .find(|session| session.id == session_id)
-            .and_then(|session| session.thread_goal.as_ref())
-            .map(|goal| goal.status);
+            .find(|session| session.id == session_id);
+        let current_status =
+            session.and_then(|session| session.thread_goal.as_ref().map(|g| g.status));
+        let capabilities = crate::composer_complete::goal_capabilities(
+            session
+                .map(|session| session.provider)
+                .unwrap_or(self.state.last_provider),
+        );
         let (status, replace) = match current_status {
             // Editing keeps a resumable status; finished goals restart.
             Some(status) if !replace => (edited_goal_status(status), false),
@@ -289,6 +307,13 @@ impl Waku {
             // that vanished since the dialog opened degrades to a plain set.
             Some(_) => (ThreadGoalStatus::Active, true),
             None => (ThreadGoalStatus::Active, false),
+        };
+        // A provider without pause has no other status to inherit, so an edit
+        // there is always "pursue this now" rather than "resume what it was".
+        let status = if capabilities.can_pause_and_resume {
+            status
+        } else {
+            ThreadGoalStatus::Active
         };
         self.dispatch_goal_operation(
             session_id,
@@ -347,6 +372,17 @@ impl Waku {
             .iter()
             .find(|session| session.id == dialog.session_id)
             .and_then(|session| session.thread_goal.as_ref());
+        // What this provider can actually do with a goal, not what Codex can:
+        // Claude holds one condition and has no pause verb, so a Pause row
+        // here would replace the user's objective with the word "pause".
+        let provider = self
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == dialog.session_id)
+            .map(|session| session.provider)
+            .unwrap_or(self.state.last_provider);
+        let capabilities = crate::composer_complete::goal_capabilities(provider);
         let replace = dialog.replace;
         let can_save = !dialog.objective.read(cx).content().trim().is_empty();
         let save_label = match (&current, replace) {
@@ -355,7 +391,7 @@ impl Waku {
             (None, _) => tr!("goal.set"),
         };
         let status_action = current
-            .filter(|_| !replace)
+            .filter(|_| !replace && capabilities.can_pause_and_resume)
             .and_then(|goal| match goal.status {
                 ThreadGoalStatus::Active => Some((
                     ThreadGoalStatus::Paused,
@@ -375,7 +411,7 @@ impl Waku {
             (
                 goal_status_label(goal.status),
                 goal_status_color(goal.status, &theme),
-                goal_usage_summary(goal),
+                goal_usage_summary(goal, capabilities),
             )
         });
         let weak = cx.entity().downgrade();
@@ -630,7 +666,15 @@ pub(super) fn goal_status_color(status: ThreadGoalStatus, theme: &Theme) -> gpui
 /// budget when one bounds the goal, elapsed pursuit time otherwise, the
 /// Codex CLI's own treatment. `live_elapsed_seconds` extends an active
 /// goal's recorded time with the current turn's wall clock.
-pub(super) fn goal_chip_label(goal: &ThreadGoal, live_elapsed_seconds: i64) -> String {
+///
+/// A provider with no budget reports elapsed time only: showing a token
+/// counter where nothing bounds the goal would suggest a limit that is not
+/// there.
+pub(super) fn goal_chip_label(
+    goal: &ThreadGoal,
+    live_elapsed_seconds: i64,
+    capabilities: crate::composer_complete::GoalCapabilities,
+) -> String {
     let phrase = match goal.status {
         ThreadGoalStatus::Active => tr!("goal.chip_active"),
         ThreadGoalStatus::Paused => tr!("goal.chip_paused"),
@@ -643,16 +687,16 @@ pub(super) fn goal_chip_label(goal: &ThreadGoal, live_elapsed_seconds: i64) -> S
         (
             ThreadGoalStatus::Active | ThreadGoalStatus::Complete | ThreadGoalStatus::BudgetLimited,
             Some(budget),
-        ) => Some(format!(
+        ) if capabilities.has_token_budget => Some(format!(
             "{} / {}",
             format_tokens(goal.tokens_used.max(0) as u64),
             format_tokens(budget.max(0) as u64)
         )),
-        (ThreadGoalStatus::Active, None) => {
+        (ThreadGoalStatus::Active, _) => {
             let seconds = goal.time_used_seconds.saturating_add(live_elapsed_seconds);
             (seconds > 0).then(|| format_goal_elapsed(seconds))
         }
-        (ThreadGoalStatus::Complete, None) => {
+        (ThreadGoalStatus::Complete, _) => {
             (goal.time_used_seconds > 0).then(|| format_goal_elapsed(goal.time_used_seconds))
         }
         _ => None,
@@ -665,10 +709,18 @@ pub(super) fn goal_chip_label(goal: &ThreadGoal, live_elapsed_seconds: i64) -> S
 
 /// One line of accounting for the dialog header: elapsed pursuit time and
 /// token consumption, whichever the goal has recorded.
-pub(super) fn goal_usage_summary(goal: &ThreadGoal) -> Option<String> {
+pub(super) fn goal_usage_summary(
+    goal: &ThreadGoal,
+    capabilities: crate::composer_complete::GoalCapabilities,
+) -> Option<String> {
     let mut parts = Vec::new();
     if goal.time_used_seconds > 0 {
         parts.push(format_goal_elapsed(goal.time_used_seconds));
+    }
+    // A provider with no budget of its own reports the tokens it did spend
+    // anyway; one that has no such accounting keeps the row to elapsed time.
+    if !capabilities.has_token_budget {
+        return (!parts.is_empty()).then(|| parts.join(" · "));
     }
     match goal.token_budget {
         Some(budget) => parts.push(tr!(
@@ -773,7 +825,12 @@ mod tests {
             tokens_used: 12_500,
             time_used_seconds: 90,
         };
-        assert_eq!(goal_chip_label(&goal, 0), "Pursuing goal (12.5k / 50.0k)");
+        // A budget only shows where the provider reports one; Codex has one.
+        let codex = crate::composer_complete::goal_capabilities(ProviderKind::Codex);
+        assert_eq!(
+            goal_chip_label(&goal, 0, codex),
+            "Pursuing goal (12.5k / 50.0k)"
+        );
     }
 
     #[test]
@@ -785,18 +842,39 @@ mod tests {
             tokens_used: 12_500,
             time_used_seconds: 16_500,
         };
+        let codex = crate::composer_complete::goal_capabilities(ProviderKind::Codex);
         // 4h 35m recorded + 60s of the current turn — Codex CLI's readout.
-        assert_eq!(goal_chip_label(&goal, 60), "Pursuing goal (4h 36m)");
+        assert_eq!(goal_chip_label(&goal, 60, codex), "Pursuing goal (4h 36m)");
 
         goal.status = ThreadGoalStatus::Complete;
-        assert_eq!(goal_chip_label(&goal, 0), "Goal achieved (4h 35m)");
+        assert_eq!(goal_chip_label(&goal, 0, codex), "Goal achieved (4h 35m)");
 
         goal.status = ThreadGoalStatus::Paused;
-        assert_eq!(goal_chip_label(&goal, 0), "Goal paused");
+        assert_eq!(goal_chip_label(&goal, 0, codex), "Goal paused");
 
         // A brand-new goal has nothing to report yet.
         goal.status = ThreadGoalStatus::Active;
         goal.time_used_seconds = 0;
-        assert_eq!(goal_chip_label(&goal, 0), "Pursuing goal");
+        assert_eq!(goal_chip_label(&goal, 0, codex), "Pursuing goal");
+    }
+
+    /// A provider with no budget of its own shows elapsed time, never the
+    /// tokens it happened to spend: the counter would read like a limit.
+    #[test]
+    fn a_goal_without_a_provider_budget_hides_the_token_counter() {
+        let mut goal = ThreadGoal {
+            objective: "Keep going".into(),
+            status: ThreadGoalStatus::Active,
+            token_budget: Some(50_000),
+            tokens_used: 12_500,
+            time_used_seconds: 90,
+        };
+        let claude = crate::composer_complete::goal_capabilities(ProviderKind::Claude);
+        // Even with a budget on the record, Claude's surface has no budget to
+        // spend it against, so the usage is elapsed time.
+        assert_eq!(goal_chip_label(&goal, 0, claude), "Pursuing goal (1m)");
+
+        goal.status = ThreadGoalStatus::Complete;
+        assert_eq!(goal_chip_label(&goal, 0, claude), "Goal achieved (1m)");
     }
 }

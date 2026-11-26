@@ -9,6 +9,7 @@ import type {
   ThreadGoal,
 } from '@waku/client';
 import {
+  goalCapabilities,
   isFastModeToggleSubmission,
   isResumeSubmission,
   parseGoalSubmission,
@@ -111,8 +112,9 @@ export function useComposerLocalCommands({
         {resumeOpen && provider && (
           <ResumeSessionSheet provider={provider} runtimeMode={runtimeMode} onDismiss={() => setResumeOpen(false)} />
         )}
-        {goalDialog && (
+        {goalDialog && provider && (
           <GoalCommandSheet
+            provider={provider}
             goal={goal ?? null}
             prefill={goalDialog.prefill}
             replace={goalDialog.replace}
@@ -214,7 +216,8 @@ function ResumeSessionSheet({ provider, runtimeMode, onDismiss }: {
   );
 }
 
-function GoalCommandSheet({ goal, prefill, replace, onRun, onDismiss }: {
+function GoalCommandSheet({ provider, goal, prefill, replace, onRun, onDismiss }: {
+  provider: ProviderKind;
   goal: ThreadGoal | null;
   prefill: string | null;
   replace: boolean;
@@ -226,6 +229,9 @@ function GoalCommandSheet({ goal, prefill, replace, onRun, onDismiss }: {
   const [objective, setObjective] = useState(prefill ?? goal?.objective ?? '');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Pause and resume are the provider's to perform; Claude holds one condition
+  // and would read "pause" as a new objective.
+  const canPauseAndResume = goalCapabilities(provider).canPauseAndResume;
   async function run(operation: GoalOperation) {
     if (pending) return;
     setPending(true);
@@ -263,14 +269,16 @@ function GoalCommandSheet({ goal, prefill, replace, onRun, onDismiss }: {
         leading={pending ? <ActivityIndicator size="small" /> : undefined}
         onPress={() => void run({
           kind: 'set', objective: objective.trim(),
-          status: goal && !replace && goal.status !== 'complete' && goal.status !== 'budgetLimited'
+          // Without pause there is no other status to inherit, so saving
+          // there always means "pursue this now".
+          status: canPauseAndResume && goal && !replace && goal.status !== 'complete' && goal.status !== 'budgetLimited'
             ? goal.status : 'active',
           replace: replace && Boolean(goal),
         })}
       />
       {goal && !replace && (
         <>
-          {(goal.status === 'active' || goal.status === 'paused' || goal.status === 'blocked' || goal.status === 'usageLimited') && <SheetRow
+          {canPauseAndResume && (goal.status === 'active' || goal.status === 'paused' || goal.status === 'blocked' || goal.status === 'usageLimited') && <SheetRow
             label={goal.status === 'active' ? 'Pause goal' : 'Resume goal'}
             disabled={pending}
             onPress={() => void run({ kind: 'set', objective: null, status: goal.status === 'active' ? 'paused' : 'active', replace: false })}

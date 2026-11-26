@@ -755,6 +755,7 @@ errors.initialize_codex_app_server: 无法初始化 Codex app-server
 errors.register_computer_use_skill: 无法向 Codex 注册 Waku 电脑操作技能
 errors.codex_thread_open_incomplete: Codex 未能完成线程打开操作
 errors.codex_goals_unsupported: 此版本的 Codex 不支持线程目标
+errors.claude_goal_status_unsupported: Claude 的目标只有一个条件，不支持暂停或恢复
 errors.provider_receive_prompt: "%{provider} 未能接收消息"
 errors.provider_start_turn: "%{provider} 未能开始本轮"
 errors.provider_rejected_steer: "%{provider} 拒绝了补充指示：%{error}"
@@ -1196,7 +1197,6 @@ daemon.encrypted_browser: 已加密连接。令牌保留在此浏览器中。
 daemon.encrypted_device: 已加密连接。令牌存储在此设备的钥匙串中。
 session_unavailable: 此任务在守护进程上已不存在
 session.project_gone: 此任务的项目在守护进程上已不可用
-session.goals_need_codex: 目标功能需要 Codex
 session.codex_not_installed: 守护进程主机上未安装 Codex
 session.codex_start_failed: 守护进程无法启动 Codex
 session.steer_queued: 智能体无法在中途接受该消息，已加入下一轮队列。

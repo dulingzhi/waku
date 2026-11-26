@@ -39,8 +39,8 @@ use crate::driver::{
 };
 use crate::model::{
     ActivityKind, BackgroundWorkEvent, BackgroundWorkItem, BackgroundWorkKey, BackgroundWorkKind,
-    BackgroundWorkStatus, DriverEvent, PermissionOption, ProviderResumeCursor, RuntimeMode,
-    UserInputAnswer, UserInputOption, UserInputQuestion, unix_time_millis,
+    BackgroundWorkStatus, DriverEvent, GoalOperation, PermissionOption, ProviderResumeCursor,
+    RuntimeMode, UserInputAnswer, UserInputOption, UserInputQuestion, unix_time_millis,
 };
 
 enum CommandMessage {
@@ -57,6 +57,9 @@ enum CommandMessage {
         answers: Vec<UserInputAnswer>,
     },
     Options(SessionOptions),
+    /// A goal mutation. Claude has no goal RPC, so this becomes the CLI's own
+    /// `/goal` command (or a transcript read) in the writer thread.
+    Goal(GoalOperation),
     StopBackgroundWork {
         key: BackgroundWorkKey,
         control_id: String,
@@ -82,6 +85,90 @@ fn stop_task_request(request_id: u64, task_id: &str) -> Value {
         "request_id": format!("waku-{request_id}"),
         "request": {"subtype": "stop_task", "task_id": task_id}
     })
+}
+
+/// Turn a goal operation into the prompt the CLI's own `/goal` understands,
+/// or answer it here when the CLI has no equivalent.
+///
+/// `Some(text)` is written to the agent as a user message; `None` means the
+/// operation was answered without touching the provider. Claude's `/goal`
+/// takes a condition, `clear`, or nothing at all — there is no pause, resume
+/// or status verb, and every other argument is a condition (verified against
+/// the real CLI, 2.1.330: `/goal status` set a goal literally named
+/// "status"). So anything that is not a set or a clear must be reported
+/// rather than sent, or it would silently become a new goal.
+fn claude_goal_prompt(
+    operation: &GoalOperation,
+    session_id: &str,
+    events: &DriverEventSender,
+) -> Option<String> {
+    match operation {
+        GoalOperation::Refresh => {
+            // No request to make: the transcript is the goal's only record.
+            let _ = events.send(DriverEvent::GoalUpdated(claude_goal(session_id)));
+            None
+        }
+        GoalOperation::Clear => Some("/goal clear".to_owned()),
+        GoalOperation::Set {
+            objective,
+            status,
+            replace,
+        } => {
+            let Some(objective) = objective
+                .as_deref()
+                .map(str::trim)
+                .filter(|objective| !objective.is_empty())
+            else {
+                // A status-only change. The CLI has no such operation, and
+                // sending a bare `/goal` would ask it to report, not change.
+                let _ = events.send(DriverEvent::Error(tr!(
+                    "errors.claude_goal_status_unsupported"
+                )));
+                return None;
+            };
+            if !matches!(status, None | Some(crate::model::ThreadGoalStatus::Active)) {
+                let _ = events.send(DriverEvent::Error(tr!(
+                    "errors.claude_goal_status_unsupported"
+                )));
+                return None;
+            }
+            // `replace` needs no clear first: a new `/goal` supersedes the old
+            // condition outright, and doing it in one step keeps the CLI's
+            // own supersede path (which the transcript records as one link).
+            let _ = replace;
+            Some(format!("/goal {objective}"))
+        }
+    }
+}
+
+/// The event payload for a session's goal, read from Claude's own transcript.
+fn claude_goal(session_id: &str) -> Option<crate::model::ThreadGoal> {
+    use crate::claude_session::ClaudeGoalState;
+    match crate::claude_session::session_goal(session_id) {
+        ClaudeGoalState::None => None,
+        ClaudeGoalState::Active {
+            objective,
+            met,
+            reason,
+            elapsed_seconds,
+            tokens,
+        } => Some(crate::model::ThreadGoal {
+            objective,
+            // Claude reports only "still working" or "met". A halted goal is
+            // reported through `reason` on a blocked status; a met one is
+            // complete.
+            status: if met {
+                crate::model::ThreadGoalStatus::Complete
+            } else if reason.is_some() {
+                crate::model::ThreadGoalStatus::Blocked
+            } else {
+                crate::model::ThreadGoalStatus::Active
+            },
+            token_budget: None,
+            tokens_used: tokens.unwrap_or_default(),
+            time_used_seconds: elapsed_seconds.unwrap_or_default(),
+        }),
+    }
 }
 
 pub struct ClaudeDriver {
@@ -531,6 +618,24 @@ impl ClaudeDriver {
                                 }),
                             )
                         }
+                        CommandMessage::Goal(operation) => {
+                            match claude_goal_prompt(&operation, &title_session_id, &writer_events) {
+                                Some(prompt) => {
+                                    // `/goal` is a CLI-side command, so it
+                                    // crosses the wire exactly as typed. It
+                                    // also runs the agent, hence a turn.
+                                    *writer_turn.lock() = true;
+                                    start_claude_title_refresh(
+                                        &writer_title_refresh,
+                                        &title_session_id,
+                                        &writer_events,
+                                    );
+                                    let _ = writer_events.send(DriverEvent::TurnStarted);
+                                    write_line(&mut stdin, &user_message_payload(&prompt))
+                                }
+                                None => Ok(()),
+                            }
+                        }
                         CommandMessage::StopBackgroundWork { key, control_id } => {
                             next_request_id += 1;
                             let request_id = format!("waku-{next_request_id}");
@@ -657,6 +762,22 @@ impl DriverControl for ClaudeDriver {
         self.commands.send(CommandMessage::Options(options)).is_ok()
     }
 
+    /// Goals on Claude are the CLI's own `/goal`, not an RPC.
+    ///
+    /// `/goal <condition>` installs a session-scoped Stop hook that holds the
+    /// agent to the condition across turns, and `/goal clear` removes it. Both
+    /// are ordinary prompts as far as the transport is concerned, so the
+    /// condition is written as typed and the CLI answers with its usual
+    /// synthetic reply plus a `goal_status` attachment in the transcript.
+    ///
+    /// The CLI has no pause, resume, status query or token budget, so those
+    /// operations are answered here rather than silently doing nothing:
+    /// `Refresh` re-reads the transcript, pause/resume report what the
+    /// provider cannot do, and a clearing `Set` becomes `/goal clear`.
+    fn goal(&self, operation: GoalOperation) {
+        let _ = self.commands.send(CommandMessage::Goal(operation));
+    }
+
     fn rollback(&self, _turns: usize) -> anyhow::Result<Option<ProviderResumeCursor>> {
         Err(anyhow!(
             "conversation rollback is not supported by this provider transport"
@@ -716,6 +837,11 @@ struct ClaudeStreamState {
     task_output_tails: ClaudeTaskOutputTails,
     pending_task_stops: Arc<Mutex<HashMap<String, BackgroundWorkKey>>>,
     pending_user_inputs: Arc<Mutex<HashMap<String, Value>>>,
+    /// The goal last reported to the host, so a turn that leaves the goal
+    /// unchanged does not emit a redundant update. Claude's goal lives in its
+    /// native transcript, so the only way to notice a change is to re-read
+    /// and compare.
+    last_goal: Option<crate::model::ThreadGoal>,
     /// Model of the latest main-thread assistant message, so the settled
     /// turn's `modelUsage` map can be read for that model's context window
     /// rather than a subagent's.
@@ -1802,6 +1928,14 @@ fn handle_message(
             if !*turn_active.lock() {
                 return;
             }
+            // The CLI appends its goal judgement to the same transcript as the
+            // turn settles, so re-read it here — the host's chip and dialog
+            // would otherwise never learn that a goal was met or halted.
+            let goal = claude_goal(session_id);
+            if state.last_goal != goal {
+                state.last_goal = goal.clone();
+                let _ = events.send(DriverEvent::GoalUpdated(goal));
+            }
             // Claude writes its generated title and rewind checkpoint to the
             // same native transcript as the turn settles. Read it once, ahead
             // of TurnFinished, so that event's forced save includes both.
@@ -2292,6 +2426,86 @@ mod tests {
             Mutex::new(true),
             ClaudeStreamState::default(),
         )
+    }
+
+    /// A goal set crosses to the CLI as its own `/goal` command, with the
+    /// condition as typed: there is no RPC to carry it.
+    #[test]
+    fn a_goal_set_becomes_the_cli_own_goal_command() {
+        let (events, _event_rx) = crate::driver::test_event_channel();
+        let mut operations = vec![];
+        let prompt = claude_goal_prompt(
+            &GoalOperation::Set {
+                objective: Some("all tests pass".into()),
+                status: Some(crate::model::ThreadGoalStatus::Active),
+                replace: false,
+            },
+            "a-session",
+            &events,
+        );
+        assert_eq!(prompt.as_deref(), Some("/goal all tests pass"));
+        operations.push(prompt);
+        // Clearing is the CLI's other verb.
+        assert_eq!(
+            claude_goal_prompt(&GoalOperation::Clear, "a-session", &events).as_deref(),
+            Some("/goal clear")
+        );
+        assert!(operations.iter().all(Option::is_some));
+    }
+
+    /// A status-only change cannot be expressed: sending `/goal pause` would
+    /// set a goal literally named "pause", silently replacing the objective.
+    /// It must be reported instead.
+    #[test]
+    fn a_pause_is_refused_rather_than_read_as_a_new_objective() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let prompt = claude_goal_prompt(
+            &GoalOperation::Set {
+                objective: None,
+                status: Some(crate::model::ThreadGoalStatus::Paused),
+                replace: false,
+            },
+            "a-session",
+            &events,
+        );
+        assert_eq!(prompt, None, "nothing may cross to the CLI");
+        let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, DriverEvent::Error(_))),
+            "the refusal has to reach the user: {events:?}"
+        );
+    }
+
+    /// Editing a goal into a paused state is the same refusal.
+    ///
+    /// The case above is answered by the missing objective, so it would still
+    /// pass if the status check let Paused through. This one carries an
+    /// objective, which leaves the status as the only reason to refuse.
+    #[test]
+    fn editing_into_a_paused_goal_is_refused_too() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let prompt = claude_goal_prompt(
+            &GoalOperation::Set {
+                objective: Some("keep the build green".into()),
+                status: Some(crate::model::ThreadGoalStatus::Paused),
+                replace: false,
+            },
+            "a-session",
+            &events,
+        );
+        assert_eq!(
+            prompt, None,
+            "a pause must not become a goal named 'keep the build green'"
+        );
+        let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, DriverEvent::Error(_))),
+            "the refusal has to reach the user: {events:?}"
+        );
     }
 
     #[cfg(unix)]

@@ -1890,7 +1890,11 @@ impl Waku {
         .then(|| self.goal_observed_at.get(&session_id))
         .flatten()
         .map_or(0, |observed| observed.elapsed().as_secs() as i64);
-        let label = super::goal_dialog::goal_chip_label(goal, live_elapsed_seconds);
+        let label = super::goal_dialog::goal_chip_label(
+            goal,
+            live_elapsed_seconds,
+            crate::composer_complete::goal_capabilities(session.provider),
+        );
         let objective = goal.objective.clone();
         let weak = cx.entity().downgrade();
         Some(

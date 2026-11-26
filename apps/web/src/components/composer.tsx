@@ -51,6 +51,7 @@ import {
   composerAutocompleteRows,
   detectComposerTrigger,
   expandedComposerSubmission,
+  goalCapabilities,
   isFastModeToggleSubmission,
   isResumeSubmission,
   mergeComposerCommands,
@@ -1365,8 +1366,11 @@ function GoalControl({
     ? Math.floor((Date.now() - observedAt.current) / 1_000)
     : 0
   const phrase = t(GOAL_CHIP_KEYS[goal.status])
+  // Only a provider that budgets a goal shows the token counter; Claude
+  // reports elapsed time alone, and a counter there would read like a limit.
+  const capabilities = goalCapabilities(session.provider)
   const usage = ['active', 'complete', 'budgetLimited'].includes(goal.status)
-    ? goalUsageReadout(goal, liveElapsed)
+    ? goalUsageReadout(goal, liveElapsed, capabilities)
     : null
   return (
     <button

@@ -9,6 +9,8 @@ import {
   isResumeSubmission,
   mergeComposerCommands,
   parseGoalSubmission,
+  providerSupportsGoals,
+  goalCapabilities,
   replaceComposerTrigger,
   toggledFastServiceTier,
 } from './composer-autocomplete'
@@ -159,13 +161,31 @@ describe('parseGoalSubmission', () => {
     expect(parse('ship /goal')).toBeNull()
   })
 
-  test('is codex-only and respects command overrides', () => {
-    expect(parseGoalSubmission('claude', '/goal', [builtin])).toBeNull()
+  test('respects what each provider offers and command overrides', () => {
+    // Both providers have a goal surface now, but the subcommands are not
+    // shared: Claude has no pause verb, so there "pause" is a condition.
+    expect(parseGoalSubmission('claude', '/goal', [builtin])).toEqual({ kind: 'show' })
+    expect(parseGoalSubmission('claude', '/goal pause', [builtin])).toEqual({
+      kind: 'set',
+      objective: 'pause',
+    })
+    expect(parseGoalSubmission('claude', '/goal clear', [builtin])).toEqual({ kind: 'clear' })
+    expect(parseGoalSubmission('codex', '/goal pause', [builtin])).toEqual({ kind: 'pause' })
+    // A provider with no goal surface parses nothing.
+    expect(parseGoalSubmission('openCode', '/goal', [builtin])).toBeNull()
     const projectOwned: SlashCommand = {
       ...builtin,
       scope: 'Project',
       template: 'do project things',
     }
     expect(parseGoalSubmission('codex', '/goal', [projectOwned])).toBeNull()
+  })
+
+  test('pause and resume belong to the provider that can perform them', () => {
+    expect(goalCapabilities('codex')).toEqual({ canPauseAndResume: true, hasTokenBudget: true })
+    expect(goalCapabilities('claude')).toEqual({ canPauseAndResume: false, hasTokenBudget: false })
+    expect(providerSupportsGoals('codex')).toBe(true)
+    expect(providerSupportsGoals('claude')).toBe(true)
+    expect(providerSupportsGoals('openCode')).toBe(false)
   })
 })
