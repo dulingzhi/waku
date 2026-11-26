@@ -1069,6 +1069,37 @@ fn read_right_panel_file(
     }
 }
 
+/// Whether the text in an editor is a change to the file it was read from.
+///
+/// The two sides are in different shapes and comparing them as they are is
+/// how every CRLF file in the tree opened already marked dirty.
+///
+/// The editor holds text with normalised breaks — that is what its lexer, its
+/// line arithmetic and its byte offsets assume — and puts the file's own
+/// convention back only when saving. The baseline, meanwhile, is the bytes
+/// `read_to_string` returned. Comparing a normalised buffer against a raw one
+/// says "changed" for every file that ends its lines with CRLF, before the user
+/// has touched a key: this repository alone is 171 CRLF files to 72 LF.
+///
+/// Bringing both to the editor's shape answers the question the dot is actually
+/// asking — did the text change — rather than whether the line endings survived
+/// a round trip nobody made. It also covers the narrower case of a file with
+/// mixed breaks, which no comparison against the raw bytes could ever call
+/// equal without the save changing them either.
+fn file_text_differs(current: &str, baseline: &str) -> bool {
+    normalize_line_breaks(current) != normalize_line_breaks(baseline)
+}
+
+/// Drop the carriage returns a CRLF file carries, so two readings of the same
+/// text compare equal whatever breaks the file uses.
+fn normalize_line_breaks(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('\r') {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 /// One line of a delegate's transcript as the right panel shows it.
 ///
 /// A delegate's panel is not the task transcript UI: it is a short read of what
@@ -3401,76 +3432,81 @@ impl Waku {
         let theme = Theme::current(cx);
         let file_tree_width = fitted_file_tree_width(panel_width, self.right_panel_file_tree_width);
 
+        // Two kinds of file reach this pane and they differ only in their body.
+        //
         // A file that is not source is decoded and drawn instead of opened for
         // editing: a PNG in a text editor is a screenful of mojibake, and a
         // workbook one is a zip. The path decides, before anything is read, so
         // an unsupported file never costs a transfer.
-        if let Some(kind) = file_preview::kind_of(&relative_path) {
-            let body = self.render_file_preview(&relative_path, kind, cx);
-            return div()
-                .key_context("FileEditorPane")
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .bg(theme.surface)
-                .child(body);
-        }
-
-        let (editor_state, writable, _) =
-            self.ensure_right_panel_file_editor(&relative_path, window, cx);
-        let surface = self
-            .right_panel_file_editors
-            .get(&relative_path)
-            .map(RightPanelFileEditor::surface)
-            .expect("the editor was just ensured");
-
-        // Markdown files carry the global source/preview toggle; every other
-        // language always shows source.
-        let is_markdown = file_highlighter_language(&relative_path) == "markdown";
-        let preview = is_markdown && self.state.markdown_preview;
-        let body = if preview {
-            self.render_file_markdown_preview(&relative_path, &editor_state, cx)
+        //
+        // A preview used to return without the frame the editor has — no name
+        // bar, no tree beside it — so opening a picture replaced the whole
+        // pane with a bare image. That reads as a different view rather than as
+        // this file open in its own tab, which is what it is. Both kinds now
+        // share the frame below and supply only their body.
+        let mut header_controls: Option<AnyElement> = None;
+        let body = if let Some(kind) = file_preview::kind_of(&relative_path) {
+            self.render_file_preview(&relative_path, kind, cx)
         } else {
-            self.render_file_editor_body(
-                &relative_path,
-                &surface,
-                panel_width - file_tree_width,
-                writable,
-                window,
-                cx,
-            )
-        };
-        let preview_toggle = is_markdown.then(|| {
-            let focus = self.transcript_control_focus("file-markdown-preview-toggle", cx);
-            let (icon_path, label) = if preview {
-                ("icons/pencil.svg", tr!("files.edit_markdown_source"))
+            let (editor_state, writable, _) =
+                self.ensure_right_panel_file_editor(&relative_path, window, cx);
+            let surface = self
+                .right_panel_file_editors
+                .get(&relative_path)
+                .map(RightPanelFileEditor::surface)
+                .expect("the editor was just ensured");
+
+            // Markdown files carry the global source/preview toggle; every other
+            // language always shows source.
+            let is_markdown = file_highlighter_language(&relative_path) == "markdown";
+            let preview = is_markdown && self.state.markdown_preview;
+            let body = if preview {
+                self.render_file_markdown_preview(&relative_path, &editor_state, cx)
+                    .into_any_element()
             } else {
-                ("icons/eye.svg", tr!("files.preview_markdown"))
+                self.render_file_editor_body(
+                    &relative_path,
+                    &surface,
+                    panel_width - file_tree_width,
+                    writable,
+                    window,
+                    cx,
+                )
+                .into_any_element()
             };
-            div()
-                .id("file-markdown-preview-toggle")
-                .track_focus(&focus)
-                .tab_index(0)
-                .size(px(26.0))
-                .rounded(px(7.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_default()
-                .focus_visible(|style| style.border_1().border_color(theme.accent))
-                .hover(|style| style.bg(theme.overlay))
-                .child(icon(icon_path, 12.0, theme.text_tertiary))
-                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_markdown_preview(cx)))
-                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.toggle_markdown_preview(cx);
-                        cx.stop_propagation();
-                    }
-                }))
-        });
+            header_controls = is_markdown.then(|| {
+                let focus = self.transcript_control_focus("file-markdown-preview-toggle", cx);
+                let (icon_path, label) = if preview {
+                    ("icons/pencil.svg", tr!("files.edit_markdown_source"))
+                } else {
+                    ("icons/eye.svg", tr!("files.preview_markdown"))
+                };
+                div()
+                    .id("file-markdown-preview-toggle")
+                    .track_focus(&focus)
+                    .tab_index(0)
+                    .size(px(26.0))
+                    .rounded(px(7.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_default()
+                    .focus_visible(|style| style.border_1().border_color(theme.accent))
+                    .hover(|style| style.bg(theme.overlay))
+                    .child(icon(icon_path, 12.0, theme.text_tertiary))
+                    .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_markdown_preview(cx)))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.toggle_markdown_preview(cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .into_any_element()
+            });
+            body
+        };
 
         let editor = div()
             .flex_1()
@@ -3498,7 +3534,7 @@ impl Waku {
                             .text_color(theme.text_secondary)
                             .child(relative_path.clone()),
                     )
-                    .children(preview_toggle),
+                    .children(header_controls),
             )
             .child(body);
 
@@ -3577,7 +3613,7 @@ impl Waku {
                     .right_panel_file_editors
                     .get_mut(subscribed_path.as_str())
                 {
-                    let dirty = editor.writable && value != editor.disk_content;
+                    let dirty = editor.writable && file_text_differs(&value, &editor.disk_content);
                     if editor.is_dirty() != dirty {
                         editor.set_dirty(dirty);
                         cx.notify();
@@ -4504,8 +4540,10 @@ impl Waku {
                             && editor.read_epoch == epoch
                         {
                             let current = editor.backend.content(cx);
+                            // The baseline is what the save just wrote, so the
+                            // comparison runs on the same footing as the dot's.
                             editor.disk_content = content.clone();
-                            editor.set_dirty(current != content);
+                            editor.set_dirty(file_text_differs(&current, &content));
                         }
                         // The text is on disk now, so the recovery copy is
                         // stale: restoring it later would offer the user their
@@ -6147,6 +6185,98 @@ mod delegate_panel_tests {
             ),
             Some(0),
             "opening the same agent twice must raise its tab, not add one"
+        );
+    }
+}
+
+#[cfg(test)]
+mod file_dirty_tests {
+    use super::*;
+
+    /// The bug this was written for: opening any CRLF file showed it dirty
+    /// before the user typed anything.
+    ///
+    /// The editor normalises breaks and the baseline does not, so `"a\r\nb"`
+    /// against `"a\nb"` read as an edit. Most of a Windows checkout is CRLF, so
+    /// "most files open dirty" is what that comparison produced.
+    #[test]
+    fn a_crlf_file_is_not_a_change_to_itself() {
+        assert!(
+            !file_text_differs("alpha\nbeta\n", "alpha\r\nbeta\r\n"),
+            "the same text with the file's own breaks is not an edit"
+        );
+    }
+
+    /// The other direction: an actual edit to a CRLF file still has to show,
+    /// or the fix would hide unsaved work instead of a false positive.
+    #[test]
+    fn a_real_edit_to_a_crlf_file_is_still_a_change() {
+        assert!(file_text_differs("alpha\nBETA\n", "alpha\r\nbeta\r\n"));
+        assert!(
+            file_text_differs("alpha\r\nbeta", "alpha\r\nbeta\r\n"),
+            "a dropped final newline is an edit too"
+        );
+    }
+
+    /// A file with mixed breaks cannot equal its raw bytes once normalised,
+    /// but it must equal itself, and must not equal a different text.
+    #[test]
+    fn mixed_breaks_compare_by_their_text_not_their_bytes() {
+        assert!(!file_text_differs("a\r\nb", "a\r\nb"));
+        assert!(!file_text_differs("a\nb", "a\r\nb"));
+        assert!(file_text_differs("a\nbc", "a\r\nb"));
+    }
+
+    /// Text with no carriage returns must not be copied on every comparison:
+    /// this runs on the typing path of every keystroke.
+    #[test]
+    fn an_lf_comparison_borrows_instead_of_copying() {
+        assert!(matches!(
+            normalize_line_breaks("alpha\nbeta"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            normalize_line_breaks("alpha\r\nbeta"),
+            std::borrow::Cow::Owned(_)
+        ));
+    }
+
+    /// A picture has to open like every other file — same name bar, same tree
+    /// beside it — rather than replacing the whole pane with a bare image.
+    ///
+    /// A source-level check, like the filesystem guards above, because the
+    /// shape it protects is a layout the current tests cannot lay out: the
+    /// failure is "the preview returned before building the frame", which
+    /// compiles and paints, just wrong. What it pins is the missing `return`:
+    /// the preview is a body now, and anything that ends the function early
+    /// brings the bare-pane look back.
+    #[test]
+    fn a_previewed_file_is_drawn_inside_the_same_frame_as_an_edited_one() {
+        let source = include_str!("right_panel.rs");
+        let body = source
+            .split_once("\n    fn render_right_panel_file(")
+            .expect("the pane's renderer")
+            .1
+            .split_once("\n    fn ensure_right_panel_file_editor(")
+            .expect("the renderer's end")
+            .0;
+
+        assert!(
+            body.contains("file_preview::kind_of"),
+            "the preview branch moved out of the pane renderer"
+        );
+        assert!(
+            !body.contains("return div()"),
+            "a preview must fall through to the shared frame, not return its own"
+        );
+        // The name bar and the tree are what make it read as a tab.
+        assert!(
+            body.contains("file_icon_for_path(&relative_path)"),
+            "the shared frame draws the file's icon and name"
+        );
+        assert!(
+            body.contains("render_right_panel_working_tree(Some(&relative_path)"),
+            "the shared frame keeps the file tree beside the file"
         );
     }
 }
