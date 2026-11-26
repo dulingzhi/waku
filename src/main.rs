@@ -19,6 +19,7 @@ fn main() {
         Mode::Daemon => run_daemon(),
         Mode::JsRepl => run_js_repl(),
         Mode::AgentBridge => run_agent_bridge(),
+        Mode::TodoBridge => run_todo_bridge(),
         // The word after `--computer-use` is the helper's own mode.
         Mode::ComputerUse(mode) => run_computer_use(mode),
         Mode::Gui => waku::run(),
@@ -36,6 +37,7 @@ enum Mode<'a> {
     Daemon,
     JsRepl,
     AgentBridge,
+    TodoBridge,
     ComputerUse(Option<&'a str>),
 }
 
@@ -45,6 +47,7 @@ impl<'a> Mode<'a> {
             Some("--daemon") => Self::Daemon,
             Some("--js-repl") => Self::JsRepl,
             Some("--agent-bridge") => Self::AgentBridge,
+            Some("--todo-bridge") => Self::TodoBridge,
             Some("--computer-use") => Self::ComputerUse(arguments.get(1).map(String::as_str)),
             _ => Self::Gui,
         }
@@ -92,6 +95,15 @@ fn run_js_repl() {
 fn run_agent_bridge() {
     if let Err(error) = waku::agent_bridge::serve_stdio() {
         eprintln!("Waku agent bridge: {error:#}");
+        std::process::exit(1);
+    }
+}
+
+/// Run the task-list MCP server on stdin/stdout. It needs no daemon credential:
+/// the model's tool call is read back from the provider transcript instead.
+fn run_todo_bridge() {
+    if let Err(error) = waku::todo_bridge::serve_stdio() {
+        eprintln!("Waku todo bridge: {error:#}");
         std::process::exit(1);
     }
 }

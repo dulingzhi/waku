@@ -99,6 +99,7 @@ mod query;
 mod review_diff;
 mod terminal;
 mod theme;
+pub mod todo_bridge;
 mod ui;
 mod updater;
 

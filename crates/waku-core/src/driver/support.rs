@@ -438,6 +438,12 @@ mod tests {
     fn todo_tools_are_plans_not_file_writes() {
         assert_eq!(classify_tool("TodoWrite"), ActivityKind::Plan);
         assert_eq!(classify_tool("todo_write"), ActivityKind::Plan);
+        // Waku's injected MCP server names its tool `mcp__waku_todo__todo_write`;
+        // the prefix must not stop it being read as a plan.
+        assert_eq!(
+            classify_tool("mcp__waku_todo__todo_write"),
+            ActivityKind::Plan
+        );
         assert_eq!(classify_tool("apply_patch"), ActivityKind::FileChange);
         assert_eq!(classify_tool("read"), ActivityKind::FileRead);
         assert_eq!(classify_tool("ReadFile"), ActivityKind::FileRead);

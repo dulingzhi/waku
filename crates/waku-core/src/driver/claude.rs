@@ -259,46 +259,61 @@ const AGENT_BRIDGE_SERVER_NAME: &str = "waku_agents";
 /// the servers it starts, so the daemon's address and the scoped token ride in
 /// the provider's environment, where they never appear in a process listing the
 /// way an argv entry would.
-fn configure_agent_bridge(command: &mut Command, bridge: &crate::driver::AgentBridgeAccess) {
-    // `waku --agent-bridge` rather than a standalone helper: a package ships one
-    // executable, which is the same rule the Computer Use helpers follow.
-    //
-    // Resolved through the Computer Use helper path rather than `current_exe`,
-    // because this runs inside the daemon: a packaged build launches the daemon
-    // as `waku --daemon`, but a development build runs a separate `waku-daemon`
-    // binary whose own path has no `--agent-bridge` mode at all. The daemon
-    // passes `APP_EXECUTABLE_ENV` for exactly this reason, and it is the only
-    // thing that points at the program that can serve the bridge.
+/// The MCP server name Claude sees for the task-list tool.
+const TODO_BRIDGE_SERVER_NAME: &str = "waku_todo";
+
+/// Inject Waku's MCP servers into a Claude session with one `--mcp-config`.
+///
+/// Every session gets `todo_write`, so an agent can keep a task list even when
+/// its endpoint does not offer Claude Code's built-in TodoWrite. A lead session
+/// additionally gets the agent bridge; both servers share this one config
+/// because the CLI accepts a single `--mcp-config` per launch.
+///
+/// The executable is resolved through the Computer Use helper path rather than
+/// `current_exe`, because this runs inside the daemon: a packaged build launches
+/// the daemon as `waku --daemon`, but a development build runs a separate
+/// `waku-daemon` binary whose own path has no helper modes at all. The daemon
+/// passes `APP_EXECUTABLE_ENV` for exactly this reason. Without a path there is
+/// nothing to point Claude at, so no servers are injected — a missing optional
+/// tool must not strand the session.
+fn configure_mcp_servers(
+    command: &mut Command,
+    agent_bridge: Option<&crate::driver::AgentBridgeAccess>,
+) {
     let Ok(executable) = crate::computer_use::host_executable_path() else {
-        // Without a path to that executable there is nothing to point Claude at.
-        // Failing the whole launch would strand a session over an optional tool,
-        // so the bridge is simply absent.
         return;
     };
-    let config = serde_json::json!({
-        "mcpServers": {
-            AGENT_BRIDGE_SERVER_NAME: {
-                "command": executable.display().to_string(),
-                "args": ["--agent-bridge"],
-            }
-        }
-    });
-    command
-        .args(["--mcp-config", &config.to_string()])
-        .env(waku_protocol::DAEMON_ADDRESS_ENV, &bridge.address)
-        .env(waku_protocol::DAEMON_TOKEN_ENV, &bridge.token)
-        // Both ids come from the capability, never from this driver's own
-        // session id: that one is Claude's provider conversation, and a bridge
-        // told to drive *that* is refused by the daemon on every call. Taking
-        // them from one place is what makes the mistake impossible to repeat.
-        .env(
-            waku_protocol::DAEMON_SESSION_ENV,
-            bridge.session_id.to_string(),
-        )
-        .env(
-            waku_protocol::DAEMON_RUNTIME_ENV,
-            bridge.runtime_id.to_string(),
+    let executable = executable.display().to_string();
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        TODO_BRIDGE_SERVER_NAME.to_owned(),
+        serde_json::json!({"command": executable.clone(), "args": ["--todo-bridge"]}),
+    );
+    if let Some(bridge) = agent_bridge {
+        servers.insert(
+            AGENT_BRIDGE_SERVER_NAME.to_owned(),
+            serde_json::json!({"command": executable, "args": ["--agent-bridge"]}),
         );
+        // The credential is not in the MCP config. Claude passes its own
+        // environment to the servers it starts, so the daemon's address and the
+        // scoped token ride there, where they never appear in a process listing.
+        command
+            .env(waku_protocol::DAEMON_ADDRESS_ENV, &bridge.address)
+            .env(waku_protocol::DAEMON_TOKEN_ENV, &bridge.token)
+            // Both ids come from the capability, never from this driver's own
+            // session id: that one is Claude's provider conversation, and a
+            // bridge told to drive *that* is refused by the daemon on every call.
+            .env(
+                waku_protocol::DAEMON_SESSION_ENV,
+                bridge.session_id.to_string(),
+            )
+            .env(
+                waku_protocol::DAEMON_RUNTIME_ENV,
+                bridge.runtime_id.to_string(),
+            );
+    }
+    let config = serde_json::json!({"mcpServers": servers});
+    command.args(["--mcp-config", &config.to_string()]);
 }
 
 fn configure_stream_command(command: &mut Command, mode: RuntimeMode) {
@@ -387,12 +402,9 @@ impl ClaudeDriver {
         } else {
             command.args(["--session-id", &session_id]);
         }
-        // Only a lead conversation is launched with a bridge: the daemon mints
-        // the capability, so an ordinary task has none and never offers these
-        // tools at all.
-        if let Some(bridge) = agent_bridge.as_ref() {
-            configure_agent_bridge(&mut command, bridge);
-        }
+        // Every session gets the task-list server; only a lead conversation is
+        // launched with the agent bridge (the daemon mints that capability).
+        configure_mcp_servers(&mut command, agent_bridge.as_ref());
         // An identity rides on the provider's own system prompt, which is the
         // only place a rule is stated to Claude rather than proposed to it.
         if let Some(prompt) = system_prompt.as_deref()
@@ -2228,14 +2240,14 @@ mod tests {
     #[test]
     fn a_delegating_session_registers_the_agent_bridge() {
         let mut command = Command::new("/usr/bin/true");
-        configure_agent_bridge(
+        configure_mcp_servers(
             &mut command,
-            &crate::driver::AgentBridgeAccess {
+            Some(&crate::driver::AgentBridgeAccess {
                 address: "127.0.0.1:4312".into(),
                 token: "scoped-token".into(),
                 session_id: uuid::Uuid::new_v4(),
                 runtime_id: uuid::Uuid::new_v4(),
-            },
+            }),
         );
 
         let arguments = command
@@ -2254,6 +2266,33 @@ mod tests {
                 .as_str()
                 .is_some_and(|command| !command.is_empty()),
             "the bridge has to name an executable: {server:?}"
+        );
+    }
+
+    /// A plain session has no agent bridge, but it must still get the task-list
+    /// server: that is the point of simulating TodoWrite in Waku rather than
+    /// relying on the endpoint to offer it.
+    #[test]
+    fn a_plain_session_still_registers_the_todo_server() {
+        let mut command = Command::new("/usr/bin/true");
+        configure_mcp_servers(&mut command, None);
+
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let flag = arguments
+            .iter()
+            .position(|argument| argument == "--mcp-config")
+            .expect("Claude only learns about MCP servers through this flag");
+        let config: Value = serde_json::from_str(&arguments[flag + 1]).unwrap();
+        assert_eq!(
+            config["mcpServers"][TODO_BRIDGE_SERVER_NAME]["args"][0],
+            "--todo-bridge"
+        );
+        assert!(
+            config["mcpServers"].get(AGENT_BRIDGE_SERVER_NAME).is_none(),
+            "a plain session must not be handed a bridge it cannot authenticate"
         );
     }
 
@@ -2390,14 +2429,14 @@ mod tests {
         let mut command = Command::new("/usr/bin/true");
         let runtime_id = uuid::Uuid::new_v4();
         let session_id = uuid::Uuid::new_v4();
-        configure_agent_bridge(
+        configure_mcp_servers(
             &mut command,
-            &crate::driver::AgentBridgeAccess {
+            Some(&crate::driver::AgentBridgeAccess {
                 address: "127.0.0.1:4312".into(),
                 token: "scoped-token".into(),
                 session_id,
                 runtime_id,
-            },
+            }),
         );
 
         let rendered = command
@@ -2464,6 +2503,60 @@ mod tests {
             Mutex::new(true),
             ClaudeStreamState::default(),
         )
+    }
+
+    /// The injected `todo_write` MCP tool must land as a plan activity whose
+    /// arguments are the task list the UI reads. This is the whole bridge from
+    /// a model that has no built-in TodoWrite to a visible task list.
+    #[test]
+    fn an_injected_todo_write_becomes_a_parseable_plan_activity() {
+        let (events, event_rx, commands, _command_rx, turn_active, mut state) = harness();
+        let message = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "mcp__waku_todo__todo_write",
+                    "input": {"todos": [
+                        {"content": "Inspect the repo", "status": "completed"},
+                        {"content": "Write the fix", "status": "in_progress", "activeForm": "Writing the fix"}
+                    ]}
+                }]
+            }
+        });
+        handle_message(
+            &message,
+            "session",
+            &events,
+            &commands,
+            &turn_active,
+            true,
+            &mut state,
+        );
+
+        let activity = event_rx
+            .try_iter()
+            .find_map(|event| match event {
+                DriverEvent::RichActivity(item) => Some(item),
+                _ => None,
+            })
+            .expect("the tool call should emit a rich activity");
+        assert_eq!(activity.kind, ActivityKind::Plan);
+        let list = crate::model::TaskList::from_activity_arguments(
+            activity.arguments.as_deref().expect("plan arguments"),
+        )
+        .expect("the arguments should parse as a task list");
+        assert_eq!(list.items.len(), 2);
+        assert_eq!(
+            list.items[0].status,
+            crate::model::TaskListItemStatus::Completed
+        );
+        assert_eq!(
+            list.items[1].status,
+            crate::model::TaskListItemStatus::InProgress
+        );
     }
 
     /// A goal set crosses to the CLI as its own `/goal` command, with the
