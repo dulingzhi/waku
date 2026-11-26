@@ -12,6 +12,13 @@ use waku_protocol::{DAEMON_TOKEN_ENV, DaemonReady, PROTOCOL_VERSION};
 /// This is what `waku --daemon` and the standalone `waku-daemon` binary both
 /// call: one implementation, so the two cannot drift apart.
 pub fn run() -> anyhow::Result<()> {
+    // A native tool writes in the console code page, and on a Chinese Windows
+    // install the default is GBK. A provider CLI decodes those bytes as UTF-8,
+    // so without this every `ping`-style command reaches the transcript as
+    // U+FFFD replacement characters. Establishing a hidden UTF-8 console here —
+    // in the process that owns every provider and every tool they run — is the
+    // only place that fixes it before the bytes are written.
+    let utf8_console = waku_core::windows_console::use_utf8_console();
     // `--daemon` is the mode selector the desktop passes when it spawns its own
     // executable; it says nothing about how to run, so it is stripped here and
     // the rest of the options parse identically either way. Without this the
@@ -112,7 +119,7 @@ pub fn run() -> anyhow::Result<()> {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     waku_protocol::diagnostics::log(format!(
-        "waku-daemon started pid={} address={address} protocol={PROTOCOL_VERSION}",
+        "waku-daemon started pid={} address={address} protocol={PROTOCOL_VERSION} utf8_console={utf8_console}",
         std::process::id()
     ));
     // Only the fingerprint is logged: it is what a user compares against a

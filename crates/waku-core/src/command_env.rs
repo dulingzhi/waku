@@ -94,15 +94,36 @@ pub fn plain_command(program: impl AsRef<OsStr>) -> Command {
 }
 
 fn detach_console(command: &mut Command) {
+    let console_is_utf8 = crate::windows_console::console_is_utf8();
+    apply_console_flags(command, console_is_utf8);
+}
+
+/// The flag decision itself, separated so it can be checked without touching
+/// this process's console or depending on which test ran first.
+fn apply_console_flags(command: &mut Command, console_is_utf8: bool) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
 
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
+        // `CREATE_NO_WINDOW` is what keeps a console child from flashing a
+        // window on screen, but it also gives the child a console of its own at
+        // the system code page, cutting it off from this process's. When this
+        // process holds a UTF-8 console, that inheritance is exactly what makes
+        // native tools emit readable text, so the flag must give way.
+        if let Some(flags) = console_flags(console_is_utf8) {
+            command.creation_flags(flags);
+        }
     }
     #[cfg(not(windows))]
-    let _ = command;
+    let _ = (command, console_is_utf8);
+}
+
+/// The creation flags a child needs, or `None` when it should simply inherit
+/// this process's console.
+#[cfg(windows)]
+fn console_flags(console_is_utf8: bool) -> Option<u32> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    (!console_is_utf8).then_some(CREATE_NO_WINDOW)
 }
 
 /// Spawn `command` with `SIGCHLD` unblocked in the child. On macOS, libdispatch
@@ -885,6 +906,28 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// `CREATE_NO_WINDOW` is what keeps a console child from flashing a window,
+    /// and it also gives that child a console of its own. Once this process
+    /// holds a UTF-8 console, inheriting it is the only thing that makes native
+    /// tools emit UTF-8, so the flag has to be dropped — while a process with no
+    /// such console must keep it, or every provider would pop a window.
+    #[cfg(windows)]
+    #[test]
+    fn the_console_flag_steps_aside_only_for_a_utf8_console() {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        assert_eq!(
+            console_flags(false),
+            Some(CREATE_NO_WINDOW),
+            "a process with no UTF-8 console must keep CREATE_NO_WINDOW"
+        );
+        assert_eq!(
+            console_flags(true),
+            None,
+            "a child of a UTF-8 console must inherit it, not get its own"
+        );
+    }
 
     fn command_search_path(command: &Command) -> Vec<PathBuf> {
         let path = command

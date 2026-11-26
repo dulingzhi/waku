@@ -60,6 +60,7 @@ pub mod terminal;
 pub mod theme;
 pub mod usage;
 pub mod usage_history;
+pub mod windows_console;
 pub mod workspace;
 pub mod worktree;
 
