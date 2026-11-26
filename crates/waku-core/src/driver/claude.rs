@@ -108,7 +108,14 @@ fn claude_goal_prompt(
             let _ = events.send(DriverEvent::GoalUpdated(claude_goal(session_id)));
             None
         }
-        GoalOperation::Clear => Some("/goal clear".to_owned()),
+        GoalOperation::Clear => {
+            // The chip disappears with the goal, and the CLI's own reply
+            // arrives a turn later — report the removal now so the surface
+            // does not keep claiming a goal the user just ended. The
+            // transcript read at turn end corrects this if the CLI refused.
+            let _ = events.send(DriverEvent::GoalUpdated(None));
+            Some("/goal clear".to_owned())
+        }
         GoalOperation::Set {
             objective,
             status,
@@ -136,6 +143,19 @@ fn claude_goal_prompt(
             // condition outright, and doing it in one step keeps the CLI's
             // own supersede path (which the transcript records as one link).
             let _ = replace;
+            // Report the goal as active before the CLI has written anything.
+            // Its judgement lands in the transcript only as the turn settles,
+            // which for a goal can be minutes — a chip that appeared only then
+            // would leave the user with no sign the goal took, and no way to
+            // end it. The turn-end read replaces this with the CLI's own
+            // accounting.
+            let _ = events.send(DriverEvent::GoalUpdated(Some(crate::model::ThreadGoal {
+                objective: objective.to_owned(),
+                status: crate::model::ThreadGoalStatus::Active,
+                token_budget: None,
+                tokens_used: 0,
+                time_used_seconds: 0,
+            })));
             Some(format!("/goal {objective}"))
         }
     }
@@ -408,6 +428,11 @@ impl ClaudeDriver {
                 resume_at,
             }),
         });
+        // A resumed conversation may already hold a goal, and Claude keeps it
+        // in the transcript rather than behind a request. Read it once at
+        // launch so the chip is there the moment the task opens instead of
+        // waiting for the goal's next turn to settle.
+        let _ = events.send(DriverEvent::GoalUpdated(claude_goal(&session_id)));
 
         let (commands, command_rx) = unbounded();
         let auto_approve = mode != RuntimeMode::Ask;
@@ -2505,6 +2530,54 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, DriverEvent::Error(_))),
             "the refusal has to reach the user: {events:?}"
+        );
+    }
+
+    /// Setting a goal reports it at once, before the CLI has judged anything.
+    ///
+    /// The CLI's own record lands as the turn settles, which for a goal can be
+    /// minutes. Waiting for it would leave the user with no sign the goal took
+    /// — and, because the chip is what opens the dialog that ends a goal, no
+    /// way to stop it.
+    #[test]
+    fn setting_a_goal_reports_it_before_the_cli_answers() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let prompt = claude_goal_prompt(
+            &GoalOperation::Set {
+                objective: Some("all tests pass".into()),
+                status: Some(crate::model::ThreadGoalStatus::Active),
+                replace: false,
+            },
+            "a-session",
+            &events,
+        );
+        assert_eq!(prompt.as_deref(), Some("/goal all tests pass"));
+        let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        let reported = events
+            .iter()
+            .find_map(|event| match event {
+                DriverEvent::GoalUpdated(goal) => Some(goal.clone()),
+                _ => None,
+            })
+            .expect("the goal must be visible without waiting for the turn");
+        let goal = reported.expect("an active goal, not an empty one");
+        assert_eq!(goal.objective, "all tests pass");
+        assert_eq!(goal.status, crate::model::ThreadGoalStatus::Active);
+    }
+
+    /// Clearing reports the removal at once, so the chip cannot outlive the
+    /// goal it names.
+    #[test]
+    fn clearing_a_goal_reports_its_removal_before_the_cli_answers() {
+        let (events, event_rx) = crate::driver::test_event_channel();
+        let prompt = claude_goal_prompt(&GoalOperation::Clear, "a-session", &events);
+        assert_eq!(prompt.as_deref(), Some("/goal clear"));
+        let events: Vec<_> = std::iter::from_fn(|| event_rx.try_recv().ok()).collect();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, DriverEvent::GoalUpdated(None))),
+            "the chip has to go: {events:?}"
         );
     }
 

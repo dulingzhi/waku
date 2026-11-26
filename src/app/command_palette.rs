@@ -157,6 +157,7 @@ enum PaletteAction {
     ChooseModel,
     ToggleUsage,
     SetGoal(Uuid),
+    ClearGoal(Uuid),
     CollapseSidebarGroups,
     ToggleSidebar,
     ToggleRightPanel,
@@ -747,11 +748,11 @@ impl Waku {
             "focus composer prompt input message",
             next(),
         ));
-        // A goal belongs to the provider thread, and only Codex exposes one to
-        // set. The composer chip shows it once it exists, but a session with no
-        // goal had no way in at all: `/goal <text>` was the only route, which
-        // requires already knowing the command. This is the same dialog, with
-        // an empty objective to fill in.
+        // A goal belongs to the provider thread. The composer chip shows it
+        // once it exists, but a session with no goal had no way in at all:
+        // `/goal <text>` was the only route, which requires already knowing
+        // the command. This is the same dialog, with an empty objective to
+        // fill in.
         if let Some(session) = self
             .selected_session()
             .filter(|session| crate::composer_complete::provider_supports_goals(session.provider))
@@ -766,6 +767,21 @@ impl Waku {
                 "goal objective target pursue set edit pause resume clear",
                 next(),
             ));
+            // Ending a goal must not require finding the chip first: a goal
+            // that is out of reach — behind a task switch, or on a session
+            // whose chip is scrolled away — would otherwise keep the agent
+            // held to a condition the user can no longer see or stop.
+            if session.thread_goal.is_some() {
+                commands.push(CommandPaletteItem::command(
+                    PaletteSection::Commands,
+                    tr!("command_palette.clear_goal"),
+                    "icons/trash.svg",
+                    None,
+                    PaletteAction::ClearGoal(session_id),
+                    "goal objective target stop cancel clear end remove",
+                    next(),
+                ));
+            }
         }
         for identifier in PaletteIdentifier::ALL {
             if identifier.value(self.selected_session()).is_some() {
@@ -1646,6 +1662,21 @@ impl Waku {
                 {
                     self.settings_page = None;
                     self.request_goal_dialog(session_id, None, false, cx);
+                    let focus = self.composer_focus(cx);
+                    window.focus(&focus, cx);
+                }
+            }
+            PaletteAction::ClearGoal(session_id) => {
+                if self
+                    .selected_session()
+                    .is_some_and(|session| session.id == session_id)
+                {
+                    self.settings_page = None;
+                    self.dispatch_goal_operation(
+                        session_id,
+                        crate::model::GoalOperation::Clear,
+                        cx,
+                    );
                     let focus = self.composer_focus(cx);
                     window.focus(&focus, cx);
                 }
