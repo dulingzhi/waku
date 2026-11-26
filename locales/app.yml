@@ -1603,6 +1603,22 @@ right_panel.files:
   en: Files
 right_panel.diff:
   en: Review
+right_panel.task_list:
+  en: Tasks
+right_panel.task_list_description:
+  en: See the task list the agent is working through
+right_panel.task_list_empty:
+  en: No task list yet
+right_panel.task_list_empty_description:
+  en: When the agent builds a plan or writes todos, its task list appears here.
+right_panel.task_list_progress:
+  en: "%{done} / %{total} done"
+right_panel.task_done:
+  en: Done
+right_panel.task_in_progress:
+  en: In progress
+right_panel.task_pending:
+  en: Pending
 right_panel.history:
   en: History
 right_panel.history_description:

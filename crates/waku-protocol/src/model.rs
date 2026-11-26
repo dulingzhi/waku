@@ -2276,6 +2276,100 @@ pub enum ActivityFileChangeStatus {
     Deleted,
 }
 
+/// State of one item in an agent-generated task list (TodoWrite / plan).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskListItemStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// One item in a task list an agent generated during a session.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListItem {
+    pub content: String,
+    pub status: TaskListItemStatus,
+    /// The provider's own active form, kept so a live item can say what the
+    /// agent is doing rather than only what it plans to do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_form: Option<String>,
+}
+
+/// A task list an agent generated, parsed from a plan activity's payload.
+///
+/// Providers keep the raw list in an activity's arguments (Claude's
+/// `TodoWrite`, Codex's plan items, DeepSeek's `todo/write`). This is the
+/// provider-neutral form the UI reads, so a task list shows its items and
+/// progress instead of a raw JSON blob.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskList {
+    pub items: Vec<TaskListItem>,
+}
+
+impl TaskList {
+    /// Parse the todos payload of a plan activity. Accepts the shapes the
+    /// providers actually emit: `{"todos":[...]}` and a bare `[...]`.
+    ///
+    /// Unknown statuses are treated as pending rather than dropped: a task the
+    /// provider labels with a value this client does not know is still a task,
+    /// and hiding it would make the list lie about its own length.
+    pub fn from_activity_arguments(arguments: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(arguments).ok()?;
+        let todos = value
+            .get("todos")
+            .or_else(|| value.get("items"))
+            .cloned()
+            .unwrap_or(value);
+        let array = todos.as_array()?;
+        let items = array
+            .iter()
+            .filter_map(|item| {
+                let content = item
+                    .get("content")
+                    .or_else(|| item.get("text"))
+                    .and_then(serde_json::Value::as_str)?;
+                if content.trim().is_empty() {
+                    return None;
+                }
+                let raw_status = item
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let status = match raw_status.as_str() {
+                    "in_progress" | "inprogress" | "doing" | "active" => {
+                        TaskListItemStatus::InProgress
+                    }
+                    "completed" | "complete" | "done" => TaskListItemStatus::Completed,
+                    _ => TaskListItemStatus::Pending,
+                };
+                let active_form = item
+                    .get("activeForm")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|form| !form.trim().is_empty())
+                    .map(str::to_owned);
+                Some(TaskListItem {
+                    content: content.to_owned(),
+                    status,
+                    active_form,
+                })
+            })
+            .collect::<Vec<_>>();
+        (!items.is_empty()).then_some(Self { items })
+    }
+
+    /// How many items are done, for the panel's `2 / 5` progress readout.
+    pub fn completed(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.status == TaskListItemStatus::Completed)
+            .count()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, TS)]
 pub struct ActivityFileChange {
     pub path: String,
@@ -3681,6 +3775,46 @@ pub fn compact_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claude_todo_list_is_parsed_with_each_items_status() {
+        let arguments = r#"{"todos":[
+            {"content":"Read the code","status":"completed","activeForm":"Reading the code"},
+            {"content":"Write the fix","status":"in_progress"},
+            {"content":"Run tests","status":"pending"}
+        ]}"#;
+
+        let list = TaskList::from_activity_arguments(arguments).unwrap();
+
+        assert_eq!(list.items.len(), 3);
+        assert_eq!(list.items[0].status, TaskListItemStatus::Completed);
+        assert_eq!(
+            list.items[0].active_form.as_deref(),
+            Some("Reading the code")
+        );
+        assert_eq!(list.items[1].status, TaskListItemStatus::InProgress);
+        assert_eq!(list.items[2].status, TaskListItemStatus::Pending);
+        assert_eq!(list.completed(), 1);
+    }
+
+    #[test]
+    fn a_bare_todo_array_and_unknown_statuses_are_tolerated() {
+        let list = TaskList::from_activity_arguments(
+            r#"[{"content":"a","status":"doing"},{"content":"b","status":"mystery"},{"content":""}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(list.items.len(), 2, "the empty item is skipped");
+        assert_eq!(list.items[0].status, TaskListItemStatus::InProgress);
+        assert_eq!(list.items[1].status, TaskListItemStatus::Pending);
+    }
+
+    #[test]
+    fn activity_arguments_that_are_not_a_task_list_are_rejected() {
+        assert!(TaskList::from_activity_arguments(r#"{"query":"Waku"}"#).is_none());
+        assert!(TaskList::from_activity_arguments("not json").is_none());
+        assert!(TaskList::from_activity_arguments("[]").is_none());
+    }
 
     /// The line count is taken where the output is set, and it counts what a
     /// reader would see.

@@ -57,6 +57,28 @@ fn history_rows<'a>(
         .collect()
 }
 
+/// The most recent task list an agent generated in a conversation.
+///
+/// Providers emit a plan activity each time the list changes (Claude's
+/// `TodoWrite`, Codex's plan items, DeepSeek's `todo/write`), carrying the
+/// whole list in its arguments. The newest one that parses is the current
+/// state of the list; earlier updates are superseded, not separate lists.
+fn latest_task_list(session: &AgentSession) -> Option<TaskList> {
+    session
+        .transcript_blocks
+        .iter()
+        .rev()
+        .flat_map(|block| block.activities.iter().rev())
+        .filter(|activity| activity.kind == ActivityKind::Plan)
+        .filter_map(|activity| {
+            activity
+                .arguments
+                .as_deref()
+                .and_then(TaskList::from_activity_arguments)
+        })
+        .next()
+}
+
 /// Why a listed conversation cannot be continued, in the user's language.
 fn history_unavailable_reason(reason: ProviderSessionUnavailable) -> String {
     match reason {
@@ -1258,6 +1280,7 @@ impl RightPanelSurface {
             }
             Self::Files => tr!("right_panel.files"),
             Self::Diff => tr!("right_panel.diff"),
+            Self::TaskList => tr!("right_panel.task_list"),
             Self::History => tr!("right_panel.history"),
             Self::File(path) => path.rsplit('/').next().unwrap_or(path).to_owned(),
             // The tab names the delegate's own title, falling back to the
@@ -1279,6 +1302,7 @@ impl RightPanelSurface {
             Self::BackgroundWork { key, .. } => work_kind_icon(key.kind),
             Self::Files => "icons/folder.svg",
             Self::Diff => "icons/file-diff.svg",
+            Self::TaskList => "icons/check.svg",
             Self::History => "icons/list.svg",
             Self::File(path) => file_icon_for_path(path),
             Self::Delegate { .. } => "icons/bot.svg",
@@ -1323,6 +1347,7 @@ fn reusable_surface_index(
         RightPanelSurface::Files
         | RightPanelSurface::Diff
         | RightPanelSurface::File(_)
+        | RightPanelSurface::TaskList
         | RightPanelSurface::History => surfaces.iter().position(|surface| surface == requested),
         // One tab per delegate: opening the same agent twice should raise the
         // tab already showing it rather than stack a second copy.
@@ -2243,6 +2268,51 @@ mod tests {
         }
     }
 
+    fn plan_activity(arguments: &str) -> ActivityItem {
+        ActivityItem::new(
+            None,
+            ActivityKind::Plan,
+            String::from("Plan updated"),
+            None,
+            true,
+        )
+        .with_arguments(Some(arguments.to_owned()))
+    }
+
+    #[test]
+    fn the_latest_task_list_wins_over_earlier_updates() {
+        let mut session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        session.transcript_blocks = vec![
+            waku_client::model::TranscriptBlock {
+                after_message: 0,
+                turn_id: None,
+                activities: vec![plan_activity(
+                    r#"{"todos":[{"content":"old","status":"pending"}]}"#,
+                )],
+            },
+            waku_client::model::TranscriptBlock {
+                after_message: 1,
+                turn_id: None,
+                activities: vec![plan_activity(
+                    r#"{"todos":[{"content":"new a","status":"completed"},{"content":"new b","status":"in_progress"}]}"#,
+                )],
+            },
+        ];
+
+        let list = latest_task_list(&session).unwrap();
+
+        assert_eq!(list.items.len(), 2);
+        assert_eq!(list.items[0].content, "new a");
+        assert_eq!(list.items[1].content, "new b");
+        assert_eq!(list.completed(), 1);
+    }
+
+    #[test]
+    fn a_session_without_a_plan_has_no_task_list() {
+        let session = AgentSession::new(Uuid::new_v4(), ProviderKind::Claude);
+        assert!(latest_task_list(&session).is_none());
+    }
+
     #[test]
     fn history_lists_the_current_project_by_default() {
         let sessions = vec![
@@ -2840,6 +2910,9 @@ impl Waku {
             Some(RightPanelSurface::Diff) => self
                 .render_right_panel_diff(width, window, cx)
                 .into_any_element(),
+            Some(RightPanelSurface::TaskList) => {
+                self.render_right_panel_task_list(cx).into_any_element()
+            }
             Some(RightPanelSurface::History) => {
                 self.render_right_panel_history(cx).into_any_element()
             }
@@ -3322,6 +3395,13 @@ impl Waku {
                             tr!("right_panel.history_description"),
                             cx,
                         ),
+                    ))
+                    .child(div().mt(px(8.0)).w_full().flex().gap(px(8.0)).child(
+                        self.render_right_panel_card(
+                            RightPanelSurface::TaskList,
+                            tr!("right_panel.task_list_description"),
+                            cx,
+                        ),
                     )),
             )
     }
@@ -3377,6 +3457,195 @@ impl Waku {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_right_panel_surface(surface.clone(), cx);
             }))
+    }
+
+    fn render_right_panel_task_list(&self, cx: &mut Context<Self>) -> Div {
+        let theme = Theme::current(cx);
+        let session = self.selected_session();
+        let title = session
+            .map(|session| {
+                session
+                    .auto_title
+                    .clone()
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| session.title.clone())
+            })
+            .unwrap_or_default();
+        let task_list = session.and_then(latest_task_list);
+
+        let header = div()
+            .h(px(42.0))
+            .flex_none()
+            .px(px(16.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(icon("icons/check.svg", 13.0, theme.text_tertiary))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(sp(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_secondary)
+                    .child(title),
+            );
+
+        let Some(task_list) = task_list else {
+            return div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(
+                    div().flex_1().min_h_0().child(
+                        div()
+                            .m(px(16.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(theme.border_strong)
+                            .bg(theme.composer)
+                            .p(px(12.0))
+                            .child(
+                                div()
+                                    .text_size(sp(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(tr!("right_panel.task_list_empty")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(6.0))
+                                    .text_size(sp(12.0))
+                                    .line_height(sp(15.0))
+                                    .text_color(theme.text_tertiary)
+                                    .child(tr!("right_panel.task_list_empty_description")),
+                            ),
+                    ),
+                );
+        };
+
+        let total = task_list.items.len();
+        let completed = task_list.completed();
+        let progress = div()
+            .px(px(16.0))
+            .py(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(6.0))
+                    .rounded(px(3.0))
+                    .bg(theme.overlay)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(gpui::relative(completed as f32 / total.max(1) as f32))
+                            .rounded(px(3.0))
+                            .bg(theme.accent),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(sp(11.5))
+                    .text_color(theme.text_tertiary)
+                    .child(tr!(
+                        "right_panel.task_list_progress",
+                        done = completed,
+                        total = total
+                    )),
+            );
+
+        let mut list = div().flex().flex_col().py(px(6.0));
+        for item in task_list.items {
+            let (icon_path, color, label) = match item.status {
+                TaskListItemStatus::Completed => (
+                    "icons/check.svg",
+                    theme.success,
+                    tr!("right_panel.task_done"),
+                ),
+                TaskListItemStatus::InProgress => (
+                    "icons/loader-circle.svg",
+                    theme.accent,
+                    tr!("right_panel.task_in_progress"),
+                ),
+                TaskListItemStatus::Pending => (
+                    "icons/hourglass.svg",
+                    theme.text_ghost,
+                    tr!("right_panel.task_pending"),
+                ),
+            };
+            let done = item.status == TaskListItemStatus::Completed;
+            let text = if done {
+                item.content
+            } else {
+                item.active_form.unwrap_or_else(|| item.content.clone())
+            };
+            list = list.child(
+                div()
+                    .mx(px(8.0))
+                    .px(px(10.0))
+                    .py(px(7.0))
+                    .rounded(px(6.0))
+                    .flex()
+                    .items_start()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .pt(px(1.0))
+                            .flex_none()
+                            .child(icon(icon_path, 13.0, color)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_size(sp(12.5))
+                                    .line_height(sp(16.0))
+                                    .text_color(if done {
+                                        theme.text_tertiary
+                                    } else {
+                                        theme.text
+                                    })
+                                    .child(text),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.0))
+                                    .text_size(sp(11.0))
+                                    .text_color(color)
+                                    .child(label),
+                            ),
+                    ),
+            );
+        }
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(header)
+            .child(progress)
+            .child(
+                div()
+                    .id("right-panel-task-list-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(list),
+            )
     }
 
     /// Read the native conversations the History surface lists.
